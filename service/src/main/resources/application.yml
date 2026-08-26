@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: task-api
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/taskdb}
+    username: ${DB_USERNAME:taskuser}
+    password: ${DB_PASSWORD:taskpassword}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        format_sql: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+jwt:
+  secret: ${JWT_SECRET}
+  expiration-ms: ${JWT_EXPIRATION_MS:86400000}
+
+azure:
+  key-vault-uri: ${AZURE_KEY_VAULT_URI:}
+
+# Application Insights is configured via:
+#   APPLICATIONINSIGHTS_CONNECTION_STRING
+#   OTEL_SERVICE_NAME
+#   OTEL_RESOURCE_ATTRIBUTES

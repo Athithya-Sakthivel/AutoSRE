@@ -23,13 +23,12 @@
 hs_err_pid*
 replay_pid*
 
-
+target
 
 .env
 .env.example
 .terraform
 temp.md
-
 .terraform
 plans
 .backend

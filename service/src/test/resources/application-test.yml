@@ -1,0 +1,25 @@
+spring:
+  flyway:
+    enabled: true
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  datasource:
+    # These are overridden by @DynamicPropertySource in BaseIntegrationTest.
+    url: jdbc:postgresql://localhost:5432/taskdb
+    username: taskuser
+    password: taskpassword
+
+logging:
+  level:
+    root: WARN
+    org.springframework: WARN
+    org.hibernate: WARN
+    org.testcontainers: WARN
+    com.zaxxer.hikari: WARN
+    org.flywaydb: WARN
+    com.prod.taskapi: INFO
+    
+jwt:
+  secret: test-secret-key-for-tests-12345678901234567890
+  expiration-ms: 3600000

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM mcr.microsoft.com/devcontainers/java:3.0.0-25-bookworm
+FROM mcr.microsoft.com/devcontainers/java:3.0.0-21-bookworm
 
 ARG MAVEN_VERSION=3.9.16
 ARG AZURE_CLI_VERSION=2.88.0
