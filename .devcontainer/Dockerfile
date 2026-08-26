@@ -8,6 +8,7 @@ ARG OPENTOFU_VERSION=1.12.2
 ARG KUBECTL_VERSION=v1.36.4
 ARG KIND_VERSION=v0.32.0
 ARG HELM_VERSION=v4.2.4
+ARG K6_VERSION=v2.2.0
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
@@ -140,5 +141,20 @@ RUN set -eux; \
         /usr/local/bin/helm; \
     rm -rf /tmp/helm.tar.gz "/tmp/linux-${arch}"
 
-
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) arch="amd64" ;; \
+        arm64) arch="arm64" ;; \
+        *) echo "Unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL \
+        "https://github.com/grafana/k6/releases/download/${K6_VERSION}/k6-${K6_VERSION}-linux-${arch}.tar.gz" \
+        -o /tmp/k6.tar.gz; \
+    tar -xzf /tmp/k6.tar.gz -C /tmp; \
+    install -m 0755 \
+        "/tmp/k6-${K6_VERSION}-linux-${arch}/k6" \
+        /usr/local/bin/k6; \
+    rm -rf /tmp/k6.tar.gz "/tmp/k6-${K6_VERSION}-linux-${arch}"; \
+    k6 version
+    
 WORKDIR /workspace
