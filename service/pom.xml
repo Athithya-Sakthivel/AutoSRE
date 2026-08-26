@@ -27,10 +27,21 @@
         <testcontainers.version>2.0.5</testcontainers.version>
         <postgresql.version>42.7.11</postgresql.version>
         <maven-compiler-plugin.version>3.14.1</maven-compiler-plugin.version>
+        <mockito.version>5.21.0</mockito.version>
+        <spring-cloud-azure.version>5.21.0</spring-cloud-azure.version>
+
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <!-- Spring Cloud Azure BOM -->
+            <dependency>
+                <groupId>com.azure.spring</groupId>
+                <artifactId>spring-cloud-azure-dependencies</artifactId>
+                <version>${spring-cloud-azure.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
 
             <!-- Force Jackson 2.21.4 for all modules -->
             <dependency>
@@ -145,7 +156,12 @@
             <groupId>com.azure</groupId>
             <artifactId>azure-identity</artifactId>
         </dependency>
-
+        <!-- Azure Key Vault property source -->
+        <dependency>
+            <groupId>com.azure.spring</groupId>
+            <artifactId>spring-cloud-azure-starter-keyvault-secrets</artifactId>
+        </dependency>
+        
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
@@ -170,6 +186,18 @@
 
     <build>
         <plugins>
+            <!-- Configure Mockito agent to avoid dynamic self-attachment warning -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <argLine>
+                        -javaagent:${settings.localRepository}/org/mockito/mockito-core/${mockito.version}/mockito-core-${mockito.version}.jar
+                        -XX:+EnableDynamicAgentLoading
+                    </argLine>
+                </configuration>
+            </plugin>
+
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

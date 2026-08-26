@@ -1,15 +1,20 @@
 spring:
+  cloud:
+    azure:
+      keyvault:
+        secret:
+          enabled: false
   flyway:
     enabled: true
   jpa:
     hibernate:
       ddl-auto: validate
   datasource:
-    # These are overridden by @DynamicPropertySource in BaseIntegrationTest.
     url: jdbc:postgresql://localhost:5432/taskdb
     username: taskuser
     password: taskpassword
 
+  
 logging:
   level:
     root: WARN

@@ -1,11 +1,18 @@
 spring:
   application:
     name: task-api
+  cloud:
+    azure:
+      keyvault:
+        secret:
+          property-sources:
+            - endpoint: ${AZURE_KEY_VAULT_URI}
   datasource:
-    url: ${DB_URL:jdbc:postgresql://localhost:5432/taskdb}
-    username: ${DB_USERNAME:taskuser}
-    password: ${DB_PASSWORD:taskpassword}
+    url: ${DatabaseUrl}
+    username: ${DatabaseUsername}
+    password: ${DatabasePassword}
   jpa:
+    open-in-view: false
     hibernate:
       ddl-auto: validate
     properties:
@@ -28,14 +35,25 @@ management:
       probes:
         enabled: true
 
+  
+logging:
+  level:
+    root: WARN
+    org.springframework: WARN
+    org.hibernate: WARN
+    org.testcontainers: WARN
+    com.zaxxer.hikari: WARN
+    org.flywaydb: WARN
+    com.prod.taskapi: INFO
+
 jwt:
-  secret: ${JWT_SECRET}
+  secret: ${JwtSecret}
   expiration-ms: ${JWT_EXPIRATION_MS:86400000}
 
 azure:
-  key-vault-uri: ${AZURE_KEY_VAULT_URI:}
+  key-vault-uri: ${AZURE_KEY_VAULT_URI}
 
-# Application Insights is configured via:
-#   APPLICATIONINSIGHTS_CONNECTION_STRING
-#   OTEL_SERVICE_NAME
-#   OTEL_RESOURCE_ATTRIBUTES
+# Application Insights connection string is provided by:
+#   spring.cloud.azure.keyvault.secret.property-sources[0]
+#   (secret name: ApplicationInsightsConnectionString)
+# and is consumed automatically by the Application Insights agent.
