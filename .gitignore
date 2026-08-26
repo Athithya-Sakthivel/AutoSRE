@@ -42,6 +42,8 @@ tfplan
 .env
 data
 .tf_outputs
-src/workloads/serving/.tf_serving_outputs
+.tf_serving_outputs
 .repos
 temp.md
+output.txt
+temp.txt

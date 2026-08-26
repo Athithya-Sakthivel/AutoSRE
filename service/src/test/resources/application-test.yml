@@ -1,9 +1,14 @@
 spring:
+  config:
+    activate:
+      on-profile: test
   cloud:
     azure:
       keyvault:
         secret:
           enabled: false
+          property-sources:
+            - enabled: false
   flyway:
     enabled: true
   jpa:
@@ -14,17 +19,11 @@ spring:
     username: taskuser
     password: taskpassword
 
-  
-logging:
-  level:
-    root: WARN
-    org.springframework: WARN
-    org.hibernate: WARN
-    org.testcontainers: WARN
-    com.zaxxer.hikari: WARN
-    org.flywaydb: WARN
-    com.prod.taskapi: INFO
-    
 jwt:
   secret: test-secret-key-for-tests-12345678901234567890
   expiration-ms: 3600000
+
+logging:
+  level:
+    root: WARN
+    com.prod.taskapi: INFO

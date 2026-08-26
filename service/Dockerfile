@@ -16,7 +16,7 @@ FROM eclipse-temurin:21-jre-alpine
 RUN apk add --no-cache curl
 
 # Application Insights Java agent version
-ENV APPINSIGHTS_AGENT_VERSION=3.7.8
+ENV APPINSIGHTS_AGENT_VERSION=3.7.9
 
 # Download Application Insights agent
 RUN wget -O /opt/applicationinsights-agent.jar \
