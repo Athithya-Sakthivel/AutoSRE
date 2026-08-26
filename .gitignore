@@ -22,3 +22,27 @@
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+
+
+.env
+.env.example
+.terraform
+temp.md
+
+.terraform
+plans
+.backend
+.terraform
+terraform.tfstate
+postgres
+terraform.tfstate.backup
+errored.tfstate
+tfplan
+.plans
+.env
+data
+.tf_outputs
+src/workloads/serving/.tf_serving_outputs
+.repos
+temp.md
