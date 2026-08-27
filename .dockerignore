@@ -57,3 +57,14 @@ dist/
 npm-debug.log*
 tsconfig.tsbuildinfo
 .DS_Store
+
+node_modules
+npm-debug.log*
+dist
+.vite
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+Dockerfile

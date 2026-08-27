@@ -1,10 +1,10 @@
 set -euo pipefail
 
 CLUSTER=kind
-K8S_IMAGE=kindest/node:v1.32.2
+K8S_IMAGE=docker.io/kindest/node:v1.32.2@sha256:142f543559cc55d64e1ab9341df08e5ced84bd2e893736da8f51320f26f5950b
 ARGO_VERSION=v1.9.1
 
-kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+# kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
 kind create cluster --name "$CLUSTER" --image "$K8S_IMAGE" --wait 5m
 kind export kubeconfig --name "$CLUSTER"
 
