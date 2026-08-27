@@ -1,5 +1,5 @@
 {
-  "name": "aks-canary-task-api",
+  "name": "aks-canary-platform",
   "build": {
     "dockerfile": "Dockerfile",
     "context": "."
