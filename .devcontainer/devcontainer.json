@@ -1,5 +1,5 @@
 {
-  "name": "springboot-aks-production-platform",
+  "name": "aks-canary-task-api",
   "build": {
     "dockerfile": "Dockerfile",
     "context": "."

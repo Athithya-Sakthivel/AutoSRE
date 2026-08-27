@@ -57,3 +57,5 @@ dist/
 npm-debug.log*
 tsconfig.tsbuildinfo
 .DS_Store
+istio-1.30.3
+.istio
