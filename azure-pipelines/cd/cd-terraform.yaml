@@ -1,0 +1,193 @@
+trigger: none
+
+resources:
+  pipelines:
+    - pipeline: ciTerraform
+      source: ci-terraform
+      branch: refs/heads/main
+      trigger: none
+
+variables:
+  - group: terraform-vars
+  - name: TF_WORKING_DIR
+    value: "$(Build.SourcesDirectory)/infra/terraform/main"
+  - name: TF_ENV
+    value: "staging"
+  - name: TOFU_VERSION
+    value: "1.12.6"
+  - name: TOFU_SHA256
+    value: "5dc43da4f750f33873dc25e94587128709e819e544b7be9016b255316153c3a8"
+
+pool:
+  vmImage: "ubuntu-24.04"
+
+workspace:
+  clean: all
+
+stages:
+  - stage: apply
+    displayName: "Apply selected OpenTofu plan"
+    jobs:
+      - deployment: apply_terraform
+        displayName: "Apply exact OpenTofu plan"
+        environment: "staging"
+        workspace:
+          clean: all
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: none
+
+                - checkout: self
+                  clean: true
+                  fetchDepth: 1
+                  persistCredentials: false
+                  submodules: false
+                  lfs: false
+
+                - bash: |
+                    set -euo pipefail
+
+                    commit='$(resources.pipeline.ciTerraform.sourceCommit)'
+
+                    test -n "$commit"
+
+                    git -c "http.extraheader=AUTHORIZATION: bearer $SYSTEM_ACCESSTOKEN" \
+                      fetch --no-tags --depth=1 origin "$commit"
+
+                    git checkout --detach "$commit"
+
+                    test "$(git rev-parse HEAD)" = "$commit"
+                  displayName: "Checkout exact CI plan commit"
+                  env:
+                    SYSTEM_ACCESSTOKEN: "$(System.AccessToken)"
+
+                - download: ciTerraform
+                  artifact: terraform-plan
+
+                - bash: |
+                    set -euo pipefail
+
+                    metadata='$(Pipeline.Workspace)/ciTerraform/terraform-plan/plan-metadata.json'
+                    plan='$(Pipeline.Workspace)/ciTerraform/terraform-plan/tfplan'
+
+                    test -s "$metadata"
+                    test -s "$plan"
+
+                    expected_commit='$(resources.pipeline.ciTerraform.sourceCommit)'
+                    expected_run_id='$(resources.pipeline.ciTerraform.runID)'
+
+                    attested_commit="$(
+                      jq -er '.commit' "$metadata"
+                    )"
+
+                    run_id="$(
+                      jq -er '.pipelineRunId' "$metadata"
+                    )"
+
+                    tofu_version="$(
+                      jq -er '.openTofuVersion' "$metadata"
+                    )"
+
+                    environment="$(
+                      jq -er '.environment' "$metadata"
+                    )"
+
+                    plan_file="$(
+                      jq -er '.planFile' "$metadata"
+                    )"
+
+                    test "$attested_commit" = "$expected_commit"
+                    test "$run_id" = "$expected_run_id"
+                    test "$tofu_version" = '$(TOFU_VERSION)'
+                    test "$environment" = '$(TF_ENV)'
+                    test "$plan_file" = 'tfplan'
+                  displayName: "Verify OpenTofu plan provenance"
+
+                - bash: |
+                    set -euo pipefail
+
+                    command -v az
+                    command -v curl
+                    command -v jq
+                    command -v sha256sum
+                    command -v unzip
+                    command -v python3
+                  displayName: "Preflight hosted agent"
+
+                - bash: |
+                    set -euo pipefail
+
+                    version='$(TOFU_VERSION)'
+                    work='$(Agent.TempDirectory)/opentofu'
+                    archive="$work/tofu_${version}_linux_amd64.zip"
+
+                    mkdir -p "$work/bin"
+
+                    curl \
+                      --fail \
+                      --silent \
+                      --show-error \
+                      --location \
+                      --retry 3 \
+                      --retry-all-errors \
+                      --connect-timeout 10 \
+                      --proto '=https' \
+                      --tlsv1.2 \
+                      -o "$archive" \
+                      "https://github.com/opentofu/opentofu/releases/download/v${version}/tofu_${version}_linux_amd64.zip"
+
+                    printf '%s  %s\n' '$(TOFU_SHA256)' "$archive" |
+                      sha256sum --check --status
+
+                    unzip -q "$archive" -d "$work/bin"
+                    test -x "$work/bin/tofu"
+
+                    echo "##vso[task.prependpath]$work/bin"
+
+                    actual="$("$work/bin/tofu" version -json | jq -r '.terraform_version')"
+                    test "$actual" = "$version"
+
+                    "$work/bin/tofu" version
+                  displayName: "Install pinned OpenTofu"
+
+                - task: AzureCLI@2
+                  displayName: "Apply exact reviewed plan"
+                  inputs:
+                    azureSubscription: "azdo-oidc-cd"
+                    addSpnToEnvironment: true
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+
+                      cd '$(TF_WORKING_DIR)'
+
+                      export ARM_USE_OIDC='true'
+                      export ARM_CLIENT_ID="$servicePrincipalId"
+                      export ARM_TENANT_ID="$tenantId"
+                      export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
+
+                      export ARM_OIDC_REQUEST_TOKEN="$SYSTEM_ACCESSTOKEN"
+                      export ARM_OIDC_REQUEST_URL="$SYSTEM_OIDCREQUESTURI"
+
+                      if [[ -n "${AZURESUBSCRIPTION_SERVICE_CONNECTION_ID:-}" ]]; then
+                        export ARM_ADO_PIPELINE_SERVICE_CONNECTION_ID="$AZURESUBSCRIPTION_SERVICE_CONNECTION_ID"
+                      fi
+
+                      export TF_IN_AUTOMATION='true'
+                      export TF_INPUT='false'
+
+                      tofu init \
+                        -input=false \
+                        -lock-timeout=5m \
+                        -lockfile=readonly
+
+                      tofu apply \
+                        -input=false \
+                        -auto-approve \
+                        '$(Pipeline.Workspace)/ciTerraform/terraform-plan/tfplan'
+                  env:
+                    SYSTEM_ACCESSTOKEN: "$(System.AccessToken)"
+                    SYSTEM_OIDCREQUESTURI: "$(System.OidcRequestUri)"

@@ -1,0 +1,168 @@
+trigger: none
+
+resources:
+  pipelines:
+    - pipeline: ciFrontend
+      source: ci-frontend
+      trigger:
+        branches:
+          include:
+            - main
+
+variables:
+  - group: terraform-vars
+  - name: frontendNamespace
+    value: "default"
+  - name: frontendContainerName
+    value: "frontend"
+
+pool:
+  vmImage: "ubuntu-24.04"
+
+workspace:
+  clean: all
+
+stages:
+  - stage: build
+    displayName: "Build, scan and push frontend image"
+    condition: and(succeeded(),
+      eq(variables['resources.pipeline.ciFrontend.sourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: build_push
+        displayName: "Build / Trivy scan / push"
+        steps:
+          - checkout: self
+            clean: true
+            fetchDepth: 1
+            persistCredentials: false
+            submodules: false
+            lfs: false
+
+          - bash: |
+              set -euo pipefail
+
+              commit='$(resources.pipeline.ciFrontend.sourceCommit)'
+
+              test -n "$commit"
+
+              git -c "http.extraheader=AUTHORIZATION: bearer $SYSTEM_ACCESSTOKEN" \
+                fetch --no-tags --depth=1 origin "$commit"
+
+              git checkout --detach "$commit"
+
+              test "$(git rev-parse HEAD)" = "$commit"
+            displayName: "Checkout exact CI source commit"
+            env:
+              SYSTEM_ACCESSTOKEN: "$(System.AccessToken)"
+
+          - download: ciFrontend
+            artifact: ci-attestation
+
+          - bash: |
+              set -euo pipefail
+
+              expected='$(resources.pipeline.ciFrontend.sourceCommit)'
+              attested="$(tr -d '\r\n' < '$(Pipeline.Workspace)/ciFrontend/ci-attestation/source-commit.txt')"
+              run_id="$(tr -d '\r\n' < '$(Pipeline.Workspace)/ciFrontend/ci-attestation/pipeline-run-id.txt')"
+
+              test "$attested" = "$expected"
+              test "$run_id" = "$(resources.pipeline.ciFrontend.runID)"
+            displayName: "Verify CI attestation"
+
+          - template: azure-pipelines/templates/docker-build-push.yaml
+            parameters:
+              dockerfilePath: "services/frontend/Dockerfile"
+              contextPath: "services/frontend"
+              imageRepository: "frontend"
+              imageTag: "$(resources.pipeline.ciFrontend.sourceCommit)"
+              sourceCommit: "$(resources.pipeline.ciFrontend.sourceCommit)"
+              sourcePipelineRunId: "$(resources.pipeline.ciFrontend.runID)"
+              containerRegistry: "$(containerRegistry)"
+              azureSubscription: "azdo-oidc-cd"
+
+  - stage: deploy
+    displayName: "Rolling deploy frontend"
+    dependsOn: build
+    condition: succeeded()
+    jobs:
+      - deployment: rolling_deploy
+        displayName: "Rolling update frontend"
+        environment: "staging"
+        workspace:
+          clean: all
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: none
+
+                - checkout: self
+                  clean: true
+                  fetchDepth: 1
+                  persistCredentials: false
+                  submodules: false
+                  lfs: false
+
+                - bash: |
+                    set -euo pipefail
+
+                    commit='$(resources.pipeline.ciFrontend.sourceCommit)'
+
+                    test -n "$commit"
+
+                    git -c "http.extraheader=AUTHORIZATION: bearer $SYSTEM_ACCESSTOKEN" \
+                      fetch --no-tags --depth=1 origin "$commit"
+
+                    git checkout --detach "$commit"
+
+                    test "$(git rev-parse HEAD)" = "$commit"
+                  displayName: "Checkout exact CI source commit"
+                  env:
+                    SYSTEM_ACCESSTOKEN: "$(System.AccessToken)"
+
+                - download: current
+                  artifact: image-metadata
+
+                - bash: |
+                    set -euo pipefail
+
+                    metadata='$(Pipeline.Workspace)/image-metadata/image.json'
+                    expected_commit='$(resources.pipeline.ciFrontend.sourceCommit)'
+                    expected_run_id='$(resources.pipeline.ciFrontend.runID)'
+                    expected_repository='frontend'
+                    expected_registry='$(containerRegistry)'
+
+                    test -s "$metadata"
+
+                    source_commit="$(jq -er '.sourceCommit' "$metadata")"
+                    source_run_id="$(jq -er '.sourcePipelineRunId' "$metadata")"
+                    repository="$(jq -er '.repository' "$metadata")"
+                    registry="$(jq -er '.registry' "$metadata")"
+                    tag="$(jq -er '.tag' "$metadata")"
+                    digest="$(jq -er '.digest' "$metadata")"
+
+                    test "$source_commit" = "$expected_commit"
+                    test "$source_run_id" = "$expected_run_id"
+                    test "$repository" = "$expected_repository"
+                    test "$registry" = "$expected_registry"
+                    test "$tag" = "$expected_commit"
+                    [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+                    image="${registry}.azurecr.io/${repository}@${digest}"
+
+                    echo "Using immutable image digest: $image"
+                    echo "##vso[task.setvariable variable=IMAGE_FULL_NAME]$image"
+                  displayName: "Verify image provenance and resolve digest"
+
+                - template: azure-pipelines/templates/frontend-deploy.yaml
+                  parameters:
+                    imageFullName: "$(IMAGE_FULL_NAME)"
+                    serviceName: "frontend"
+                    containerName: "$(frontendContainerName)"
+                    namespace: "$(frontendNamespace)"
+                    manifests: |
+                      services/frontend/k8s/deployment.yaml
+                      services/frontend/k8s/service.yaml
+                    aksClusterName: "$(aksClusterName)"
+                    aksResourceGroup: "$(aksResourceGroup)"
+                    azureSubscription: "azdo-oidc-cd"

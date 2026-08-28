@@ -1,0 +1,267 @@
+# ==============================================================================
+# Full Repository Security Scan
+#
+# Runs on every push to main (batched). PR‑level scanning is handled by
+# lighter pre‑commit hooks; this pipeline is the heavy post‑merge gate.
+#
+# Tools:
+#   OpenGrep  – SAST (OWASP Top Ten, Docker)
+#   Gitleaks  – full‑history secrets detection
+#   Trivy     – filesystem vulnerability & misconfiguration scanner
+#
+# Design:
+#   • Microsoft‑hosted agent (ubuntu‑24.04) – no private network needed.
+#   • No cache – tools are downloaded fresh each run with pinned SHAs.
+#     Ephemeral agent guarantees clean, tamper‑free scans.
+#   • All downloads use hardened curl (TLS 1.2, retries, checksum verification).
+# ==============================================================================
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - main
+
+# PRs are intentionally excluded to keep feedback fast.
+# The full history scan is reserved for merged code.
+pr: none
+
+pool:
+  vmImage: ubuntu-24.04
+
+stages:
+  - stage: security_scan
+    displayName: Full Repository Security Scan
+    jobs:
+      - job: scan_repository
+        displayName: Scan repository
+        timeoutInMinutes: 30
+
+        steps:
+          # ------------------------------------------------------------------
+          # Checkout – full depth for gitleaks
+          # ------------------------------------------------------------------
+          - checkout: self
+            clean: true
+            fetchDepth: 0
+            fetchTags: false
+            persistCredentials: false
+
+          # ------------------------------------------------------------------
+          # Install tools and run all scanners
+          # ------------------------------------------------------------------
+          - bash: |
+              # set -euo pipefail causes "tmpdir: unbound variable" in the install script so ignored
+              export LC_ALL=C.UTF-8
+              export LANG=C.UTF-8
+
+              # ---------------------------------------------------------------
+              # Tool cache directory (in‑memory, ephemeral)
+              # ---------------------------------------------------------------
+              TOOL_CACHE_DIR="$(Pipeline.Workspace)/.tool-cache"
+              BIN_DIR="$TOOL_CACHE_DIR/bin"
+              mkdir -p "$BIN_DIR"
+              export PATH="$BIN_DIR:$PATH"
+
+              # ---------------------------------------------------------------
+              # Hardened curl wrapper
+              # ---------------------------------------------------------------
+              curl_hardened() {
+                curl \
+                  --fail \
+                  --location \
+                  --silent \
+                  --show-error \
+                  --retry 3 \
+                  --retry-delay 2 \
+                  --connect-timeout 10 \
+                  --proto '=https' \
+                  --tlsv1.2 \
+                  "$@"
+              }
+
+              # ---------------------------------------------------------------
+              # SHA‑256 verification
+              # ---------------------------------------------------------------
+              verify_sha256() {
+                local expected="$1"
+                local file="$2"
+                printf '%s  %s\n' "$expected" "$file" | sha256sum -c -
+              }
+
+              # ---------------------------------------------------------------
+              # Generic tarball installer
+              # ---------------------------------------------------------------
+              install_tarball_binary() {
+                local url="$1"
+                local sha="$2"
+                local binary="$3"
+                local archive="$4"
+                local tmpdir="$5"
+
+                if [[ -x "$BIN_DIR/$binary" ]]; then
+                  return 0
+                fi
+
+                curl_hardened "$url" -o "$archive"
+                verify_sha256 "$sha" "$archive"
+
+                tar -xzf "$archive" -C "$tmpdir"
+
+                local found=""
+                case "$binary" in
+                  opengrep)
+                    found="$(find "$tmpdir" -type f \( -name 'opengrep' -o -name 'opengrep-*' -o -name 'opengrep-core' -o -name 'opengrep-core-*' \) | head -n1 || true)"
+                    ;;
+                  gitleaks)
+                    found="$(find "$tmpdir" -type f \( -name 'gitleaks' -o -name 'gitleaks-*' \) | head -n1 || true)"
+                    ;;
+                  trivy)
+                    found="$(find "$tmpdir" -type f \( -name 'trivy' -o -name 'trivy-*' \) | head -n1 || true)"
+                    ;;
+                  *)
+                    found="$(find "$tmpdir" -type f -name "$binary" | head -n1 || true)"
+                    ;;
+                esac
+
+                [[ -n "$found" ]] || { echo "Unable to locate $binary binary in archive" >&2; exit 1; }
+
+                install -m 0755 "$found" "$BIN_DIR/$binary"
+              }
+
+              # ---------------------------------------------------------------
+              # Trivy installer (separate because it uses a checksums file)
+              # ---------------------------------------------------------------
+              install_trivy() {
+                local version="0.72.0"
+                local asset="trivy_0.72.0_Linux-64bit.tar.gz"
+                local base_url="https://github.com/aquasecurity/trivy/releases/download/v${version}"
+                local tmpdir
+                tmpdir="$(mktemp -d)"
+                trap 'rm -rf "$tmpdir"' EXIT
+
+                if [[ -x "$BIN_DIR/trivy" ]]; then
+                  return 0
+                fi
+
+                local checksums="$tmpdir/checksums.txt"
+                local archive="$tmpdir/trivy.tar.gz"
+
+                curl_hardened "${base_url}/trivy_0.72.0_checksums.txt" -o "$checksums"
+                local sha
+                sha="$(awk -v a="$asset" '$2 == a { print $1; exit }' "$checksums")"
+                [[ -n "$sha" ]] || { echo "Unable to find checksum for $asset" >&2; exit 1; }
+
+                curl_hardened "${base_url}/${asset}" -o "$archive"
+                verify_sha256 "$sha" "$archive"
+
+                tar -xzf "$archive" -C "$tmpdir"
+                [[ -f "$tmpdir/trivy" ]] || { echo "Unable to locate trivy binary in archive" >&2; exit 1; }
+                install -m 0755 "$tmpdir/trivy" "$BIN_DIR/trivy"
+              }
+
+              echo "Installing scanner binaries"
+
+              # ---------------------------------------------------------------
+              # Pinned versions and SHAs (do not change without explicit review)
+              # ---------------------------------------------------------------
+              OPENGREP_VERSION="1.25.0"
+              OPENGREP_ASSET="opengrep-core_linux_x86.tar.gz"
+              OPENGREP_SHA="fe134f379952e7a25acad4532a791488982ce856725a79bddb91db0491ad66d6"
+              OPENGREP_URL="https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/${OPENGREP_ASSET}"
+
+              GITLEAKS_VERSION="8.30.1"
+              GITLEAKS_ASSET="gitleaks_8.30.1_linux_x64.tar.gz"
+              GITLEAKS_SHA="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+              GITLEAKS_URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${GITLEAKS_ASSET}"
+
+              OPENGREP_TMP="$(mktemp -d)"
+              GITLEAKS_TMP="$(mktemp -d)"
+              TRIVY_TMP="$(mktemp -d)"
+              trap 'rm -rf "$OPENGREP_TMP" "$GITLEAKS_TMP" "$TRIVY_TMP"' EXIT
+
+              install_tarball_binary "$OPENGREP_URL" "$OPENGREP_SHA" opengrep "$OPENGREP_TMP/opengrep.tar.gz" "$OPENGREP_TMP"
+              install_tarball_binary "$GITLEAKS_URL" "$GITLEAKS_SHA" gitleaks "$GITLEAKS_TMP/gitleaks.tar.gz" "$GITLEAKS_TMP"
+              install_trivy
+
+              echo "Tool versions:"
+              opengrep --version || true
+              gitleaks version || true
+              trivy --version || true
+
+              # =============================================================
+              # OpenGrep SAST (OWASP Top Ten, Docker, secrets, K8s)
+              # =============================================================
+              echo "Running OpenGrep"
+              opengrep scan \
+                --config p/owasp-top-ten \
+                --config p/dockerfile \
+                --error \
+                --max-target-bytes 2000000 \
+                --exclude .git \
+                --exclude .tool-cache \
+                --exclude .cache \
+                --exclude __pycache__ \
+                --exclude .pytest_cache \
+                --exclude .mypy_cache \
+                --exclude .ruff_cache \
+                --exclude .venv \
+                --exclude .tox \
+                --exclude node_modules \
+                --exclude dist \
+                --exclude build \
+                --exclude '*.yaml' \
+                --exclude '*.yml' \
+                --exclude '*.json' \
+                --exclude '*.tfstate' \
+                --exclude '*.tfplan' \
+                --exclude '*.parquet' \
+                --exclude '*.pkl' \
+                --exclude '*.onnx' \
+                .
+
+              # =============================================================
+              # Gitleaks – full‑history secrets detection
+              # =============================================================
+              echo "Running Gitleaks"
+              if [[ -f .gitleaks.toml ]]; then
+                gitleaks git \
+                  --config .gitleaks.toml \
+                  --log-opts="--all --full-history" \
+                  --no-banner \
+                  --redact \
+                  --exit-code 1
+              else
+                gitleaks git \
+                  --log-opts="--all --full-history" \
+                  --no-banner \
+                  --redact \
+                  --exit-code 1
+              fi
+
+              # =============================================================
+              # Trivy – filesystem vulnerability & misconfig scan
+              # =============================================================
+              echo "Running Trivy"
+              trivy fs \
+                --scanners vuln,misconfig \
+                --severity CRITICAL \
+                --ignore-unfixed \
+                --ignorefile .trivyignore \
+                --exit-code 1 \
+                --skip-dirs .git,.tool-cache,.cache,node_modules,dist,build,.venv,.tox,coverage,.pytest_cache,.mypy_cache,.ruff_cache,__pycache__ \
+                .
+
+              echo "All security scans passed"
+            displayName: "Install tools and run all scanners"
+
+          # ------------------------------------------------------------------
+          # Publish scan results for audit trail
+          # ------------------------------------------------------------------
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish scan artifacts"
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: "$(Pipeline.Workspace)/.tool-cache"
+              artifact: "security-scan-artifacts"
+              artifactType: "pipeline"

@@ -10,11 +10,11 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class AzureConfig {
 
-    private static final Logger log = LoggerFactory.getLogger(AzureConfig.class);
+  private static final Logger log = LoggerFactory.getLogger(AzureConfig.class);
 
-    @Bean
-    public TokenCredential azureTokenCredential() {
-        log.info("Creating DefaultAzureCredential for Azure SDK clients");
-        return new DefaultAzureCredentialBuilder().build();
-    }
+  @Bean
+  public TokenCredential azureTokenCredential() {
+    log.info("Creating DefaultAzureCredential for Azure SDK clients");
+    return new DefaultAzureCredentialBuilder().build();
+  }
 }

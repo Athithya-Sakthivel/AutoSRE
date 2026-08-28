@@ -1,0 +1,118 @@
+# ---------------------------------------------------------------------------
+# CI – Frontend Service (React + TypeScript)
+# Validates code with npm; no Docker build here (CD handles image creation).
+# ---------------------------------------------------------------------------
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - main
+      - feat/*
+  paths:
+    include:
+      - services/frontend/**
+      - azure-pipelines/ci/ci-frontend.yaml
+      - azure-pipelines/templates/**
+      - azure-pipelines/scripts/**
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  - group: terraform-vars
+  - name: npm_config_cache
+    value: "$(Pipeline.Workspace)/.npm" # npm cache location
+
+pool:
+  vmImage: "ubuntu-24.04"
+
+workspace:
+  clean: all
+
+steps:
+  - checkout: self
+    clean: true
+    fetchDepth: 1
+    persistCredentials: false
+    submodules: false
+    lfs: false
+
+  # Use specific Node.js LTS version for reproducibility
+  - task: UseNode@1
+    displayName: "Use Node.js 24.19.0 LTS"
+    inputs:
+      version: "24.19.0"
+      checkLatest: false # Pin exact version, don't auto-update
+
+  # Verify agent tools
+  - bash: |
+      set -euo pipefail
+      node --version
+      npm --version
+      python3 --version
+    displayName: "Preflight hosted agent"
+
+  # Cache npm packages using package-lock.json as key
+  - task: Cache@2
+    displayName: "Cache npm package tarballs"
+    inputs:
+      key: 'npm | "$(Agent.OS)" | "$(Build.SourcesDirectory)/services/frontend/package-lock.json"'
+      restoreKeys: |
+        npm | "$(Agent.OS)"
+      path: "$(npm_config_cache)"
+
+  # Install dependencies from lock file for deterministic builds
+  - bash: |
+      set -euo pipefail
+      cd '$(Build.SourcesDirectory)/services/frontend'
+      test -f package-lock.json           # Ensure lock file exists
+      npm ci --cache '$(npm_config_cache)' --prefer-offline
+    displayName: "Install frontend dependencies"
+
+  # TypeScript type checking (catches type errors before build)
+  - bash: |
+      set -euo pipefail
+      cd '$(Build.SourcesDirectory)/services/frontend'
+      npx --no-install tsc --noEmit      # Use local TypeScript, don't install
+    displayName: "TypeScript type check"
+
+  # ESLint for code quality and style
+  - bash: |
+      set -euo pipefail
+      cd '$(Build.SourcesDirectory)/services/frontend'
+      npm run lint
+    displayName: "Lint frontend"
+
+  # Run unit tests with coverage
+  - bash: |
+      set -euo pipefail
+      cd '$(Build.SourcesDirectory)/services/frontend'
+      npm test -- --ci --coverage        # CI mode with coverage
+    displayName: "Run frontend unit tests"
+
+  # Production build to verify bundling works
+  - bash: |
+      set -euo pipefail
+      cd '$(Build.SourcesDirectory)/services/frontend'
+      npm run build
+    displayName: "Build frontend for production"
+
+  # Create CI attestation (same pattern as backend)
+  - bash: |
+      set -euo pipefail
+      out='$(Build.ArtifactStagingDirectory)/ci-attestation'
+      mkdir -p "$out"
+      git rev-parse HEAD > "$out/source-commit.txt"
+      printf '%s\n' "$BUILD_SOURCEBRANCH" > "$out/source-branch.txt"
+      printf '%s\n' "$BUILD_BUILDID" > "$out/pipeline-run-id.txt"
+    displayName: "Create CI attestation"
+
+  - task: PublishPipelineArtifact@1
+    displayName: "Publish CI attestation"
+    inputs:
+      targetPath: "$(Build.ArtifactStagingDirectory)/ci-attestation"
+      artifact: "ci-attestation"
+      publishLocation: "pipeline"

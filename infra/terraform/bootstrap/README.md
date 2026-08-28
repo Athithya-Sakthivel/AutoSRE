@@ -5,16 +5,16 @@ application infrastructure exists.
 
 ## What it creates
 
-| Resource | Purpose |
-|----------|---------|
-| Azure DevOps project | `azdo-bootstrap-<subscription-suffix>` |
-| 3 pipelines | Security scan, Terraform CI, Terraform CD |
-| 2 service principals | `bootstrap-ci` (Reader + planner) and `bootstrap-cd` (Contributor + deployer) |
-| 2 OIDC service connections | `azdo-oidc-ci`, `azdo-oidc-cd` – no secrets stored |
-| GitHub service connection | PAT‑based, used by pipelines to clone the repo |
-| Key Vault | Stores the Azure DevOps PAT (`azdo-pat`) – pipelines fetch it at runtime |
-| Variable group | `terraform-vars` – location, alert email, org URL |
-| Production environment | Approval gate for CD pipelines |
+| Resource                   | Purpose                                                                       |
+| -------------------------- | ----------------------------------------------------------------------------- |
+| Azure DevOps project       | `azdo-bootstrap-<subscription-suffix>`                                        |
+| 3 pipelines                | Security scan, Terraform CI, Terraform CD                                     |
+| 2 service principals       | `bootstrap-ci` (Reader + planner) and `bootstrap-cd` (Contributor + deployer) |
+| 2 OIDC service connections | `azdo-oidc-ci`, `azdo-oidc-cd` – no secrets stored                            |
+| GitHub service connection  | PAT‑based, used by pipelines to clone the repo                                |
+| Key Vault                  | Stores the Azure DevOps PAT (`azdo-pat`) – pipelines fetch it at runtime      |
+| Variable group             | `terraform-vars` – location, alert email, org URL                             |
+| Production environment     | Approval gate for CD pipelines                                                |
 
 ## How to run
 

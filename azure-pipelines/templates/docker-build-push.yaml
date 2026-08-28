@@ -1,0 +1,207 @@
+parameters:
+  - name: dockerfilePath
+    type: string
+
+  - name: contextPath
+    type: string
+
+  - name: imageRepository
+    type: string
+
+  - name: imageTag
+    type: string
+
+  - name: sourceCommit
+    type: string
+
+  - name: sourcePipelineRunId
+    type: string
+
+  - name: containerRegistry
+    type: string
+
+  - name: azureSubscription
+    type: string
+
+steps:
+  - bash: |
+      set -euo pipefail
+
+      registry='${{ parameters.containerRegistry }}'
+      repository='${{ parameters.imageRepository }}'
+      tag='${{ parameters.imageTag }}'
+      source_commit='${{ parameters.sourceCommit }}'
+      source_pipeline_run_id='${{ parameters.sourcePipelineRunId }}'
+
+      [[ "$registry" =~ ^[a-z0-9]{5,50}$ ]]
+      [[ "$repository" =~ ^[a-z0-9][a-z0-9._/-]*$ ]]
+      [[ "$tag" =~ ^[0-9a-f]{40}$ ]]
+      [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]]
+      [[ "$source_pipeline_run_id" =~ ^[0-9]+$ ]]
+    displayName: "Validate image coordinates"
+
+  - bash: |
+      set -euo pipefail
+
+      image='${{ parameters.containerRegistry }}.azurecr.io/${{ parameters.imageRepository }}:${{ parameters.imageTag }}'
+
+      docker version
+      docker buildx version
+
+      docker buildx build \
+        --load \
+        --pull \
+        --file '${{ parameters.dockerfilePath }}' \
+        --tag "$image" \
+        --label "org.opencontainers.image.revision=${{ parameters.sourceCommit }}" \
+        --label "org.opencontainers.image.source=${BUILD_REPOSITORY_URI}" \
+        '${{ parameters.contextPath }}'
+
+      docker image inspect "$image" >/dev/null
+    displayName: "Build immutable-source-tagged image"
+
+  - bash: |
+      set -euo pipefail
+
+      trivy_version='0.74.0'
+      trivy_sha256='2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a'
+      archive="trivy_${trivy_version}_Linux-64bit.tar.gz"
+      url="https://github.com/aquasecurity/trivy/releases/download/v${trivy_version}/${archive}"
+
+      work='$(Agent.TempDirectory)/trivy'
+      image='${{ parameters.containerRegistry }}.azurecr.io/${{ parameters.imageRepository }}:${{ parameters.imageTag }}'
+      out='$(Build.ArtifactStagingDirectory)/image-scan'
+
+      mkdir -p "$work" "$out"
+
+      curl \
+        --fail \
+        --silent \
+        --show-error \
+        --location \
+        --retry 3 \
+        --retry-all-errors \
+        --connect-timeout 10 \
+        --proto '=https' \
+        --tlsv1.2 \
+        -o "$work/$archive" \
+        "$url"
+
+      printf '%s  %s\n' "$trivy_sha256" "$work/$archive" |
+        sha256sum --check --status
+
+      tar -xzf "$work/$archive" -C "$work"
+      test -x "$work/trivy"
+
+      "$work/trivy" --version
+
+      "$work/trivy" image \
+        --scanners vuln \
+        --severity HIGH,CRITICAL \
+        --exit-code 1 \
+        --format json \
+        --output "$out/trivy-report.json" \
+        "$image"
+    displayName: "Trivy HIGH/CRITICAL scan"
+
+  - bash: |
+      set -euo pipefail
+
+      trivy='$(Agent.TempDirectory)/trivy/trivy'
+      image='${{ parameters.containerRegistry }}.azurecr.io/${{ parameters.imageRepository }}:${{ parameters.imageTag }}'
+      out='$(Build.ArtifactStagingDirectory)/image-scan'
+
+      mkdir -p "$out"
+
+      test -x "$trivy"
+      docker image inspect "$image" >/dev/null
+
+      "$trivy" image \
+        --format cyclonedx \
+        --output "$out/sbom.cdx.json" \
+        "$image"
+    displayName: "Generate image SBOM"
+    condition: always()
+
+  - task: PublishPipelineArtifact@1
+    displayName: "Publish image security artifacts"
+    condition: always()
+    inputs:
+      targetPath: "$(Build.ArtifactStagingDirectory)/image-scan"
+      artifact: "image-security"
+      publishLocation: "pipeline"
+
+  - task: AzureCLI@2
+    displayName: "Push scanned image and record ACR digest"
+    condition: succeeded()
+    inputs:
+      azureSubscription: "${{ parameters.azureSubscription }}"
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+
+        registry='${{ parameters.containerRegistry }}'
+        repository='${{ parameters.imageRepository }}'
+        tag='${{ parameters.imageTag }}'
+        source_commit='${{ parameters.sourceCommit }}'
+        source_pipeline_run_id='${{ parameters.sourcePipelineRunId }}'
+
+        image="${registry}.azurecr.io/${repository}:${tag}"
+
+        az acr login --name "$registry"
+
+        docker push "$image"
+
+        digest="$(
+          az acr repository show \
+            --name "$registry" \
+            --image "${repository}:${tag}" \
+            --query digest \
+            --output tsv
+        )"
+
+        [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+        metadata_dir='$(Build.ArtifactStagingDirectory)/image-metadata'
+        metadata="$metadata_dir/image.json"
+
+        mkdir -p "$metadata_dir"
+
+        jq -n \
+          --arg registry "$registry" \
+          --arg repository "$repository" \
+          --arg tag "$tag" \
+          --arg sourceCommit "$source_commit" \
+          --arg sourcePipelineRunId "$source_pipeline_run_id" \
+          --arg digest "$digest" \
+          '{
+            registry: $registry,
+            repository: $repository,
+            tag: $tag,
+            sourceCommit: $sourceCommit,
+            sourcePipelineRunId: $sourcePipelineRunId,
+            digest: $digest,
+            image: ($registry + ".azurecr.io/" + $repository + "@" + $digest)
+          }' > "$metadata"
+
+        cat "$metadata"
+
+  - task: PublishPipelineArtifact@1
+    displayName: "Publish immutable image metadata"
+    condition: succeeded()
+    inputs:
+      targetPath: "$(Build.ArtifactStagingDirectory)/image-metadata"
+      artifact: "image-metadata"
+      publishLocation: "pipeline"
+
+  - task: AzureCLI@2
+    displayName: "Logout from ACR"
+    condition: always()
+    inputs:
+      azureSubscription: "${{ parameters.azureSubscription }}"
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set +e
+        az acr logout --name '${{ parameters.containerRegistry }}'

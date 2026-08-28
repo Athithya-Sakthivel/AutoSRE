@@ -1,6 +1,7 @@
 # Task API Service
 
 Production-grade Spring Boot REST API with:
+
 - JWT authentication and role-based authorization
 - PostgreSQL persistence via Flyway migrations
 - Azure Key Vault for secrets
@@ -47,6 +48,7 @@ bash temp_az_resources.sh
 ```
 
 This creates:
+
 - Resource group `temp-az-<subscription-last4>`
 - Key Vault `az-temp-kv-101` (with secrets)
 - Log Analytics workspace `task-api-logs-<last4>`
@@ -59,6 +61,7 @@ bash test_e2e_locally.sh
 ```
 
 The script:
+
 - Starts PostgreSQL in Docker
 - Updates Key Vault DatabaseUrl to Docker bridge IP
 - Downloads and attaches Application Insights Java agent
@@ -151,24 +154,24 @@ service/
 
 ### Telemetry Tables
 
-| Table | Description |
-|-------|-------------|
-| `AppRequests` | HTTP request telemetry |
-| `AppDependencies` | JDBC, HTTP dependencies, etc. |
-| `AppTraces` | Logback and application traces |
-| `AppExceptions` | Exceptions captured automatically |
-| `AppMetrics` | Micrometer and JVM metrics |
+| Table             | Description                       |
+| ----------------- | --------------------------------- |
+| `AppRequests`     | HTTP request telemetry            |
+| `AppDependencies` | JDBC, HTTP dependencies, etc.     |
+| `AppTraces`       | Logback and application traces    |
+| `AppExceptions`   | Exceptions captured automatically |
+| `AppMetrics`      | Micrometer and JVM metrics        |
 
 ### Key Environment Variables
 
-| Variable | Purpose |
-|----------|---------|
-| `APPLICATIONINSIGHTS_CONNECTION_STRING` | Azure Application Insights connection string |
-| `APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE` | Sampling rate (100 for e2e) |
-| `APPLICATIONINSIGHTS_SELF_DIAGNOSTICS_LEVEL` | Agent self-diagnostics level |
-| `APPLICATIONINSIGHTS_SELF_DIAGNOSTICS_FILE_PATH` | Path to self-diagnostics log |
-| `OTEL_SERVICE_NAME` | Service name for Azure Monitor |
-| `OTEL_RESOURCE_ATTRIBUTES` | Additional resource attributes (e.g., environment) |
+| Variable                                         | Purpose                                            |
+| ------------------------------------------------ | -------------------------------------------------- |
+| `APPLICATIONINSIGHTS_CONNECTION_STRING`          | Azure Application Insights connection string       |
+| `APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE`        | Sampling rate (100 for e2e)                        |
+| `APPLICATIONINSIGHTS_SELF_DIAGNOSTICS_LEVEL`     | Agent self-diagnostics level                       |
+| `APPLICATIONINSIGHTS_SELF_DIAGNOSTICS_FILE_PATH` | Path to self-diagnostics log                       |
+| `OTEL_SERVICE_NAME`                              | Service name for Azure Monitor                     |
+| `OTEL_RESOURCE_ATTRIBUTES`                       | Additional resource attributes (e.g., environment) |
 
 ### Querying Telemetry
 

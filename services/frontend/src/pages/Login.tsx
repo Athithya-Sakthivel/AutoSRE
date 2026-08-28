@@ -1,147 +1,89 @@
-import {
-  useEffect,
-  useRef,
-  useState,
-  type FormEvent
-} from 'react'
-import {
-  Link,
-  useLocation,
-  useNavigate
-} from 'react-router'
-import {
-  ApiError,
-  authApi,
-  setToken
-} from '../api'
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Link, useLocation, useNavigate } from "react-router";
+import { ApiError, authApi, setToken } from "../api";
 
 interface LoginLocationState {
-  from?: unknown
+  from?: unknown;
 }
 
-function getSafeDestination(
-  value: unknown
-): string {
+function getSafeDestination(value: unknown): string {
   if (
-    typeof value === 'string' &&
-    value.startsWith('/') &&
-    !value.startsWith('//')
+    typeof value === "string" &&
+    value.startsWith("/") &&
+    !value.startsWith("//")
   ) {
-    return value
+    return value;
   }
 
-  return '/tasks'
+  return "/tasks";
 }
 
 export default function Login() {
-  const navigate =
-    useNavigate()
+  const navigate = useNavigate();
 
-  const location =
-    useLocation()
+  const location = useLocation();
 
-  const abortControllerRef =
-    useRef<AbortController | null>(
-      null
-    )
+  const abortControllerRef = useRef<AbortController | null>(null);
 
-  const locationState =
-    location.state as
-      | LoginLocationState
-      | null
+  const locationState = location.state as LoginLocationState | null;
 
-  const destination =
-    getSafeDestination(
-      locationState?.from
-    )
+  const destination = getSafeDestination(locationState?.from);
 
-  const [username, setUsername] =
-    useState('')
+  const [username, setUsername] = useState("");
 
-  const [password, setPassword] =
-    useState('')
+  const [password, setPassword] = useState("");
 
-  const [error, setError] =
-    useState('')
+  const [error, setError] = useState("");
 
-  const [isSubmitting, setIsSubmitting] =
-    useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     return () => {
-      abortControllerRef.current?.abort()
-    }
-  }, [])
+      abortControllerRef.current?.abort();
+    };
+  }, []);
 
   async function handleSubmit(
-    event: FormEvent<HTMLFormElement>
+    event: FormEvent<HTMLFormElement>,
   ): Promise<void> {
-    event.preventDefault()
-    setError('')
+    event.preventDefault();
+    setError("");
 
-    if (
-      !username.trim() ||
-      !password
-    ) {
-      setError(
-        'Username and password are required.'
-      )
-      return
+    if (!username.trim() || !password) {
+      setError("Username and password are required.");
+      return;
     }
 
-    setIsSubmitting(true)
+    setIsSubmitting(true);
 
-    const controller =
-      new AbortController()
+    const controller = new AbortController();
 
-    abortControllerRef.current =
-      controller
+    abortControllerRef.current = controller;
 
     try {
-      const data =
-        await authApi.login(
-          username,
-          password,
-          controller.signal
-        )
+      const data = await authApi.login(username, password, controller.signal);
 
-      setToken(data.token)
+      setToken(data.token);
 
       navigate(destination, {
-        replace: true
-      })
+        replace: true,
+      });
     } catch (err: unknown) {
-      if (
-        err instanceof DOMException &&
-        err.name === 'AbortError'
-      ) {
-        return
+      if (err instanceof DOMException && err.name === "AbortError") {
+        return;
       }
 
-      if (
-        err instanceof ApiError &&
-        err.status === 401
-      ) {
-        setError(
-          'Invalid username or password.'
-        )
+      if (err instanceof ApiError && err.status === 401) {
+        setError("Invalid username or password.");
       } else {
-        setError(
-          err instanceof Error
-            ? err.message
-            : 'Login failed.'
-        )
+        setError(err instanceof Error ? err.message : "Login failed.");
       }
     } finally {
-      if (
-        abortControllerRef.current ===
-        controller
-      ) {
-        abortControllerRef.current =
-          null
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
       }
 
-      setIsSubmitting(false)
+      setIsSubmitting(false);
     }
   }
 
@@ -149,12 +91,8 @@ export default function Login() {
     <main className="auth-page">
       <h1>Login</h1>
 
-      <form
-        onSubmit={handleSubmit}
-      >
-        <label htmlFor="login-username">
-          Username
-        </label>
+      <form onSubmit={handleSubmit}>
+        <label htmlFor="login-username">Username</label>
 
         <input
           id="login-username"
@@ -162,20 +100,14 @@ export default function Login() {
           type="text"
           placeholder="Username"
           value={username}
-          onChange={(event) =>
-            setUsername(
-              event.target.value
-            )
-          }
+          onChange={(event) => setUsername(event.target.value)}
           autoComplete="username"
           autoFocus
           required
           disabled={isSubmitting}
         />
 
-        <label htmlFor="login-password">
-          Password
-        </label>
+        <label htmlFor="login-password">Password</label>
 
         <input
           id="login-password"
@@ -183,41 +115,26 @@ export default function Login() {
           type="password"
           placeholder="Password"
           value={password}
-          onChange={(event) =>
-            setPassword(
-              event.target.value
-            )
-          }
+          onChange={(event) => setPassword(event.target.value)}
           autoComplete="current-password"
           required
           disabled={isSubmitting}
         />
 
         {error && (
-          <p
-            className="error"
-            role="alert"
-          >
+          <p className="error" role="alert">
             {error}
           </p>
         )}
 
-        <button
-          type="submit"
-          disabled={isSubmitting}
-        >
-          {isSubmitting
-            ? 'Logging in…'
-            : 'Login'}
+        <button type="submit" disabled={isSubmitting}>
+          {isSubmitting ? "Logging in…" : "Login"}
         </button>
       </form>
 
       <p className="auth-link">
-        Don&apos;t have an account?{' '}
-        <Link to="/register">
-          Register
-        </Link>
+        Don&apos;t have an account? <Link to="/register">Register</Link>
       </p>
     </main>
-  )
+  );
 }

@@ -1,0 +1,102 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# ${workbook_display_name}\n\nEnvironment: **${environment}**\n\nWorkspace: **${log_analytics_workspace_name}**\nApplication Insights: **${application_insights_name}**\n\nThis workbook tracks request health, correlated logs, dependencies, exceptions, traces, and custom metrics."
+      },
+      "name": "overview"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppRequests\n| where TimeGenerated > ago(24h)\n| summarize TotalRequests = count(), FailedRequests = countif(Success == false), AvgDurationMs = round(avg(DurationMs), 2), P95DurationMs = round(percentile(DurationMs, 95), 2) by bin(TimeGenerated, 1h)\n| render timechart",
+        "size": 1,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "request-health"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppRequests\n| where TimeGenerated > ago(24h)\n| where Success == false\n| summarize FailedRequests = count() by bin(TimeGenerated, 1h)\n| render timechart",
+        "size": 1,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "failed-requests"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppRequests\n| where TimeGenerated > ago(24h)\n| where Success == true\n| summarize P95DurationMs = percentile(DurationMs, 95) by bin(TimeGenerated, 1h)\n| render timechart",
+        "size": 1,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "slow-requests"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let req =\n    AppRequests\n    | where TimeGenerated > ago(24h)\n    | summarize arg_max(TimeGenerated, *) by OperationId\n    | project RequestTime = TimeGenerated, OperationId, RequestName = Name, Success, DurationMs, ResultCode, Url, AppRoleName, AppRoleInstance, OperationName;\nlet deps =\n    AppDependencies\n    | where TimeGenerated > ago(24h)\n    | summarize DependencyCount = count(), FailedDependencies = countif(Success == false), P95DependencyMs = percentile(DurationMs, 95) by OperationId;\nlet traces =\n    AppTraces\n    | where TimeGenerated > ago(24h)\n    | summarize TraceCount = count(), ErrorTraceCount = countif(SeverityLevel >= 3) by OperationId;\nlet ex =\n    AppExceptions\n    | where TimeGenerated > ago(24h)\n    | summarize ExceptionCount = count() by OperationId;\nreq\n| join kind=leftouter deps on OperationId\n| join kind=leftouter traces on OperationId\n| join kind=leftouter ex on OperationId\n| project RequestTime, OperationId, RequestName, Success, DurationMs, ResultCode, Url, AppRoleName, AppRoleInstance, OperationName, DependencyCount = coalesce(DependencyCount, 0), FailedDependencies = coalesce(FailedDependencies, 0), P95DependencyMs, TraceCount = coalesce(TraceCount, 0), ErrorTraceCount = coalesce(ErrorTraceCount, 0), ExceptionCount = coalesce(ExceptionCount, 0)\n| order by RequestTime desc",
+        "size": 2,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "correlated-operations"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let failedOps =\n    AppRequests\n    | where TimeGenerated > ago(24h)\n    | where Success == false\n    | summarize arg_max(TimeGenerated, *) by OperationId\n    | project RequestTime = TimeGenerated, OperationId, RequestName = Name, DurationMs, ResultCode, Url, AppRoleName, AppRoleInstance, OperationName;\nlet deps =\n    AppDependencies\n    | where TimeGenerated > ago(24h)\n    | summarize DependencyCount = count(), FailedDependencies = countif(Success == false), P95DependencyMs = percentile(DurationMs, 95) by OperationId;\nlet traces =\n    AppTraces\n    | where TimeGenerated > ago(24h)\n    | summarize TraceCount = count(), ErrorTraceCount = countif(SeverityLevel >= 3) by OperationId;\nlet ex =\n    AppExceptions\n    | where TimeGenerated > ago(24h)\n    | summarize ExceptionCount = count() by OperationId;\nfailedOps\n| join kind=leftouter deps on OperationId\n| join kind=leftouter traces on OperationId\n| join kind=leftouter ex on OperationId\n| project RequestTime, OperationId, RequestName, DurationMs, ResultCode, Url, AppRoleName, AppRoleInstance, OperationName, DependencyCount = coalesce(DependencyCount, 0), FailedDependencies = coalesce(FailedDependencies, 0), P95DependencyMs, TraceCount = coalesce(TraceCount, 0), ErrorTraceCount = coalesce(ErrorTraceCount, 0), ExceptionCount = coalesce(ExceptionCount, 0)\n| order by RequestTime desc",
+        "size": 2,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "failed-operation-drilldown"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppExceptions\n| where TimeGenerated > ago(24h)\n| summarize Exceptions = count() by bin(TimeGenerated, 1h)\n| render timechart",
+        "size": 1,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "exceptions"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppTraces\n| where TimeGenerated > ago(24h)\n| where SeverityLevel >= 3\n| summarize ErrorTraces = count() by bin(TimeGenerated, 1h)\n| render timechart",
+        "size": 1,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "trace-errors"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics\n| where TimeGenerated > ago(24h)\n| where Name in (\"prediction_latency_ms\", \"prediction_count\", \"validation_failures\")\n| summarize AvgValue = avg(todouble(Value)), P95Value = percentile(todouble(Value), 95) by Name, bin(TimeGenerated, 1h)\n| render timechart",
+        "size": 1,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "custom-metrics"
+    }
+  ],
+  "styleSettings": {},
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}
