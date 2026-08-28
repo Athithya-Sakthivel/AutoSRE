@@ -108,3 +108,54 @@ variable "rollback_webhook_url" {
   default     = ""
   sensitive   = true
 }
+
+variable "DOMAIN" {
+  description = "Domain name for the application"
+  type        = string
+}
+
+variable "database_username" {
+  description = "Database username"
+  type        = string
+  sensitive   = true
+}
+
+variable "database_password" {
+  description = "Database password"
+  type        = string
+  sensitive   = true
+}
+
+variable "jwt_secret" {
+  description = "JWT signing secret"
+  type        = string
+  sensitive   = true
+}
+
+variable "cloudflare_tunnel_token" {
+  description = "Cloudflare Tunnel token"
+  type        = string
+  sensitive   = true
+}
+
+variable "cloudflare_tunnel_name" {
+  description = "Cloudflare Tunnel name"
+  type        = string
+}
+
+variable "cloudflare_tunnel_id" {
+  description = "Cloudflare Tunnel ID"
+  type        = string
+}
+
+variable "origin_cert" {
+  description = "Cloudflare Origin CA certificate"
+  type        = string
+  sensitive   = true
+}
+
+variable "origin_key" {
+  description = "Cloudflare Origin CA private key"
+  type        = string
+  sensitive   = true
+}

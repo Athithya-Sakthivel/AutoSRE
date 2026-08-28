@@ -9,6 +9,7 @@ ARG KUBECTL_VERSION=v1.36.4
 ARG KIND_VERSION=v0.32.0
 ARG HELM_VERSION=v4.2.4
 ARG K6_VERSION=v2.2.0
+ARG CLOUDFLARED_VERSION=2026.8.2
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
@@ -156,5 +157,8 @@ RUN set -eux; \
         /usr/local/bin/k6; \
     rm -rf /tmp/k6.tar.gz "/tmp/k6-${K6_VERSION}-linux-${arch}"; \
     k6 version
+  
+RUN curl -fL --retry 3 -o /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64 && \
+    chmod +x /usr/local/bin/cloudflared
     
 WORKDIR /workspace

@@ -111,42 +111,6 @@ resource "azurerm_role_assignment" "ci_tfstate" {
   principal_id         = azuread_service_principal.ci.object_id
 }
 
-# Custom role that grants only the Container Apps secret listing operations
-# required by plan/refresh.
-resource "azurerm_role_definition" "ci_containerapp_secrets" {
-  name        = "Container App Secret Reader (CI)"
-  scope       = data.azurerm_subscription.current.id
-  description = "Allows listing secrets on Container Apps and Container Apps Jobs."
-
-  permissions {
-    actions = [
-      "Microsoft.App/containerApps/listSecrets/action",
-      "Microsoft.App/jobs/listSecrets/action",
-    ]
-    not_actions     = []
-    data_actions    = []
-    not_data_actions = []
-  }
-
-  assignable_scopes = [data.azurerm_subscription.current.id]
-
-  # Prevent 409 Conflict when the role already exists from a previous bootstrap
-  lifecycle {
-    ignore_changes = [name]
-  }
-}
-
-resource "azurerm_role_assignment" "ci_containerapp_secrets" {
-  scope              = data.azurerm_subscription.current.id
-  role_definition_id = azurerm_role_definition.ci_containerapp_secrets.role_definition_resource_id
-  principal_id       = azuread_service_principal.ci.object_id
-}
-
-# CI needs to read Entra ID applications during plan
-resource "azuread_directory_role_assignment" "ci_directory_reader" {
-  role_id             = "88d8e3e3-8f55-4a1e-953a-9b9898b8876b" # Directory Readers
-  principal_object_id = azuread_service_principal.ci.object_id
-}
 
 # ------------------------------------------------------------------------------
 # Azure RBAC for CD
@@ -182,11 +146,6 @@ resource "azuread_directory_role" "application_administrator" {
   display_name = "Application Administrator"
 }
 
-resource "azuread_directory_role_assignment" "cd_app_admin" {
-  role_id             = azuread_directory_role.application_administrator.template_id
-  principal_object_id = azuread_service_principal.cd.object_id
-}
-
 # ------------------------------------------------------------------------------
 # Key Vault Secrets User – grants both CI and CD permission to read the PAT
 # from the bootstrap Key Vault at pipeline runtime.
@@ -203,9 +162,3 @@ resource "azurerm_role_assignment" "cd_keyvault_secrets_user" {
   principal_id         = azuread_service_principal.cd.object_id
 }
 
-
-resource "azurerm_role_assignment" "ci_website_contributor" {
-  scope                = data.azurerm_subscription.current.id
-  role_definition_name = "Website Contributor"
-  principal_id         = azuread_service_principal.ci.object_id
-}

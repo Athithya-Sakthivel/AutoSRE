@@ -1,16 +1,10 @@
 spring:
   application:
     name: task-api
-  cloud:
-    azure:
-      keyvault:
-        secret:
-          property-sources:
-            - endpoint: ${AZURE_KEY_VAULT_URI}
   datasource:
-    url: ${DatabaseUrl}
-    username: ${DatabaseUsername}
-    password: ${DatabasePassword}
+    url: ${DATABASEURL}
+    username: ${DATABASEUSERNAME}
+    password: ${DATABASEPASSWORD}
   jpa:
     open-in-view: false
     hibernate:
@@ -34,8 +28,8 @@ management:
     health:
       probes:
         enabled: true
+      show-details: ${HEALTH_SHOW_DETAILS:never}
 
-  
 logging:
   level:
     root: WARN
@@ -47,13 +41,9 @@ logging:
     com.prod.taskapi: INFO
 
 jwt:
-  secret: ${JwtSecret}
+  secret: ${JWTSECRET}
   expiration-ms: ${JWT_EXPIRATION_MS:86400000}
 
-azure:
-  key-vault-uri: ${AZURE_KEY_VAULT_URI}
-
 # Application Insights connection string is provided by:
-#   spring.cloud.azure.keyvault.secret.property-sources[0]
-#   (secret name: ApplicationInsightsConnectionString)
-# and is consumed automatically by the Application Insights agent.
+#   APPLICATIONINSIGHTS_CONNECTION_STRING environment variable
+# No Key Vault dependency since using ESO
