@@ -8,12 +8,12 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 @TestConfiguration(proxyBeanMethods = false)
 public class TestcontainersConfiguration {
 
-    @Bean
-    @ServiceConnection
-    PostgreSQLContainer postgresContainer() {
-        return new PostgreSQLContainer("postgres:16-alpine")
-                .withDatabaseName("taskdb")
-                .withUsername("taskuser")
-                .withPassword("taskpassword");
-    }
+  @Bean
+  @ServiceConnection
+  PostgreSQLContainer postgresContainer() {
+    return new PostgreSQLContainer("postgres:16-alpine")
+        .withDatabaseName("taskdb")
+        .withUsername("taskuser")
+        .withPassword("taskpassword");
+  }
 }

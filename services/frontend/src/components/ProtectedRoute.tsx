@@ -1,21 +1,13 @@
-import type {
-  ReactNode
-} from 'react'
-import {
-  Navigate,
-  useLocation
-} from 'react-router'
-import { getToken } from '../api'
+import type { ReactNode } from "react";
+import { Navigate, useLocation } from "react-router";
+import { getToken } from "../api";
 
 interface ProtectedRouteProps {
-  children: ReactNode
+  children: ReactNode;
 }
 
-export default function ProtectedRoute({
-  children
-}: ProtectedRouteProps) {
-  const location =
-    useLocation()
+export default function ProtectedRoute({ children }: ProtectedRouteProps) {
+  const location = useLocation();
 
   if (!getToken()) {
     return (
@@ -23,11 +15,11 @@ export default function ProtectedRoute({
         to="/login"
         replace
         state={{
-          from: `${location.pathname}${location.search}${location.hash}`
+          from: `${location.pathname}${location.search}${location.hash}`,
         }}
       />
-    )
+    );
   }
 
-  return <>{children}</>
+  return <>{children}</>;
 }

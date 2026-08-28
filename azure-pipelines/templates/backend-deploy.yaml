@@ -1,0 +1,171 @@
+parameters:
+  - name: imageFullName
+    type: string
+
+  - name: serviceName
+    type: string
+
+  - name: containerName
+    type: string
+
+  - name: namespace
+    type: string
+    default: "default"
+
+  - name: manifests
+    type: string
+
+  - name: deploymentManifest
+    type: string
+
+  - name: aksClusterName
+    type: string
+
+  - name: aksResourceGroup
+    type: string
+
+  - name: azureSubscription
+    type: string
+
+  - name: canaryTrafficSplitMethod
+    type: string
+    default: "pod"
+
+  - name: canaryPercentages
+    type: object
+    default:
+      - 10
+      - 50
+
+  - name: baselineAndCanaryReplicas
+    type: number
+    default: 1
+
+  - name: k6Script
+    type: string
+    default: "azure-pipelines/scripts/k6-load-test.js"
+
+steps:
+  - bash: |
+      set -euo pipefail
+
+      case '${{ parameters.canaryTrafficSplitMethod }}' in
+        pod|smi)
+          ;;
+        *)
+          echo 'canaryTrafficSplitMethod must be pod or smi' >&2
+          exit 1
+          ;;
+      esac
+
+      command -v az
+      command -v kubectl
+      command -v docker
+      command -v python3
+      command -v jq
+    displayName: "Preflight canary tooling"
+
+  - task: AzureCLI@2
+    displayName: "Load AKS credentials for canary preflight"
+    inputs:
+      azureSubscription: "${{ parameters.azureSubscription }}"
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+
+        az aks get-credentials \
+          --resource-group '${{ parameters.aksResourceGroup }}' \
+          --name '${{ parameters.aksClusterName }}' \
+          --overwrite-existing
+
+        kubectl auth can-i get deployment/${{ parameters.serviceName }} \
+          --namespace '${{ parameters.namespace }}' >/dev/null
+
+        kubectl auth can-i patch deployment/${{ parameters.serviceName }} \
+          --namespace '${{ parameters.namespace }}' >/dev/null
+    env:
+      AZURE_CORE_ONLY_SHOW_ERRORS: "true"
+
+  - bash: |
+      set -euo pipefail
+
+      python3 azure-pipelines/scripts/validate-canary-manifests.py \
+        --percentages '${{ join(',', parameters.canaryPercentages) }}' \
+        --deployment-manifest '${{ parameters.deploymentManifest }}' \
+        --mode '${{ parameters.canaryTrafficSplitMethod }}' \
+        --baseline-and-canary-replicas '${{ parameters.baselineAndCanaryReplicas }}'
+    displayName: "Validate canary replica safety"
+
+  - ${{ each pct in parameters.canaryPercentages }}:
+      - task: KubernetesManifest@1
+        displayName: "Deploy backend canary – ${{ pct }}%"
+        inputs:
+          action: deploy
+          connectionType: azureResourceManager
+          azureSubscriptionConnection: "${{ parameters.azureSubscription }}"
+          azureResourceGroup: "${{ parameters.aksResourceGroup }}"
+          kubernetesCluster: "${{ parameters.aksClusterName }}"
+          useClusterAdmin: false
+          namespace: "${{ parameters.namespace }}"
+          strategy: canary
+          trafficSplitMethod: "${{ parameters.canaryTrafficSplitMethod }}"
+          percentage: "${{ pct }}"
+          baselineAndCanaryReplicas: "${{ parameters.baselineAndCanaryReplicas }}"
+          rolloutStatusTimeout: "300"
+          manifests: "${{ parameters.manifests }}"
+          containers: |
+            ${{ parameters.containerName }}: ${{ parameters.imageFullName }}
+
+      - bash: |
+          set -euo pipefail
+
+          base_url="${K6_BASE_URL:?K6_BASE_URL is required for backend canary verification}"
+          endpoint="${K6_ENDPOINT:-/actuator/health/readiness}"
+
+          test -n "$base_url"
+          [[ "$base_url" =~ ^https?:// ]]
+
+          docker run --rm \
+            --pull=always \
+            --volume "$(Build.SourcesDirectory):/work:ro" \
+            --workdir /work \
+            --env "K6_BASE_URL=${base_url}" \
+            --env "K6_ENDPOINT=${endpoint}" \
+            'grafana/k6:2.2.0' \
+            run '${{ parameters.k6Script }}'
+        displayName: "Verify backend canary – ${{ pct }}%"
+        env:
+          K6_BASE_URL: "$(K6_BASE_URL)"
+          K6_ENDPOINT: "$(k6Endpoint)"
+
+  - task: KubernetesManifest@1
+    displayName: "Promote backend canary to stable"
+    inputs:
+      action: promote
+      connectionType: azureResourceManager
+      azureSubscriptionConnection: "${{ parameters.azureSubscription }}"
+      azureResourceGroup: "${{ parameters.aksResourceGroup }}"
+      kubernetesCluster: "${{ parameters.aksClusterName }}"
+      useClusterAdmin: false
+      namespace: "${{ parameters.namespace }}"
+      strategy: canary
+      trafficSplitMethod: "${{ parameters.canaryTrafficSplitMethod }}"
+      rolloutStatusTimeout: "300"
+      manifests: "${{ parameters.manifests }}"
+
+  - task: KubernetesManifest@1
+    displayName: "Reject failed backend canary"
+    condition: failed()
+    continueOnError: true
+    inputs:
+      action: reject
+      connectionType: azureResourceManager
+      azureSubscriptionConnection: "${{ parameters.azureSubscription }}"
+      azureResourceGroup: "${{ parameters.aksResourceGroup }}"
+      kubernetesCluster: "${{ parameters.aksClusterName }}"
+      useClusterAdmin: false
+      namespace: "${{ parameters.namespace }}"
+      strategy: canary
+      trafficSplitMethod: "${{ parameters.canaryTrafficSplitMethod }}"
+      manifests: "${{ parameters.manifests }}"

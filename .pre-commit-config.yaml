@@ -1,0 +1,62 @@
+repos:
+  # Secrets
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e # v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # General repository hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+
+  # Java formatting/checking via the backend Maven wrapper.
+  #
+  # The wrapper must exist at:
+  #   services/backend/mvnw
+  #
+  # Run `mvn wrapper:wrapper` from services/backend once,
+  # then commit mvnw and .mvn/wrapper/*.
+  - repo: local
+    hooks:
+      - id: spotless
+        name: Spotless (Java)
+        entry: services/backend/mvnw -q -f services/backend/pom.xml spotless:check
+        language: system
+        files: ^services/backend/src/.*\.java$
+        pass_filenames: false
+
+  # Frontend ESLint.
+  #
+  # ESLint 10 requires flat config. This expects:
+  #   services/frontend/eslint.config.js
+  #
+  # Use the frontend project's own installed ESLint rather than
+  # a separate pre-commit-managed ESLint environment.
+  - repo: local
+    hooks:
+      - id: eslint
+        name: ESLint (frontend)
+        entry: npm --prefix services/frontend exec -- eslint --fix
+        language: system
+        files: ^services/frontend/.*\.(js|jsx|ts|tsx)$
+        pass_filenames: true
+
+  # Frontend / repository formatting.
+  #
+  # Uses the frontend project's installed Prettier, which is pinned
+  # by services/frontend/package-lock.json.
+  - repo: local
+    hooks:
+      - id: prettier
+        name: Prettier
+        entry: npm --prefix services/frontend exec -- prettier --write
+        language: system
+        files: ^(services/frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md|yaml|yml)|.*\.(yaml|yml|md))$
+        pass_filenames: true

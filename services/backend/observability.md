@@ -255,15 +255,15 @@ union
 
 ## Summary of Known Bugs and Fixes
 
-| Bug | Fix |
-|-----|-----|
-| Zero telemetry due to default sampling | Set `APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=100` |
-| Query returned 0 but data existed | Use `ago(30m)` instead of `ago(10m)` |
-| Wrong workspace/resource filter | Derive dynamically; use `_ResourceId =~` |
-| JSON parse error | Use conditional `jq` handling both formats |
-| `Count` column not in `AppMetrics` | Use `ItemCount` |
-| `az monitor app-insights query` failed on workspace tables | Use `az monitor log-analytics query` |
-| Connection string not loaded by agent | Pass via env var before Maven, not in application.yml |
-| Sampling warning in self-diagnostics | Expected; explicit sampling config avoids it |
+| Bug                                                        | Fix                                                   |
+| ---------------------------------------------------------- | ----------------------------------------------------- |
+| Zero telemetry due to default sampling                     | Set `APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE=100`     |
+| Query returned 0 but data existed                          | Use `ago(30m)` instead of `ago(10m)`                  |
+| Wrong workspace/resource filter                            | Derive dynamically; use `_ResourceId =~`              |
+| JSON parse error                                           | Use conditional `jq` handling both formats            |
+| `Count` column not in `AppMetrics`                         | Use `ItemCount`                                       |
+| `az monitor app-insights query` failed on workspace tables | Use `az monitor log-analytics query`                  |
+| Connection string not loaded by agent                      | Pass via env var before Maven, not in application.yml |
+| Sampling warning in self-diagnostics                       | Expected; explicit sampling config avoids it          |
 
- Keep these guidelines to avoid regressions.
+Keep these guidelines to avoid regressions.

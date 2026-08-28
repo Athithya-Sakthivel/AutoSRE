@@ -1,118 +1,93 @@
-import {
-  useCallback,
-  useEffect,
-  useState
-} from 'react'
-import {
-  useNavigate
-} from 'react-router'
-import {
-  ApiError,
-  setToken,
-  taskApi
-} from '../api'
-import TaskForm from '../components/TaskForm'
-import type { Task } from '../types'
+import { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router";
+import { ApiError, setToken, taskApi } from "../api";
+import TaskForm from "../components/TaskForm";
+import type { Task } from "../types";
 
 export default function Tasks() {
-  const navigate =
-    useNavigate()
+  const navigate = useNavigate();
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(true);
 
-  const [tasks, setTasks] =
-    useState<Task[]>([])
+  const handleUnauthorized = useCallback((): void => {
+    setToken(null);
+    navigate("/login", { replace: true });
+  }, [navigate]);
 
-  const [error, setError] =
-    useState('')
-
-  const [isLoading, setIsLoading] =
-    useState(true)
-
-  const handleUnauthorized =
-    useCallback((): void => {
-      setToken(null)
-
-      navigate('/login', {
-        replace: true
-      })
-    }, [navigate])
-
-  const loadTasks =
-    useCallback(
-      async (
-        signal?: AbortSignal
-      ): Promise<void> => {
-        setError('')
-        setIsLoading(true)
-
-        try {
-          const data =
-            await taskApi.list(
-              signal
-            )
-
-          setTasks(data)
-        } catch (
-          err: unknown
-        ) {
-          if (
-            err instanceof DOMException &&
-            err.name === 'AbortError'
-          ) {
-            return
-          }
-
-          if (
-            err instanceof ApiError &&
-            err.status === 401
-          ) {
-            handleUnauthorized()
-            return
-          }
-
-          setError(
-            err instanceof Error
-              ? err.message
-              : 'Failed to load tasks.'
-          )
-        } finally {
-          if (!signal?.aborted) {
-            setIsLoading(false)
-          }
-        }
-      },
-      [handleUnauthorized]
-    )
+  const fetchTasks = useCallback(
+    async (signal?: AbortSignal): Promise<Task[]> => {
+      return taskApi.list(signal);
+    },
+    [],
+  );
 
   useEffect(() => {
-    const controller =
-      new AbortController()
+    const controller = new AbortController();
 
-    void loadTasks(
-      controller.signal
-    )
+    void (async () => {
+      try {
+        const data = await fetchTasks(controller.signal);
+        if (!controller.signal.aborted) {
+          setTasks(data);
+        }
+      } catch (err: unknown) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        if (err instanceof ApiError && err.status === 401) {
+          handleUnauthorized();
+          return;
+        }
+        if (!controller.signal.aborted) {
+          setError(
+            err instanceof Error ? err.message : "Failed to load tasks.",
+          );
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsLoading(false);
+        }
+      }
+    })();
 
-    return () => {
-      controller.abort()
-    }
-  }, [loadTasks])
+    return () => controller.abort();
+  }, [fetchTasks, handleUnauthorized]);
 
-  function handleTaskCreated(
-    task: Task
-  ): void {
-    setTasks(
-      (previousTasks) => [
-        ...previousTasks,
-        task
-      ]
-    )
+  function handleRetry(): void {
+    setIsLoading(true);
+    const controller = new AbortController();
+
+    void (async () => {
+      try {
+        const data = await fetchTasks(controller.signal);
+        if (!controller.signal.aborted) {
+          setTasks(data);
+        }
+      } catch (err: unknown) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        if (err instanceof ApiError && err.status === 401) {
+          handleUnauthorized();
+          return;
+        }
+        if (!controller.signal.aborted) {
+          setError(
+            err instanceof Error ? err.message : "Failed to load tasks.",
+          );
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsLoading(false);
+        }
+      }
+    })();
+  }
+
+  function handleTaskCreated(task: Task): void {
+    setTasks((previousTasks) => [...previousTasks, task]);
   }
 
   function handleLogout(): void {
-    setToken(null)
-
-    navigate('/login', {
-      replace: true
-    })
+    setToken(null);
+    navigate("/login", { replace: true });
   }
 
   return (
@@ -120,18 +95,10 @@ export default function Tasks() {
       <header className="tasks-header">
         <div>
           <h1>Tasks</h1>
-
-          <p
-            className="muted"
-            aria-live="polite"
-          >
-            {tasks.length}{' '}
-            {tasks.length === 1
-              ? 'task'
-              : 'tasks'}
+          <p className="muted" aria-live="polite">
+            {tasks.length} {tasks.length === 1 ? "task" : "tasks"}
           </p>
         </div>
-
         <button
           type="button"
           className="secondary-button"
@@ -141,113 +108,58 @@ export default function Tasks() {
         </button>
       </header>
 
-      <TaskForm
-        onCreated={
-          handleTaskCreated
-        }
-      />
+      <TaskForm onCreated={handleTaskCreated} />
 
       {error && (
-        <div
-          className="error-banner"
-          role="alert"
-        >
+        <div className="error-banner" role="alert">
           <span>{error}</span>
-
-          <button
-            type="button"
-            className="link-button"
-            onClick={() =>
-              void loadTasks()
-            }
-          >
+          <button type="button" className="link-button" onClick={handleRetry}>
             Retry
           </button>
         </div>
       )}
 
       {isLoading ? (
-        <p
-          className="muted"
-          aria-live="polite"
-        >
+        <p className="muted" aria-live="polite">
           Loading tasks…
         </p>
       ) : tasks.length === 0 ? (
         <p className="empty-state">
-          No tasks yet. Create your
-          first task above.
+          No tasks yet. Create your first task above.
         </p>
       ) : (
         <ul className="task-list">
           {tasks.map((task) => (
-            <li
-              key={task.id}
-              className="task-item"
-            >
+            <li key={task.id} className="task-item">
               <div className="task-main">
-                <strong>
-                  {task.title}
-                </strong>
-
+                <strong>{task.title}</strong>
                 {task.description && (
-                  <p className="task-description">
-                    {task.description}
-                  </p>
+                  <p className="task-description">{task.description}</p>
                 )}
-
-                <time
-                  dateTime={
-                    task.createdAt
-                  }
-                  className="muted"
-                >
-                  {formatDate(
-                    task.createdAt
-                  )}
+                <time dateTime={task.createdAt} className="muted">
+                  {formatDate(task.createdAt)}
                 </time>
               </div>
-
-              <span
-                className={`status ${task.status.toLowerCase()}`}
-              >
-                {formatStatus(
-                  task.status
-                )}
+              <span className={`status ${task.status.toLowerCase()}`}>
+                {formatStatus(task.status)}
               </span>
             </li>
           ))}
         </ul>
       )}
     </main>
-  )
+  );
 }
 
-function formatDate(
-  value: string
-): string {
-  const date = new Date(value)
-
-  if (
-    Number.isNaN(
-      date.getTime()
-    )
-  ) {
-    return 'Unknown date'
-  }
-
-  return date.toLocaleString()
+function formatDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown date";
+  return date.toLocaleString();
 }
 
-function formatStatus(
-  status: Task['status']
-): string {
+function formatStatus(status: Task["status"]): string {
   return status
     .toLowerCase()
-    .replace(/_/g, ' ')
-    .replace(
-      /\b\w/g,
-      (character) =>
-        character.toUpperCase()
-    )
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
 }

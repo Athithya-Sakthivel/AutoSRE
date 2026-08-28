@@ -1,0 +1,98 @@
+# ---------------------------------------------------------------------------
+# CI – Backend Service (Spring Boot)
+# Validates code with Maven; no Docker build here (CD handles image creation).
+# ---------------------------------------------------------------------------
+
+trigger:
+  batch: true # Batch multiple rapid pushes into one run
+  branches:
+    include:
+      - main # Run on main branch
+      - feat/* # Run on feature branches for fast feedback
+  paths:
+    include:
+      - services/backend/** # Only backend code changes trigger this
+      - azure-pipelines/ci/ci-backend.yaml # Pipeline definition itself
+      - azure-pipelines/templates/** # Shared templates may affect build
+      - azure-pipelines/scripts/** # Shared scripts may affect build
+      - pom.xml # Root Maven config
+      - .mvn/** # Maven wrapper and settings
+
+pr:
+  branches:
+    include:
+      - main # Validate PRs targeting main
+
+variables:
+  - group: terraform-vars # Non-secret variables from variable group
+  - name: MAVEN_CACHE_FOLDER
+    value: "$(Pipeline.Workspace)/.m2/repository" # Cache location for Maven deps
+
+pool:
+  vmImage: "ubuntu-24.04" # Microsoft-hosted agent
+
+workspace:
+  clean: all # Ensure clean workspace each run
+
+steps:
+  # Checkout repository with minimal depth and no credentials
+  - checkout: self
+    clean: true
+    fetchDepth: 1
+    persistCredentials: false # Avoid leaving credentials on agent
+    submodules: false
+    lfs: false
+
+  # Verify agent tools before running build
+  - bash: |
+      set -euo pipefail
+      java -version
+      mvn -version
+      python3 --version
+    displayName: "Preflight hosted agent"
+
+  # Cache Maven repository to speed up subsequent runs
+  - task: Cache@2
+    displayName: "Cache Maven repository"
+    inputs:
+      key: 'maven | "$(Agent.OS)" | "$(Build.SourcesDirectory)/pom.xml"'
+      restoreKeys: |
+        maven | "$(Agent.OS)"
+      path: "$(MAVEN_CACHE_FOLDER)"
+
+  # Run Maven build with tests (unit + integration via Testcontainers)
+  - task: Maven@4
+    displayName: "Build and test backend"
+    inputs:
+      mavenPomFile: "pom.xml"
+      goals: "clean verify" # Compile, run tests, package
+      options: "-B -ntp -Dmaven.repo.local=$(MAVEN_CACHE_FOLDER)"
+      publishJUnitResults: true
+      testResultsFiles: "**/target/surefire-reports/TEST-*.xml"
+      testRunTitle: "Backend Tests"
+      javaHomeOption: "JDKVersion"
+      jdkVersionOption: "1.21" # Java 21 required by Spring Boot 3.5
+      jdkArchitectureOption: "x64"
+      mavenVersionOption: "Default"
+      mavenAuthenticateFeed: false
+      effectivePomSkip: false
+      sonarQubeRunAnalysis: false
+
+  # Create attestation with source commit and pipeline run ID
+  # This will be verified by CD before building the Docker image
+  - bash: |
+      set -euo pipefail
+      out='$(Build.ArtifactStagingDirectory)/ci-attestation'
+      mkdir -p "$out"
+      git rev-parse HEAD > "$out/source-commit.txt"
+      printf '%s\n' "$BUILD_SOURCEBRANCH" > "$out/source-branch.txt"
+      printf '%s\n' "$BUILD_BUILDID" > "$out/pipeline-run-id.txt"
+    displayName: "Create CI attestation"
+
+  # Publish attestation for CD pipeline to consume
+  - task: PublishPipelineArtifact@1
+    displayName: "Publish CI attestation"
+    inputs:
+      targetPath: "$(Build.ArtifactStagingDirectory)/ci-attestation"
+      artifact: "ci-attestation"
+      publishLocation: "pipeline"

@@ -161,4 +161,3 @@ resource "azurerm_role_assignment" "cd_keyvault_secrets_user" {
   role_definition_name = "Key Vault Secrets User"
   principal_id         = azuread_service_principal.cd.object_id
 }
-

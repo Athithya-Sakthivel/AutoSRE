@@ -59,3 +59,5 @@ tsconfig.tsbuildinfo
 .DS_Store
 istio-1.30.3
 .istio
+.bootstrap.generated.env
+*.env

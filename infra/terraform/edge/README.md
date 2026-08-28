@@ -26,21 +26,25 @@ Admin tools (Argo CD, Grafana) are not publicly exposed.
 ## What This Stack Creates
 
 ### DNS
+
 - One CNAME: `app.<domain>` → `<tunnel-id>.cfargotunnel.com`
 - No wildcard records
 
 ### Zone Settings
+
 - **SSL**: `strict`
 - **Always Use HTTPS**: `on`
 - **TLS 1.3**: `on`
 
 ### Bot Protection
+
 - **Bot Fight Mode**: `enabled` (may be disabled for load testing)
 - **JavaScript Detections**: `enabled`
 - **AI Bots Protection**: `block`
 - **Crawler Protection**: `enabled`
 
 ### Origin CA Certificate
+
 - RSA 2048-bit private key
 - CSR for `app.<domain>`
 - Cloudflare Origin CA certificate (15-year validity by default)
@@ -48,23 +52,25 @@ Admin tools (Argo CD, Grafana) are not publicly exposed.
 ## Inputs
 
 ### Required
+
 - `CLOUDFLARE_ACCOUNT_ID`
 - Domain via `TF_VAR_domain` or `DOMAIN`
 
 ### Authentication
+
 - `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_GLOBAL_API_KEY` + `CLOUDFLARE_EMAIL`
 
 ### Optional
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TF_VAR_subdomain` | `app` | Subdomain prefix |
-| `TF_VAR_tunnel_name` | `task-api-default` | Tunnel name |
-| `TF_VAR_enable_always_use_https` | `true` | HTTP→HTTPS redirect |
-| `TF_VAR_enable_tls_1_3` | `true` | TLS 1.3 |
-| `TF_VAR_enable_bot_fight_mode` | `true` | Bot Fight Mode |
-| `TF_VAR_enable_js_detections` | `true` | JS detections |
-| `TF_VAR_origin_ca_validity_days` | `5475` | Cert validity |
+| Variable                         | Default            | Description         |
+| -------------------------------- | ------------------ | ------------------- |
+| `TF_VAR_subdomain`               | `app`              | Subdomain prefix    |
+| `TF_VAR_tunnel_name`             | `task-api-default` | Tunnel name         |
+| `TF_VAR_enable_always_use_https` | `true`             | HTTP→HTTPS redirect |
+| `TF_VAR_enable_tls_1_3`          | `true`             | TLS 1.3             |
+| `TF_VAR_enable_bot_fight_mode`   | `true`             | Bot Fight Mode      |
+| `TF_VAR_enable_js_detections`    | `true`             | JS detections       |
+| `TF_VAR_origin_ca_validity_days` | `5475`             | Cert validity       |
 
 ## Execution
 
@@ -76,16 +82,16 @@ bash infra/terraform/edge/run.sh --destroy
 
 ## Outputs
 
-| Output | Description |
-|--------|-------------|
-| `cloudflare_tunnel_id` | Tunnel UUID |
-| `cloudflare_tunnel_name` | Tunnel name |
-| `cloudflare_tunnel_token` | Tunnel token (sensitive) |
-| `app_url` | Public URL |
-| `origin_ca_certificate` | Cert PEM (sensitive) |
-| `origin_ca_private_key` | Private key PEM (sensitive) |
-| `origin_ca_certificate_id` | Cert ID |
-| `origin_ca_expires_on` | Expiration date |
+| Output                     | Description                 |
+| -------------------------- | --------------------------- |
+| `cloudflare_tunnel_id`     | Tunnel UUID                 |
+| `cloudflare_tunnel_name`   | Tunnel name                 |
+| `cloudflare_tunnel_token`  | Tunnel token (sensitive)    |
+| `app_url`                  | Public URL                  |
+| `origin_ca_certificate`    | Cert PEM (sensitive)        |
+| `origin_ca_private_key`    | Private key PEM (sensitive) |
+| `origin_ca_certificate_id` | Cert ID                     |
+| `origin_ca_expires_on`     | Expiration date             |
 
 ## Post-Apply
 
