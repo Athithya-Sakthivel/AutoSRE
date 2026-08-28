@@ -27,7 +27,7 @@ The agent automatically instruments Spring MVC, JDBC, Logback, and Micrometer. N
 
 ---
 
-## What To Do
+## Invariants
 
 ### 1. Use workspace-based Application Insights
 
