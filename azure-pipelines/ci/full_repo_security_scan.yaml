@@ -11,8 +11,8 @@
 #
 # Design:
 #   • Microsoft‑hosted agent (ubuntu‑24.04) – no private network needed.
-#   • No cache – tools are downloaded fresh each run with pinned SHAs.
-#     Ephemeral agent guarantees clean, tamper‑free scans.
+#   • Tool binaries are downloaded fresh each run with pinned SHAs.
+#   • Maven dependencies are resolved and cached to avoid Maven Central rate‑limits.
 #   • All downloads use hardened curl (TLS 1.2, retries, checksum verification).
 # ==============================================================================
 
@@ -46,6 +46,28 @@ stages:
             fetchDepth: 0
             fetchTags: false
             persistCredentials: false
+
+          # ------------------------------------------------------------------
+          # Cache Maven local repository to speed up scans and avoid rate limits
+          # ------------------------------------------------------------------
+          - task: Cache@2
+            displayName: Cache Maven local repository
+            inputs:
+              key: 'm2 | "$(Agent.OS)" | **/pom.xml'
+              path: $(HOME)/.m2/repository
+
+          # ------------------------------------------------------------------
+          # Resolve Maven dependencies (populates ~/.m2 for Trivy)
+          # ------------------------------------------------------------------
+          - bash: |
+              set -euo pipefail
+              if [ -f services/backend/pom.xml ]; then
+                echo "Resolving Maven dependencies for backend..."
+                mvn -q -f services/backend/pom.xml dependency:resolve -DskipTests
+              else
+                echo "No backend pom.xml found; skipping Maven dependency resolution."
+              fi
+            displayName: Resolve Maven dependencies
 
           # ------------------------------------------------------------------
           # Install tools and run all scanners
@@ -133,7 +155,7 @@ stages:
               # Trivy installer (separate because it uses a checksums file)
               # ---------------------------------------------------------------
               install_trivy() {
-                local version="0.72.0"
+                local version="0.74.0"
                 local asset="trivy_0.72.0_Linux-64bit.tar.gz"
                 local base_url="https://github.com/aquasecurity/trivy/releases/download/v${version}"
                 local tmpdir
@@ -165,7 +187,7 @@ stages:
               # ---------------------------------------------------------------
               # Pinned versions and SHAs (do not change without explicit review)
               # ---------------------------------------------------------------
-              OPENGREP_VERSION="1.25.0"
+              OPENGREP_VERSION="1.27.1"
               OPENGREP_ASSET="opengrep-core_linux_x86.tar.gz"
               OPENGREP_SHA="fe134f379952e7a25acad4532a791488982ce856725a79bddb91db0491ad66d6"
               OPENGREP_URL="https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/${OPENGREP_ASSET}"
