@@ -1,8 +1,5 @@
 # ------------------------------------------------------------------------------
 # Bootstrap Key Vault
-#
-# Holds secrets that pipelines fetch at runtime.  Nothing is stored in
-# Azure DevOps variable groups as a secret.
 # ------------------------------------------------------------------------------
 
 resource "azurerm_key_vault" "bootstrap" {
@@ -35,6 +32,78 @@ resource "azurerm_key_vault_secret" "rollback_webhook" {
 
   name         = "rollback-webhook"
   value        = var.rollback_webhook_url
+  key_vault_id = azurerm_key_vault.bootstrap.id
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+resource "azurerm_key_vault_secret" "database_username" {
+  name         = "DatabaseUsername"
+  value        = var.database_username
+  key_vault_id = azurerm_key_vault.bootstrap.id
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+resource "azurerm_key_vault_secret" "database_password" {
+  name         = "DatabasePassword"
+  value        = var.database_password
+  key_vault_id = azurerm_key_vault.bootstrap.id
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+resource "azurerm_key_vault_secret" "jwt_secret" {
+  name         = "JwtSecret"
+  value        = var.jwt_secret
+  key_vault_id = azurerm_key_vault.bootstrap.id
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+resource "azurerm_key_vault_secret" "cloudflare_tunnel_token" {
+  name         = "CloudflareTunnelToken"
+  value        = var.cloudflare_tunnel_token
+  key_vault_id = azurerm_key_vault.bootstrap.id
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+resource "azurerm_key_vault_secret" "cloudflare_tunnel_name" {
+  name         = "CloudflareTunnelName"
+  value        = var.cloudflare_tunnel_name
+  key_vault_id = azurerm_key_vault.bootstrap.id
+}
+
+resource "azurerm_key_vault_secret" "cloudflare_tunnel_id" {
+  name         = "CloudflareTunnelId"
+  value        = var.cloudflare_tunnel_id
+  key_vault_id = azurerm_key_vault.bootstrap.id
+}
+
+resource "azurerm_key_vault_secret" "origin_cert" {
+  name         = "OriginCaCert"
+  value        = var.origin_cert
+  key_vault_id = azurerm_key_vault.bootstrap.id
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+resource "azurerm_key_vault_secret" "origin_key" {
+  name         = "OriginCaKey"
+  value        = var.origin_key
   key_vault_id = azurerm_key_vault.bootstrap.id
 
   lifecycle {

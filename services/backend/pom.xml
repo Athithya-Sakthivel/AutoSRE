@@ -156,12 +156,7 @@
             <groupId>com.azure</groupId>
             <artifactId>azure-identity</artifactId>
         </dependency>
-        <!-- Azure Key Vault property source -->
-        <dependency>
-            <groupId>com.azure.spring</groupId>
-            <artifactId>spring-cloud-azure-starter-keyvault-secrets</artifactId>
-        </dependency>
-        
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

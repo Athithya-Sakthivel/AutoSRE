@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-# Argo Rollouts + Gateway API plugin for local kind.
+# Argo Rollouts + Gateway API plugin + ESO for local kind.
 # Assumes bootstrap.sh already installed Cilium with Gateway API.
 
 # Version must include leading 'v' (e.g. v1.9.1)
@@ -13,6 +13,9 @@ ARGO_NAMESPACE="${ARGO_NAMESPACE:-argo-rollouts}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-300}"
 
 GATEWAY_PLUGIN_IMAGE="ghcr.io/argoproj-labs/rollouts-plugin-trafficrouter-gatewayapi:${GATEWAY_API_PLUGIN_VERSION}"
+
+ESO_VERSION="2.8.0"
+ESO_NAMESPACE="external-secrets"
 
 TMP_DIR="$(mktemp -d)"
 VALUES_FILE="${TMP_DIR}/values.yaml"
@@ -121,6 +124,24 @@ main() {
 
   log "Argo Rollouts setup complete"
   kubectl get pods -n "${ARGO_NAMESPACE}" -o wide
+
+  helm repo add external-secrets https://charts.external-secrets.io
+  helm repo update
+
+  helm upgrade --install external-secrets \
+    external-secrets/external-secrets \
+    --namespace "${ESO_NAMESPACE}" \
+    --create-namespace \
+    --version "${ESO_VERSION}" \
+    --set image.tag="v${ESO_VERSION}" \
+    --wait
+
+  helm list -n external-secrets
+
+  kubectl get pods -n external-secrets
+
+  kubectl get crd | grep external-secrets.io
+
 }
 
 main "$@"

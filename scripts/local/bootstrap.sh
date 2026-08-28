@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-# Local Kubernetes bootstrap for kind.
+# Local Kubernetes bootstrap for kind(for AKS parity)
 # Recreates the named cluster on every run by design.
 # Baseline: kind + Kubernetes 1.36.1 + Gateway API v1.6.1 + Cilium 1.20.1 + Metrics Server v0.9.0
 
