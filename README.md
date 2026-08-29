@@ -122,8 +122,9 @@ export TF_VAR_AZDO_GITHUB_SERVICE_CONNECTION_PAT="<github-pat>" # Generate at ht
 
 # AZDO variable group entries
 export TF_VAR_location=centralindia
-export TF_VAR_alert_email_address=     # example athithya651@gmail.com
+export TF_VAR_alert_email_address=           # example athithya651@gmail.com
 export TF_VAR_DOMAIN=                        # example athithya.site
+export TF_VAR_owner=                         # give any username for tags
 
 # key vault secrets (non derivables)
 export TF_VAR_AZDO_PERSONAL_ACCESS_TOKEN="<azure-devops-pat>"   # Generate at https://dev.azure.com/<organization_name>/_usersSettings/tokens
@@ -146,17 +147,3 @@ Trigger the Terraform CD pipeline manually from the Azure DevOps UI. It provisio
 **Environment:** `staging` (requires manual approval)
 
 ---
-
-<summary>▶ Expected outputs</summary>
-
-Here's the concise documentation:
-
----
-
-## Phase 2.1: Local Dev Roles & Live Pipeline Test
-
-### 1. Assign RBAC roles (one-time, idempotent) and Run the end-to-end test
-
-```bash
-bash src/scripts/other_roles.sh
-```

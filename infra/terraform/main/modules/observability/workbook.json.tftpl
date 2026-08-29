@@ -1,0 +1,72 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": ${jsonencode(format("## Task API Monitoring\nEnvironment: %s", environment))}
+      },
+      "name": "title"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": ${jsonencode(request_query)},
+        "size": 1,
+        "title": "Request Volume and Failure Rate",
+        "queryType": 0,
+        "resourceType": "microsoft.insights/components",
+        "resourceId": ${jsonencode(app_insights_id)},
+        "visualization": "timechart"
+      },
+      "name": "requests"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": ${jsonencode(dependency_query)},
+        "size": 1,
+        "title": "Dependencies",
+        "queryType": 0,
+        "resourceType": "microsoft.insights/components",
+        "resourceId": ${jsonencode(app_insights_id)},
+        "visualization": "timechart"
+      },
+      "name": "dependencies"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": ${jsonencode(exception_query)},
+        "size": 1,
+        "title": "Exceptions",
+        "queryType": 0,
+        "resourceType": "microsoft.insights/components",
+        "resourceId": ${jsonencode(app_insights_id)},
+        "visualization": "barchart"
+      },
+      "name": "exceptions"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": ${jsonencode(metric_query)},
+        "size": 1,
+        "title": "Custom Metrics",
+        "queryType": 0,
+        "resourceType": "microsoft.insights/components",
+        "resourceId": ${jsonencode(app_insights_id)},
+        "visualization": "timechart"
+      },
+      "name": "metrics"
+    }
+  ],
+  "isLocked": false,
+  "fallbackResourceIds": [
+    "Azure Monitor"
+  ]
+}
