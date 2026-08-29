@@ -2,7 +2,7 @@
 # Commit this file so Azure Pipelines sees a real path change under
 # infra/terraform/main/** and triggers ci-terraform automatically.
 
-Bootstrapped: 2026-08-29T00:45:33Z
+Bootstrapped: 2026-08-29T12:43:53Z
 Organization: athithyasakthivel
 Project: azdo-bootstrap-f41930
 Subscription: b1e221f4-74ef-4e62-9bca-fb70aef41930
