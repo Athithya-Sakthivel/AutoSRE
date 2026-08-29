@@ -1,2 +1,7 @@
+# Ignored temprorily for local development, RBAC remains enabled to protect key vault access.
 AZU-0013
-# Ignored temprorily for local development, as RBAC remains enabled to protect key vault access.
+
+# AKS API server authorized IP ranges configured via Azure CLI using AzureCloud service tag
+# AzureRM provider does not support service tags in authorized_ip_ranges
+# Preview feature: EnableServiceTagAuthorizedIPPreview
+AVD-AZU-0041
