@@ -54,6 +54,16 @@ resource "azurerm_postgresql_flexible_server" "this" {
   # Omitting the block keeps this server single-node / non-HA.
 
   tags = var.tags
+
+  # Prevent Terraform from trying to change availability zone after failover
+  lifecycle {
+    ignore_changes = [
+      zone,
+      high_availability,
+    ]
+  }
+
+
 }
 
 # ------------------------------------------------------------------------------

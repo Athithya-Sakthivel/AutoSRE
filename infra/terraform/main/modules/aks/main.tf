@@ -7,11 +7,12 @@
 #   - User-assigned NAT Gateway attached to the supplied AKS subnet.
 #   - Azure Workload Identity with OIDC issuer enabled.
 #   - AcrPull granted to the AKS kubelet identity at ACR scope.
+#
+# Note:
+#   API server authorized IP ranges are configured via Azure CLI after
+#   cluster creation using the AzureCloud service tag (preview).
+#   AzureRM provider does not support service tags in authorized_ip_ranges.
 # ============================================================================
-
-# ----------------------------------------------------------------------------
-# User-assigned managed identity for the AKS control plane
-# ----------------------------------------------------------------------------
 
 resource "azurerm_user_assigned_identity" "aks" {
   name                = "${var.cluster_name}-identity"
@@ -35,18 +36,17 @@ resource "azurerm_kubernetes_cluster" "this" {
   kubernetes_version  = var.kubernetes_version
 
   node_provisioning_profile {
-    mode = "Manual" # Required in AzureRM 5.x
+    mode = "Manual"
   }
 
   default_node_pool {
     name                 = "default"
     vm_size              = var.vm_size
     node_count           = var.node_count
-    auto_scaling_enabled = false # Correct name in AzureRM 5.x
+    auto_scaling_enabled = false
     os_disk_size_gb      = var.os_disk_size_gb
     os_sku               = "AzureLinux3"
     vnet_subnet_id       = var.aks_subnet_id
-    # No node_taints, no node_labels (optional)
   }
 
   identity {
@@ -69,22 +69,15 @@ resource "azurerm_kubernetes_cluster" "this" {
   workload_identity_enabled = true
   oidc_issuer_enabled       = true
 
-  dynamic "api_server_access_profile" {
-    for_each = length(var.authorized_ip_ranges) > 0 ? [true] : []
-
-    content {
-      authorized_ip_ranges = var.authorized_ip_ranges
-    }
-  }
-
   tags = var.tags
 
   depends_on = [
     azurerm_role_assignment.network_contributor
   ]
+
   lifecycle {
     ignore_changes = [
-      kubernetes_version,   # Ignore minor version changes
+      kubernetes_version,
     ]
   }
 }

@@ -17,13 +17,7 @@ aks_node_count         = 1
 aks_kubernetes_version = "1.36"
 aks_os_disk_size_gb    = 100
 
-# Restrict public API server access to only the necessary CI/CD and admin
-# egress IPs. Replace with real CIDR ranges for your environment.
-# Example values below are placeholders and must be updated.
-aks_authorized_ip_ranges = [
-  "203.0.113.0/24",  # Office/Admin network
-  "198.51.100.0/24", # VPN egress
-]
+
 
 # ------------------------------------------------------------------------------
 # PostgreSQL
