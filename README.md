@@ -121,7 +121,7 @@ export TF_VAR_AZDO_ORG_SERVICE_URL="https://dev.azure.com/<organization_name>"
 export TF_VAR_AZDO_GITHUB_SERVICE_CONNECTION_PAT="<github-pat>" # Generate at https://github.com/settings/tokens/new
 
 # AZDO variable group entries
-export TF_VAR_location=centralindia
+export TF_VAR_location=centralindia          # Azure service tags for Azure DevOps and AKS authentication verified available in centralindia
 export TF_VAR_alert_email_address=           # example athithya651@gmail.com
 export TF_VAR_DOMAIN=                        # example athithya.site
 export TF_VAR_owner=                         # give any username for tags

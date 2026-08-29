@@ -51,20 +51,19 @@ module "networking" {
 module "aks" {
   source = "./modules/aks"
 
-  resource_group_name  = module.state.resource_group_name
-  location             = var.location
-  cluster_name         = local.aks_cluster_name
-  kubernetes_version   = var.aks_kubernetes_version
-  vm_size              = var.aks_vm_size
-  node_count           = var.aks_node_count
-  os_disk_size_gb      = var.aks_os_disk_size_gb
-  aks_subnet_id        = module.networking.aks_subnet_id
-  acr_id               = module.state.acr_id
-  service_cidr         = var.aks_service_cidr
-  dns_service_ip       = var.aks_dns_service_ip
-  pod_cidr             = var.aks_pod_cidr
-  authorized_ip_ranges = var.aks_authorized_ip_ranges
-  tags                 = local.common_tags
+  resource_group_name = module.state.resource_group_name
+  location            = var.location
+  cluster_name        = local.aks_cluster_name
+  kubernetes_version  = var.aks_kubernetes_version
+  vm_size             = var.aks_vm_size
+  node_count          = var.aks_node_count
+  os_disk_size_gb     = var.aks_os_disk_size_gb
+  aks_subnet_id       = module.networking.aks_subnet_id
+  acr_id              = module.state.acr_id
+  service_cidr        = var.aks_service_cidr
+  dns_service_ip      = var.aks_dns_service_ip
+  pod_cidr            = var.aks_pod_cidr
+  tags                = local.common_tags
 }
 
 module "postgresql" {

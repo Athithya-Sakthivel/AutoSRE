@@ -47,7 +47,7 @@ variable "tags" {
 }
 
 variable "alert_email_address" {
-  description = "Email for Azure Monitor alerts and budget notifications. Provided via TF_VAR_alert_email_address environment variable, not in .tfvars."
+  description = "Email for Azure Monitor alerts. Provided via TF_VAR_alert_email_address environment variable, not in .tfvars."
   type        = string
   validation {
     condition     = can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.alert_email_address))
@@ -105,12 +105,6 @@ variable "aks_pod_cidr" {
   default     = "10.244.0.0/16"
 }
 
-variable "aks_authorized_ip_ranges" {
-  description = "Optional list of CIDRs allowed to access the AKS API server."
-  type        = list(string)
-  default     = []
-}
-
 # ------------------------------------------------------------------------------
 # PostgreSQL
 # ------------------------------------------------------------------------------
@@ -144,7 +138,6 @@ variable "postgresql_administrator_login" {
   type        = string
   default     = "taskuser"
 }
-
 
 variable "postgresql_database_name" {
   description = "Database name."

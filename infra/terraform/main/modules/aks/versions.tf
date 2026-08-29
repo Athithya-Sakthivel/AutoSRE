@@ -1,5 +1,5 @@
 # ==============================================================================
-# aks/versions.tf – Provider requirements for the AKS module
+# modules/aks/versions.tf – Provider requirements for the AKS module
 # ==============================================================================
 
 terraform {
