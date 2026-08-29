@@ -315,7 +315,7 @@ run_apply_plan() {
 }
 
 # ===========================================================================
-# 6. Post-apply: Configure AKS API server IP ranges
+# 6a. Post-apply: Configure AKS API server IP ranges
 # ===========================================================================
 configure_aks_api_server_ips() {
   if [[ "${AKS_USE_SERVICE_TAG:-true}" != "true" ]]; then
@@ -359,6 +359,43 @@ configure_aks_api_server_ips() {
 }
 
 
+# ===========================================================================
+# 6b. Store App Insights connection string in bootstrap Key Vault
+# ===========================================================================
+store_app_insights_connection_string() {
+  local kv_name="kv-azdo-bootstrap-${AZURE_SUBSCRIPTION_ID: -6}"
+  local secret_name="ApplicationInsightsConnectionString"
+  local conn_str
+
+  # Fetch connection string from Terraform output
+  conn_str="$(tofu output -raw application_insights_connection_string 2>/dev/null || true)"
+
+  if [[ -z "$conn_str" ]]; then
+    log "WARNING: application_insights_connection_string output is empty; skipping Key Vault update"
+    return 0
+  fi
+
+  log "Storing Application Insights connection string in Key Vault: ${kv_name}"
+
+  # Idempotent: check if secret exists and update if different
+  local existing
+  existing="$(az keyvault secret show \
+    --vault-name "$kv_name" \
+    --name "$secret_name" \
+    --query value \
+    -o tsv 2>/dev/null || true)"
+
+  if [[ "$existing" != "$conn_str" ]]; then
+    az keyvault secret set \
+      --vault-name "$kv_name" \
+      --name "$secret_name" \
+      --value "$conn_str" \
+      --output none
+    log "Key Vault secret updated"
+  else
+    log "Key Vault secret already up-to-date"
+  fi
+}
 
 # ===========================================================================
 # 7. Destroy and state cleanup
@@ -491,6 +528,7 @@ case "$MODE" in
     az account get-access-token --resource https://management.azure.com >/dev/null 2>&1 || true
     tofu apply -input=false -lock-timeout=5m -auto-approve "$PLAN_FILE"
     configure_aks_api_server_ips
+    store_app_insights_connection_string
     ;;
   --apply-plan)
     run_apply_plan

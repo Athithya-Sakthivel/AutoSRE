@@ -1,0 +1,84 @@
+# ==============================================================================
+# Cloudflared Helm Chart – Values
+# ==============================================================================
+
+namespace: cloudflared
+
+replicaCount: 2
+
+image:
+  repository: docker.io/cloudflare/cloudflared
+  tag: "2026.8.2"
+  digest: "sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38"
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  name: cloudflared-sa
+
+tunnel:
+  tokenSecretName: cloudflared-token # Created by ESO
+
+service:
+  enabled: true
+  metricsPort: 2000
+
+cloudflared:
+  args:
+    - tunnel
+    - --no-autoupdate
+    - --loglevel
+    - info
+    - --metrics
+    - 0.0.0.0:2000
+    - run
+
+probes:
+  liveness:
+    enabled: true
+    path: /ready
+    port: 2000
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 3
+    timeoutSeconds: 5
+  readiness:
+    enabled: true
+    path: /ready
+    port: 2000
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    failureThreshold: 3
+    timeoutSeconds: 3
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+terminationGracePeriodSeconds: 30
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: cloudflared
+
+priorityClassName: system-cluster-critical

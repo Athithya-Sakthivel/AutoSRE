@@ -6,7 +6,6 @@ useDefault = true
 [[allowlists]]
 description = "Ignore local dev/temp scripts with dummy secrets"
 paths = [
-  '''scripts/local/run_apps\.sh''',
   '''service/test_e2e_locally\.sh''',
   '''service/temp_az_resources\.sh''',
   '''service/src/test/resources/application-test\.yml''',

@@ -88,17 +88,6 @@ resource "azurerm_key_vault_secret" "cloudflare_tunnel_token" {
   }
 }
 
-resource "azurerm_key_vault_secret" "cloudflare_tunnel_name" {
-  name         = "CloudflareTunnelName"
-  value        = var.cloudflare_tunnel_name
-  key_vault_id = azurerm_key_vault.bootstrap.id
-}
-
-resource "azurerm_key_vault_secret" "cloudflare_tunnel_id" {
-  name         = "CloudflareTunnelId"
-  value        = var.cloudflare_tunnel_id
-  key_vault_id = azurerm_key_vault.bootstrap.id
-}
 
 resource "azurerm_key_vault_secret" "origin_cert" {
   name         = "OriginCaCert"

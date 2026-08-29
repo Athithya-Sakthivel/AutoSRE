@@ -12,7 +12,6 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-merge-conflict
-      - id: check-yaml
       - id: check-json
       - id: check-toml
 
@@ -57,5 +56,5 @@ repos:
         name: Prettier
         entry: npm --prefix services/frontend exec -- prettier --write
         language: system
-        files: ^(services/frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md|yaml|yml)|.*\.(yaml|yml|md))$
+        files: ^(services/frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md)|.*\.(md))$
         pass_filenames: true

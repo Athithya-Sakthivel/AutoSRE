@@ -8,7 +8,6 @@ RUN npm run build
 
 # Runtime stage
 FROM nginxinc/nginx-unprivileged:1.30.4-alpine-slim
-COPY --chown=101:101 nginx.prod.conf /etc/nginx/nginx.conf
 COPY --chown=101:101 --from=builder /app/dist /usr/share/nginx/html
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

@@ -1,0 +1,83 @@
+# Common configuration for SecretStore/ExternalSecret resources.
+# This chart configures ESO resources; it does not install the ESO controller/CRDs.
+
+namespace: external-secrets
+
+# Optional override for the generated application name.
+nameOverride: ""
+
+# Store resource name. ExternalSecrets reference this name.
+store:
+  name: azure-keyvault
+
+  # false = SecretStore (namespaced)
+  # true  = ClusterSecretStore (cluster-scoped)
+  #
+  # Use true when ExternalSecrets span multiple namespaces.
+  clusterScope: true
+
+# Azure Key Vault settings.
+keyVault:
+  url: "" # e.g. https://my-keyvault.vault.azure.net
+  tenantId: "" # Required for ServicePrincipal; optional for WorkloadIdentity.
+
+# Authentication:
+#   ServicePrincipal
+#   WorkloadIdentity
+auth:
+  mode: ServicePrincipal
+
+  servicePrincipal:
+    # Existing Kubernetes Secret containing the service principal credentials.
+    secretName: azure-sp-creds
+    secretNamespace: external-secrets
+
+    # Keys inside the Kubernetes Secret.
+    clientIdKey: clientId
+    clientSecretKey: clientSecret
+
+  workloadIdentity:
+    # Kubernetes ServiceAccount referenced by ESO.
+    serviceAccountName: eso-azure-kv
+    serviceAccountNamespace: external-secrets
+
+    # Set true to have this chart create the ServiceAccount.
+    createServiceAccount: false
+
+    # For Azure Workload Identity, annotations normally include the
+    # client ID of the federated Azure identity.
+    annotations: {}
+
+    # Example:
+    #
+    # annotations:
+    #   azure.workload.identity/client-id: "00000000-0000-0000-0000-000000000000"
+    #   azure.workload.identity/tenant-id: "00000000-0000-0000-0000-000000000000"
+
+# ExternalSecrets to create.
+#
+# targetNamespace is the namespace where ESO creates the resulting
+# Kubernetes Secret. Those namespaces must exist before ESO can sync them.
+secrets:
+  - name: cloudflared-token
+    targetNamespace: cloudflared
+    refreshInterval: 1h
+    data:
+      - secretKey: token
+        remoteRef: CloudflareTunnelToken
+
+  - name: backend-secrets
+    targetNamespace: task-api
+    refreshInterval: 1h
+    data:
+      - secretKey: DATABASE_USERNAME
+        remoteRef: DatabaseUsername
+
+      - secretKey: DATABASE_PASSWORD
+        remoteRef: DatabasePassword
+
+      - secretKey: JWT_SECRET
+        remoteRef: JwtSecret
+
+      - secretKey: APPLICATIONINSIGHTS_CONNECTION_STRING
+        remoteRef: ApplicationInsightsConnectionString
