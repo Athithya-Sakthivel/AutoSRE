@@ -1,162 +1,283 @@
-# Main Infrastructure (`src/terraform/main`)
+# Main Terraform Configuration – Task API AKS Platform
 
-OpenTofu configuration for a serverless MLOps platform on Azure. Every resource name is derived from the subscription ID and environment — no hardcoded values.
+This directory contains the OpenTofu/Terraform configuration for the **Task API**
+production-style Azure Kubernetes Service (AKS) platform.
+
+It provisions:
+
+- Azure Virtual Network with subnets and NAT Gateway
+- AKS cluster (single node, Azure CNI Overlay + Cilium)
+- Azure Database for PostgreSQL Flexible Server (private endpoint)
+- Azure Container Registry (ACR)
+- Observability stack (Log Analytics, Application Insights, alerts, workbook)
+- Azure DevOps CI/CD pipelines and variable group integration
+
+---
 
 ## Architecture
 
 ```
-Blob upload (raw/monthly/*.parquet)
-  → Azure Function blob trigger
-    → REST API call to start ACA training job
-      → Container App Job (train)
-        → ELT + Train + Register
-          → MLflow → Azure ML Workspace (registry)
-
-Serving endpoint (public, Entra ID auth)
-  → Container App (serve)
-    → Model loaded from MLflow registry
-    → Inference endpoints (/predict, /health, /ready, /metrics, /version)
-
-CI/CD
-  GitHub push → Azure Pipeline
-    → ELT CI (lint, type-check, test)
-    → Training CI (lint, type-check, test)
-    → Serving CI (lint, type-check, test)
-    → Terraform CI (validate, plan)
-  CD triggers on CI success
-    → Training CD (push image to ACR, update ACA Job)
-    → Serving CD (push image to ACR, update ACA App)
-    → Terraform CD (apply plan, requires manual approval)
+Azure DevOps (CI/CD)
+        │
+        ▼
+GitHub Repository
+        │
+        ▼
+Terraform (main/)
+        │
+        ├── AKS Cluster (public API, AzureCloud service tag for authorized IPs)
+        ├── PostgreSQL Flexible Server (private endpoint)
+        ├── Azure Container Registry
+        ├── Virtual Network + NAT Gateway
+        ├── Observability (Log Analytics + App Insights)
+        └── Azure DevOps Pipelines & Variable Group
 ```
 
-## Providers and versions
+External access to applications is handled by **Cloudflare Tunnel** (edge stack)
+and is not part of this Terraform configuration.
 
-Pinned to exact versions in `versions.tf`. Three `versions.tf` files exist across the project — root, `modules/aca`, and `modules/azure_devops`. Only the root declares the backend and all four providers. The other two declare only the providers they actually use.
+---
 
-| Provider      | Source                  | Version | Used by              |
-| ------------- | ----------------------- | ------- | -------------------- |
-| `azurerm`     | `hashicorp/azurerm`     | 4.80.0  | All modules          |
-| `azuread`     | `hashicorp/azuread`     | 3.9.0   | Root, `aca`          |
-| `azapi`       | `azure/azapi`           | 2.10.0  | Root, `aca`          |
-| `azuredevops` | `microsoft/azuredevops` | 1.15.1  | Root, `azure_devops` |
+## Module Inventory
 
-Root `versions.tf` declares all four providers and the `azurerm` backend. `modules/aca/versions.tf` declares `azurerm`, `azuread`, `azapi`. `modules/azure_devops/versions.tf` declares `azurerm` and `azuredevops`. Other modules (`state`, `function`, `observability`, `ml_workspace`) inherit `azurerm` from the root and need no separate declaration.
+| Module          | Purpose                                                                             |
+| --------------- | ----------------------------------------------------------------------------------- |
+| `state`         | Resource group and Azure Container Registry                                         |
+| `networking`    | VNet, subnets, NAT Gateway, NSGs, private DNS zone                                  |
+| `aks`           | AKS cluster, user-assigned identity, node pool, workload identity, ACR pull         |
+| `postgresql`    | PostgreSQL Flexible Server, database, private endpoint                              |
+| `observability` | Log Analytics, Application Insights, metric alerts, scheduled query rules, workbook |
+| `azure_devops`  | Backend/frontend CI/CD pipelines and variable group authorization                   |
 
-## Module inventory
+> Note: The `budget` module was intentionally removed because Azure for Students
+> subscriptions do not support Consumption Budgets.
 
-| Module          | Resources                                                                                                                                                                             |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `state`         | Resource group, ADLS Gen2 (HNS enabled, 4 containers), Azure Container Registry (Basic, admin disabled)                                                                               |
-| `observability` | Log Analytics workspace (30 days), Application Insights (workspace-based), Workbook (8 KQL panels), Action Group (email), 4 alert rules with per-rule enable/disable toggles          |
-| `ml_workspace`  | Azure ML workspace (no compute), dedicated storage account (HNS disabled — AML requirement), Key Vault (RBAC, purge protection in prod), RBAC assignments                             |
-| `function`      | Flex Consumption Function App with Python runtime, system-assigned managed identity, blob trigger on `raw/monthly/{name}`, RBAC to read source storage and start the ACA training job |
-| `aca`           | Container Apps Environment (Consumption), serving app (public, Entra ID auth via azapi, multiple revisions), training job (manual trigger, started by the Function), SAMI + RBAC      |
-| `azure_devops`  | ELT CI pipeline, ML training CI pipeline, serving CI pipeline, training CD pipeline, serving CD pipeline, single variable group `sm-all-vars` (all non‑secret configuration)          |
+---
 
-## Serving app contract
+## Key Design Decisions
 
-The app emits custom metrics (`prediction_latency_ms`, `prediction_count`, `validation_failures`) and uses `DefaultAzureCredential()` to authenticate with the ML workspace.
+### 1. Single-Node AKS Cluster
 
-## Training job contract
+- **VM Size:** `Standard_D4s_v4` (4 vCPU, 16 GiB RAM)
+- **Node Count:** Fixed to `1`
+- **Reason:** Subscription vCPU quota (6 vCPUs) with PostgreSQL consuming 1 vCPU
+  leaves no room for a second AKS node. This is a cost‑optimised, development‑grade
+  setup; production would require a larger quota and multi‑node pool.
 
-The training Container App Job:
+### 2. Azure CNI Overlay + Cilium
 
-- Is a **manual trigger** job (no event source).
-- Is started by the Azure Function via the ARM `POST /jobs/{jobName}/start` API.
-- Runs ELT (extract from raw, transform, load to clean).
-- Trains a model using the clean data.
-- Logs metrics and parameters to MLflow.
-- Registers the model in Azure ML registry.
-- Exits after completion.
+- **Network Plugin:** `azure`
+- **Network Plugin Mode:** `overlay`
+- **Network Policy:** `cilium`
+- **Network Dataplane:** `cilium`
 
-CPU: 2, Memory: 4Gi, Timeout: 30min, Retries: 1.
+This provides efficient pod IP utilisation and advanced network policy enforcement
+without requiring a dedicated pod subnet.
 
-## Azure Function (blob trigger)
+### 3. NAT Gateway for Egress
 
-The Function (`func-blob-trigger-{env}`) replaces the previous Event Grid + Storage Queue chain. Key details:
+- A user‑assigned NAT Gateway is attached to the AKS subnet.
+- AKS outbound type is `userAssignedNATGateway`.
+- This ensures deterministic outbound IPs and avoids public IPs on nodes.
 
-- **Plan**: Flex Consumption (scales to zero).
-- **Identity**: System‑assigned, granted `Storage Blob Data Owner` and `Storage Queue Data Contributor` on the source data lake, and `Container Apps Jobs Operator` on the training job.
-- **Trigger**: Blob trigger on `raw/monthly/{name}` using identity‑based connection (`__blobServiceUri` + `__credential=managedidentity`).
-- **Action**: Starts the training job by calling `POST /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.App/jobs/{job}/start?api-version=2026-01-01` with a managed identity token.
-- **Environment variables**: `ACA_SUBSCRIPTION_ID`, `ACA_RESOURCE_GROUP_NAME`, `ACA_JOB_NAME`, `ACA_JOB_API_VERSION`, `ACA_REQUEST_TIMEOUT_SECONDS`, and the source storage connection settings.
+### 4. PostgreSQL Flexible Server with Private Endpoint
 
-## Two storage accounts
+- **SKU:** `B_Standard_B1ms` (1 vCPU, 2 GiB RAM)
+- **Version:** 18 (if available; otherwise 16)
+- **Public access:** Disabled; only accessible via Private Link.
+- **Database:** `taskdb`, user `taskuser`.
+- **Private DNS zone:** `privatelink.postgres.database.azure.com`
 
-AML workspace storage cannot have HNS enabled. The data lake needs HNS for folder-level RBAC on raw/clean data. Two accounts: `smstgartifacts*` (HNS on, data) and `smstgmlsa*` (HNS off, AML internals).
+### 5. AKS API Server Authorized IP Ranges
 
-## ADLS layout
+- Terraform/AzureRM provider (as of 5.2.0) does **not** support Azure service tags
+  in `api_server_access_profile.authorized_ip_ranges`.
+- Therefore, the `AzureCloud` service tag is applied **post‑apply** via Azure CLI
+  (`az aks update`) inside `run.sh`.
+- This allows Microsoft‑hosted Azure DevOps agents to reach the AKS API without
+  maintaining a list of >200 CIDRs (which exceeds the standard AKS limit).
+- **Security Note:** `AzureCloud` is broader than Azure DevOps only. This is
+  acceptable for staging/development, but production should use API Server VNet
+  Integration or private AKS with self‑hosted agents.
+
+### 6. Bootstrap Key Vault Integration
+
+- Secrets (database password, JWT secret, Cloudflare tokens, origin cert/key,
+  Application Insights connection string) are stored in the bootstrap Key Vault
+  (`kv-azdo-bootstrap-<suffix>`).
+- Main Terraform reads secrets via `data` sources (e.g., `DatabasePassword`).
+- Post‑apply `run.sh` may update certain secrets (e.g., App Insights connection
+  string) using `az keyvault secret set`.
+
+### 7. Remote State Backend
+
+- State is stored in an Azure Storage Account created by the bootstrap phase.
+- Backend configuration is injected dynamically by `run.sh` based on
+  `TF_BACKEND_AUTH_MODE`:
+  - `cli` – local Azure CLI authentication
+  - `oidc` – Azure DevOps OIDC service connection
+  - `access_key` – bootstrap‑only access key
+
+### 8. Azure DevOps CI/CD
+
+- Four application pipelines are created:
+  - `ci-backend`
+  - `ci-frontend`
+  - `cd-backend`
+  - `cd-frontend`
+- Terraform pipelines (`ci-terraform`, `cd-terraform`) are owned by bootstrap.
+- A single variable group `terraform-vars` (created by bootstrap) holds non‑secret
+  values and is authorized for the CD pipelines.
+
+---
+
+## Environment Configuration
+
+Environment‑specific values live in:
 
 ```
-raw/monthly/       # Raw parquet files (trigger source)
-clean/             # Transformed training data
-models/            # Model artifacts (optional)
-logs/              # Training logs
+environments/
+├── staging.tfvars
+└── prod.tfvars
 ```
 
-## Observability tables
+Common variables (subscription, tenant, owner, alert email) are provided via
+environment variables (`TF_VAR_*`) rather than `.tfvars`. This keeps sensitive
+or global values out of the repository.
 
-Application code emits via OpenTelemetry into four KQL tables: `AppRequests`, `AppDependencies`, `AppTraces`, `AppExceptions`. Custom metrics (`prediction_latency_ms`, `validation_failures`) go to `AppMetrics`. All joined on `OperationId` for end-to-end tracing.
+Example required exports:
 
-## Workbook panels
+```bash
+export TF_VAR_owner="athithya"
+export TF_VAR_alert_email_address="athithya651@gmail.com"
+export TF_BACKEND_AUTH_MODE="cli"
+```
 
-| Panel                 | KQL table       | Purpose                                                            |
-| --------------------- | --------------- | ------------------------------------------------------------------ |
-| Overview              | —               | Environment metadata                                               |
-| Request health        | `AppRequests`   | Throughput, failures, P95 latency                                  |
-| Failed requests       | `AppRequests`   | 24h failed request trend                                           |
-| Slow requests         | `AppRequests`   | P95 latency trend                                                  |
-| Exceptions            | `AppExceptions` | Exception count trend                                              |
-| Trace errors          | `AppTraces`     | Error-level traces (SeverityLevel ≥ 3)                             |
-| Custom metrics        | `AppMetrics`    | `prediction_latency_ms`, `prediction_count`, `validation_failures` |
-| Correlated operations | All 4 tables    | One row per `OperationId` with dependencies, traces, exceptions    |
+---
 
-## Alert rules
+## Running Terraform
 
-Four scheduled query rules, each independently toggled via `enable_*_alert` in tfvars. Disabled by default on student subscriptions to avoid quota exhaustion. All fire into one Action Group.
+All operations are performed through `run.sh`:
 
-| Rule                      | Table           | Triggers when                      | Severity |
-| ------------------------- | --------------- | ---------------------------------- | -------- |
-| `app_request_failures`    | `AppRequests`   | Any failed request in 15min        | Warning  |
-| `app_slow_requests`       | `AppRequests`   | P95 latency > 200ms in 15min       | Warning  |
-| `app_exceptions`          | `AppExceptions` | Any exception in 15min             | Warning  |
-| `app_validation_failures` | `AppMetrics`    | `validation_failures` > 0 in 15min | Info     |
+```bash
+cd infra/terraform/main
 
-## Entra ID auth on serving endpoint
+# Plan
+bash run.sh --plan --env staging
 
-App registration + service principal created via `azuread` provider. Auth config bound to Container App via `azapi_resource` (azurerm lacks native support). Redirect URI is derived from the Container Apps environment’s default domain for a deterministic configuration. Unauthenticated requests receive HTTP 401.
+# Apply
+bash run.sh --create --env staging
 
-## Naming convention
+# Refresh state
+bash run.sh --refresh --env staging
 
-All names derived in `locals.tf`: `<project-abbr><resource-type><env-abbr><subscription-suffix>`. Example staging names: `smstgartifactsf41930`, `law-sm-stg`, `acae-sm-stg`, `aca-serve-stg`, `acaj-train-stg`, `func-blob-trigger-stg`. Subscription suffix ensures global uniqueness per engineer.
+# Destroy
+bash run.sh --destroy --env staging --yes-delete
 
-## Identity model
+# Validate only
+bash run.sh --validate --env staging
+```
 
-System-assigned managed identities everywhere. No storage keys, no SAS tokens, no service principal secrets. OIDC for CI/CD. `DefaultAzureCredential()` in application code.
+`run.sh` also:
 
-## Azure DevOps integration
+- Ensures OpenTofu is installed
+- Resolves Azure subscription/tenant automatically
+- Registers the AKS service‑tag preview feature (idempotent)
+- Fetches Azure DevOps IPs only if service‑tag is disabled
+- After apply, applies `AzureCloud` service tag to AKS API and stores the
+  Application Insights connection string in Key Vault (if missing/outdated)
 
-The `azure_devops` module creates pipelines and a single variable group (`sm-all-vars`) in the project provisioned by bootstrap. The variable group contains every non‑secret configuration value (storage account, MLflow URI, container names, ACR name, resource groups, etc.) and is fully populated from Terraform outputs — no manual value management. CI pipelines trigger on path-specific code changes. CD pipelines deploy on CI success with manual approval for infrastructure changes.
+---
 
-## run.sh
+## Outputs
 
-Single entrypoint for plan, create, validate, destroy. Auto-derives subscription/tenant from `az account show`. Handles OIDC, CLI, and access_key backend auth. Refreshes token before apply. Nuclear destroy purges soft-deleted Key Vault and ML workspace, deletes state blob. No longer manages Event Grid subscriptions.
+Key outputs exposed by the root module include:
 
-| Command                              | Effect                                                               |
-| ------------------------------------ | -------------------------------------------------------------------- |
-| `--plan --env <env>`                 | Validate, format, create plan file                                   |
-| `--create --env <env>`               | Plan, apply, sync variable groups                                    |
-| `--destroy --env <env> --yes-delete` | Nuke resource group, purge soft-deleted resources, delete state blob |
-| `--validate --env <env>`             | Format and validate only                                             |
+| Output                                    | Purpose                      |
+| ----------------------------------------- | ---------------------------- |
+| `resource_group_name` / `id`              | Resource group references    |
+| `acr_name`, `acr_login_server`, `acr_id`  | Container registry access    |
+| `aks_cluster_name`, `aks_cluster_id`      | AKS identification           |
+| `aks_oidc_issuer_url`                     | Workload identity federation |
+| `aks_kubelet_identity_object_id`          | ACR pull validation          |
+| `aks_node_resource_group`                 | Node troubleshooting         |
+| `postgresql_server_fqdn`, `database_name` | Backend configuration        |
+| `application_insights_connection_string`  | Telemetry (sensitive)        |
+| `log_analytics_workspace_customer_id`     | Querying logs                |
+| `ci/cd pipeline IDs`                      | Pipeline management          |
 
-## Key design choices
+---
 
-- **Serverless compute**: Container Apps and Azure Functions scale to zero. No VMs, no AKS management.
-- **Reliable trigger**: Blob‑triggered Azure Function replaces fragile Event Grid + Storage Queue chain; works on all subscription tiers.
-- **Two storage accounts**: AML requires non-HNS; data lake requires HNS.
-- **Alert toggles**: Per-rule booleans in tfvars let you control quota consumption.
-- **No secrets**: SAMI + RBAC + OIDC. Zero hardcoded credentials.
-- **Derived names**: One `locals.tf` block generates every resource name from subscription ID and environment.
-- **Workbook as JSON template**: Separates KQL from HCL, avoids provider rename bugs.
-- **Three versions.tf files**: Root declares all providers + backend. `aca` and `azure_devops` declare the subset they use. Other modules inherit from root.
-- **App contract endpoints**: `/health`, `/ready`, `/metrics`, `/version` for production-grade observability and deployment validation.
+## Observability
+
+- **Log Analytics workspace** – 30‑day retention (configurable).
+- **Application Insights** – workspace‑based, 100% server sampling.
+- **Metric alerts** – CPU, memory, PostgreSQL storage (toggleable via tfvars).
+- **Scheduled query alerts** – Pod restarts, failed request percentage.
+- **Azure Monitor Workbook** – Pre‑built KQL queries for requests, dependencies,
+  exceptions, and custom metrics.
+
+---
+
+## Security Considerations
+
+- PostgreSQL is accessible only via private endpoint.
+- ACR admin account is disabled; AKS kubelet uses `AcrPull` role.
+- Workload identity is enabled on AKS.
+- OIDC issuer is enabled for workload identity federation.
+- Secrets are stored in Azure Key Vault (bootstrap) and never committed to Git.
+- AKS API server is protected by `AzureCloud` service tag (staging).
+
+### Production Hardening Recommendations
+
+- Use **API Server VNet Integration** or **private AKS** with self‑hosted agents.
+- Replace `AzureCloud` service tag with explicit CIDRs or a private network.
+- Enable Key Vault purge protection and network ACLs for production.
+- Use a dedicated Key Vault for application secrets if required.
+
+---
+
+## Limitations
+
+- The AKS cluster is a **single node** due to subscription quota.
+- `AzureCloud` service tag is a **preview feature** and not recommended for
+  production use.
+- The `budget` module is omitted because the current subscription offer does not
+  support cost budgets.
+
+---
+
+## File Structure
+
+```
+.
+├── README.md
+├── environments/
+│   ├── prod.tfvars
+│   └── staging.tfvars
+├── locals.tf
+├── main.tf
+├── outputs.tf
+├── providers.tf
+├── run.sh
+├── variables.tf
+├── versions.tf
+└── modules/
+    ├── aks/
+    ├── azure_devops/
+    ├── networking/
+    ├── observability/
+    ├── postgresql/
+    └── state/
+```
+
+---
+
+## Related Directories
+
+- `infra/terraform/bootstrap/` – Azure DevOps bootstrap and remote state storage.
+- `infra/terraform/edge/` – Cloudflare Tunnel and DNS.
+- `azure-pipelines/` – CI/CD pipeline definitions.
+- `infra/k8s/` – Helm charts for in‑cluster components (Cloudflared, External Secrets).
+
+---
