@@ -68,4 +68,3 @@ dist
 .env.*
 !.env.example
 Dockerfile
-istio-1.30.3

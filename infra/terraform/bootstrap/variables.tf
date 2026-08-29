@@ -2,6 +2,11 @@
 # Bootstrap input variables
 # ------------------------------------------------------------------------------
 
+variable "owner" {
+  description = "Owner tag value used by main Terraform."
+  type        = string
+}
+
 variable "AZDO_ORG_SERVICE_URL" {
   description = "Azure DevOps organization URL, for example https://dev.azure.com/contoso"
   type        = string

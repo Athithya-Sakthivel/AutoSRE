@@ -29,7 +29,6 @@
         "vmware.vscode-boot-dev-pack",
         "ms-kubernetes-tools.vscode-kubernetes-tools",
         "ms-azuretools.vscode-docker",
-        "github.vscode-github-actions",
         "redhat.vscode-yaml"
       ],
       "settings": {

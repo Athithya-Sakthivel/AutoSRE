@@ -10,6 +10,11 @@ resource "azuredevops_variable_group" "terraform_vars" {
   description  = "Common Terraform variables and Azure DevOps credentials for CI/CD pipelines"
   allow_access = true
 
+  variable {
+  name  = "TF_VAR_owner"
+  value = var.owner
+  }
+
   # ---------- Terraform input variables (not derivable) -----------------------
   variable {
     name  = "TF_VAR_location"
@@ -42,4 +47,5 @@ resource "azuredevops_variable_group" "terraform_vars" {
     name  = "TF_VAR_cloudflare_tunnel_id"
     value = var.cloudflare_tunnel_id
   }
+
 }

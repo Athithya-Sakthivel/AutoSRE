@@ -41,7 +41,7 @@ LAW_NAME="task-api-logs-1930"
 LAW_RG="temp-az-1930"
 
 DB_PASSWORD='bulZpXGOiFOORRLRs6V+24gv/egWbQQVzdDT1wcwghU='
-POSTGRES_IMAGE='docker.io/library/postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685'
+POSTGRES_IMAGE='docker.io/library/postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
 
 AGENT_VERSION="3.7.9"
 AGENT_JAR="/tmp/applicationinsights-agent-${AGENT_VERSION}.jar"
