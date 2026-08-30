@@ -1,0 +1,21 @@
+{{- if and .Values.networkPolicies.enabled .Values.networkPolicies.dnsEgress }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-task-api-dns
+  namespace: {{ .Values.networkPolicies.taskApiNamespace | quote }}
+spec:
+  description: Allow task-api pods to resolve Kubernetes DNS.
+  endpointSelector: {}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.dnsNamespace | quote }}
+{{ toYaml .Values.networkPolicies.dnsSelector.matchLabels | nindent 12 }}
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+{{- end }}

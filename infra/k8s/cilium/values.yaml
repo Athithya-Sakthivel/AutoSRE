@@ -1,0 +1,86 @@
+gateway:
+  createGatewayClass: false
+  name: gateway
+  namespace: gateway
+  className: cilium
+  controllerName: io.cilium/gateway-controller
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+
+routes:
+  backend:
+    enabled: true
+    name: backend-route
+    namespace: task-api
+    parentRefs:
+      - name: gateway
+        namespace: gateway
+    matches:
+      - path:
+          type: PathPrefix
+          value: /api
+    hostnames: []
+    backendRefs:
+      - name: backend-stable
+        kind: Service
+        port: 8080
+        weight: 100
+      - name: backend-canary
+        kind: Service
+        port: 8080
+        weight: 0
+
+  frontend:
+    enabled: true
+    name: frontend-route
+    namespace: task-api
+    parentRefs:
+      - name: gateway
+        namespace: gateway
+    matches:
+      - path:
+          type: PathPrefix
+          value: /
+    hostnames: []
+    backendRefs:
+      - name: frontend-stable
+        kind: Service
+        port: 8080
+        weight: 100
+      - name: frontend-canary
+        kind: Service
+        port: 8080
+        weight: 0
+
+networkPolicies:
+  enabled: true
+  taskApiNamespace: task-api
+  cloudflaredNamespace: cloudflared
+  gatewayNamespace: gateway
+  dnsNamespace: kube-system
+  defaultDeny: true
+  dnsEgress: true
+  cloudflaredToGateway: true
+  gatewayToFrontend: true
+  frontendToBackend: true
+  backendToPostgres: true
+  frontendSelector:
+    matchLabels:
+      app: frontend
+  backendSelector:
+    matchLabels:
+      app: backend
+  postgresSelector:
+    matchLabels:
+      app: postgres
+  cloudflaredSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflared
+  dnsSelector:
+    matchLabels:
+      k8s-app: kube-dns

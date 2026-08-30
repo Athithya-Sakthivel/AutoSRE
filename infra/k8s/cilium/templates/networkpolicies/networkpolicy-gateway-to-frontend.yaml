@@ -1,0 +1,18 @@
+{{- if and .Values.networkPolicies.enabled .Values.networkPolicies.gatewayToFrontend }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-gateway-to-frontend
+  namespace: {{ .Values.networkPolicies.taskApiNamespace | quote }}
+spec:
+  description: Allow Cilium Gateway API Envoy traffic to frontend pods.
+  endpointSelector:
+{{ toYaml .Values.networkPolicies.frontendSelector | nindent 4 }}
+  ingress:
+    - fromEntities:
+        - ingress
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+{{- end }}

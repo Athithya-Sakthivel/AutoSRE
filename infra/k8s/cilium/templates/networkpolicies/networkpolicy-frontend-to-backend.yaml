@@ -1,0 +1,41 @@
+{{- if and .Values.networkPolicies.enabled .Values.networkPolicies.frontendToBackend }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-frontend-to-backend-ingress
+  namespace: {{ .Values.networkPolicies.taskApiNamespace | quote }}
+spec:
+  description: Allow frontend pods to reach backend pods on TCP/8080.
+  endpointSelector:
+{{ toYaml .Values.networkPolicies.backendSelector | nindent 4 }}
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.taskApiNamespace | quote }}
+            app: frontend
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-frontend-to-backend-egress
+  namespace: {{ .Values.networkPolicies.taskApiNamespace | quote }}
+spec:
+  description: Allow frontend pods to initiate connections to backend pods on TCP/8080.
+  endpointSelector:
+{{ toYaml .Values.networkPolicies.frontendSelector | nindent 4 }}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.taskApiNamespace | quote }}
+            app: backend
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+{{- end }}
