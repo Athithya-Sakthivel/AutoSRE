@@ -461,6 +461,27 @@ resolve_git_remote() {
   [[ -n "$GIT_OWNER" && -n "$GIT_REPO" && "$GIT_OWNER" != "$GIT_REPO" ]]
 }
 
+# After successful tofu apply, set DatabaseUrl in Key Vault
+set_database_url_secret() {
+  local pg_fqdn
+  pg_fqdn="$(tofu output -raw postgresql_server_fqdn 2>/dev/null || true)"
+
+  [[ -n "$pg_fqdn" ]] || {
+    log "WARNING: postgresql_server_fqdn not available, skipping DatabaseUrl"
+    return 0
+  }
+
+  local db_url="jdbc:postgresql://${pg_fqdn}:5432/taskdb"
+  local kv_name="kv-azdo-bootstrap-${AZURE_SUBSCRIPTION_ID: -6}"
+
+  log "Setting DatabaseUrl in Key Vault: $kv_name"
+  az keyvault secret set \
+    --vault-name "$kv_name" \
+    --name "DatabaseUrl" \
+    --value "$db_url" \
+    --output none || log "WARNING: Failed to set DatabaseUrl"
+}
+
 resolve_ado_vars() {
   local s="${AZURE_SUBSCRIPTION_ID: -6}"
   export TF_VAR_ado_project_name="${TF_VAR_ado_project_name:-azdo-bootstrap-${s}}"
@@ -529,6 +550,7 @@ case "$MODE" in
     tofu apply -input=false -lock-timeout=5m -auto-approve "$PLAN_FILE"
     configure_aks_api_server_ips
     store_app_insights_connection_string
+    set_database_url_secret
     ;;
   --apply-plan)
     run_apply_plan

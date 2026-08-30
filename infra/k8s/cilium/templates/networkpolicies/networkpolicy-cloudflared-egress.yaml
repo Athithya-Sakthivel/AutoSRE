@@ -1,0 +1,48 @@
+# ==============================================================================
+# Cloudflared Egress Policy
+#
+# Allows Cloudflared pods to:
+#   1. Resolve DNS via kube-dns (UDP/TCP 53)
+#   2. Connect to Cloudflare Tunnel endpoints (UDP/TCP 7844)
+#   3. Access HTTPS management endpoints (TCP 443)
+# ==============================================================================
+
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-cloudflared-egress
+  namespace: {{ .Values.networkPolicies.cloudflaredNamespace | quote }}
+spec:
+  description: Allow Cloudflared DNS resolution and Cloudflare Tunnel connectivity.
+  endpointSelector:
+{{ toYaml .Values.networkPolicies.cloudflaredSelector | nindent 4 }}
+  egress:
+    # DNS to kube-dns
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.dnsNamespace | quote }}
+{{ toYaml .Values.networkPolicies.dnsSelector.matchLabels | nindent 12 }}
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+
+    # Cloudflare Tunnel transport
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "7844"
+              protocol: UDP
+            - port: "7844"
+              protocol: TCP
+
+    # Optional HTTPS management/API
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

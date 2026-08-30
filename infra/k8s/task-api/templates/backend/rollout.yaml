@@ -24,7 +24,7 @@ spec:
       stableService: backend-stable
       trafficRouting:
         plugins:
-          gatewayapi:
+          argoproj-labs/gatewayAPI:
             httpRoute: backend-route
             namespace: {{ .Release.Namespace }}
       steps:
