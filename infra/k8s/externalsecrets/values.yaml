@@ -70,13 +70,16 @@ secrets:
     targetNamespace: task-api
     refreshInterval: 1h
     data:
-      - secretKey: DATABASE_USERNAME
+      - secretKey: DATABASEURL
+        remoteRef: DatabaseUrl
+
+      - secretKey: DATABASEUSERNAME
         remoteRef: DatabaseUsername
 
-      - secretKey: DATABASE_PASSWORD
+      - secretKey: DATABASEPASSWORD
         remoteRef: DatabasePassword
 
-      - secretKey: JWT_SECRET
+      - secretKey: JWTSECRET
         remoteRef: JwtSecret
 
       - secretKey: APPLICATIONINSIGHTS_CONNECTION_STRING
