@@ -1,21 +1,21 @@
 # ==============================================================================
-# Backend Stable Service
+# Frontend Stable Service
 # Always rendered – required by Argo Rollouts.
 # ==============================================================================
 
 apiVersion: v1
 kind: Service
 metadata:
-  name: backend-stable
+  name: frontend-stable
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "task-api.labels" . | nindent 4 }}
-    app.kubernetes.io/component: backend
+    app.kubernetes.io/component: frontend
     app.kubernetes.io/version: stable
 spec:
   type: ClusterIP
   selector:
-    app: backend
+    app: frontend
   ports:
     - name: http
       port: 8080

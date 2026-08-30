@@ -1,5 +1,5 @@
 # ==============================================================================
-# Frontend Argo Rollout – canary with script-driven promotion
+# Frontend Argo Rollout – canary with script-driven promotion (optional)
 # ==============================================================================
 
 apiVersion: argoproj.io/v1alpha1
@@ -26,8 +26,9 @@ spec:
         plugins:
           gatewayapi:
             httpRoute: frontend-route
-            namespace: task-api
+            namespace: {{ .Release.Namespace }}
       steps:
+        {{- if .Values.frontend.canary.enabled }}
         - setWeight: 0
         - pause:
             duration: {{ .Values.frontend.canary.initialPause | default "30s" }}
@@ -37,6 +38,10 @@ spec:
         - pause:
             duration: {{ .Values.frontend.canary.trafficPause | default "1m" }}
         - setWeight: 100
+        {{- else }}
+        # First deployment or canary disabled: immediate stable rollout
+        - setWeight: 100
+        {{- end }}
 
   template:
     metadata:
