@@ -16,7 +16,7 @@ backend:
   appInsightsSamplingPercentage: "100"
   otelResourceAttributes: ""
   canary:
-    enabled: false                    # true for canary, false for first/stable deploy
+    enabled: false
     initialPause: 30s
     k6Pause: 2m
     trafficPause: 2m
@@ -90,8 +90,12 @@ postgres:
     port: 5432
   env:
     POSTGRES_DB: taskdb
-    POSTGRES_USER: admin
-    POSTGRES_PASSWORD: ""   # provided via Secret or override
+    # POSTGRES_USER and POSTGRES_PASSWORD are now sourced from the backend-secrets
+    # secret created by External Secrets Operator. Do NOT set them here as
+    # literals; the values below are placeholders only and will be overridden
+    # by the secret references in postgres/deployment.yaml.
+    POSTGRES_USER: ""          # ignored; provided via secret
+    POSTGRES_PASSWORD: ""      # ignored; provided via secret
 
 serviceAccount:
   create: true
