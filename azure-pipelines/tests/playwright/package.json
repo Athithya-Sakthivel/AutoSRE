@@ -1,0 +1,17 @@
+{
+  "name": "task-api-playwright-tests",
+  "version": "1.0.0",
+  "description": "Playwright functional tests for Task API canary validation",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "test:ci": "playwright test",
+    "install:browsers": "playwright install --with-deps chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@types/k6": "2.2.0",
+    "@types/node": "26.4.0",
+    "typescript": "7.0.2"
+  }
+}
