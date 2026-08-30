@@ -1,5 +1,6 @@
 # ==============================================================================
 # Backend Canary Service
+# Always rendered – required by Argo Rollouts even when canary is disabled.
 # ==============================================================================
 
 apiVersion: v1

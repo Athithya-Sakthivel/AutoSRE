@@ -1,16 +1,17 @@
 # ==============================================================================
-# Frontend Stable Service
+# Frontend Canary Service
+# Always rendered – required by Argo Rollouts even when canary is disabled.
 # ==============================================================================
 
 apiVersion: v1
 kind: Service
 metadata:
-  name: frontend-stable
+  name: frontend-canary
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "task-api.labels" . | nindent 4 }}
     app.kubernetes.io/component: frontend
-    app.kubernetes.io/version: stable
+    app.kubernetes.io/version: canary
 spec:
   type: ClusterIP
   selector:

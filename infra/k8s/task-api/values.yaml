@@ -16,18 +16,10 @@ backend:
   appInsightsSamplingPercentage: "100"
   otelResourceAttributes: ""
   canary:
-    initialPause: 30s       # wait for readiness at 0%
-    k6Pause: 2m             # default if not using indefinite pause; overwritten by script
-    trafficPause: 2m        # pause after shifting 10% for Azure telemetry query
-    steps:
-      - setWeight: 0
-        pauseDuration: 30s
-      - setWeight: 0
-        pauseDuration: 2m
-      - setWeight: 10
-        pauseDuration: 2m
-      - setWeight: 100
-        pauseDuration: 0s
+    enabled: false                    # true for canary, false for first/stable deploy
+    initialPause: 30s
+    k6Pause: 2m
+    trafficPause: 2m
   hpa:
     enabled: false
     minReplicas: 1
@@ -62,6 +54,7 @@ frontend:
   revisionHistoryLimit: 3
   progressDeadlineSeconds: 600
   canary:
+    enabled: false
     initialPause: 30s
     k6Pause: 1m
     trafficPause: 1m
