@@ -1,0 +1,39 @@
+# ==============================================================================
+# Backend HPA – enabled only after canary promotion
+# ==============================================================================
+
+{{- if .Values.backend.hpa.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "task-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  scaleTargetRef:
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    name: backend
+  minReplicas: {{ .Values.backend.hpa.minReplicas | default 1 }}
+  maxReplicas: {{ .Values.backend.hpa.maxReplicas | default 3 }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.backend.hpa.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.backend.hpa.targetMemoryUtilizationPercentage }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+    scaleUp:
+      stabilizationWindowSeconds: 60
+{{- end }}

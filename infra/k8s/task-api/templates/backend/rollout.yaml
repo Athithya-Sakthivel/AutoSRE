@@ -1,0 +1,98 @@
+# ==============================================================================
+# Backend Argo Rollout – canary with script-driven promotion
+# ==============================================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "task-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  replicas: {{ .Values.backend.replicas | default 2 }}
+  revisionHistoryLimit: {{ .Values.backend.revisionHistoryLimit | default 3 }}
+  progressDeadlineSeconds: {{ .Values.backend.progressDeadlineSeconds | default 600 }}
+  selector:
+    matchLabels:
+      app: backend
+
+  strategy:
+    canary:
+      canaryService: backend-canary
+      stableService: backend-stable
+      trafficRouting:
+        plugins:
+          gatewayapi:
+            httpRoute: backend-route
+            namespace: task-api
+      steps:
+        - setWeight: 0
+        - pause:
+            duration: {{ .Values.backend.canary.initialPause | default "30s" }}
+        # Indefinite pause – script promotes after k6 validation
+        - pause: {}
+        - setWeight: 10
+        - pause:
+            duration: {{ .Values.backend.canary.trafficPause | default "2m" }}
+        - setWeight: 100
+
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      serviceAccountName: {{ include "task-api.serviceAccountName" . }}
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.backend.serverPort | default 8080 }}
+              protocol: TCP
+
+          envFrom:
+            - configMapRef:
+                name: backend-config
+            - secretRef:
+                name: backend-secrets
+
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            initialDelaySeconds: {{ .Values.backend.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.backend.probes.readiness.periodSeconds }}
+            failureThreshold: 3
+            timeoutSeconds: 3
+
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            initialDelaySeconds: {{ .Values.backend.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.backend.probes.liveness.periodSeconds }}
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            initialDelaySeconds: {{ .Values.backend.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.backend.probes.startup.periodSeconds }}
+            failureThreshold: 30
+            timeoutSeconds: 3
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL

@@ -1,0 +1,82 @@
+# ==============================================================================
+# PostgreSQL Deployment – only for kind/local development
+#
+# Used to provide a local PostgreSQL instance when running on kind.
+# Disabled by default; enable with postgres.enabled=true.
+#
+# IMPORTANT:
+#   PostgreSQL 18+ official images expect the volume to be mounted at
+#   /var/lib/postgresql (not /var/lib/postgresql/data). This allows the
+#   image to create its major-version-specific data directory
+#   (e.g., /var/lib/postgresql/18/docker) and supports pg_upgrade in place.
+# ==============================================================================
+
+{{- if .Values.postgres.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "task-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.env.POSTGRES_DB | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.env.POSTGRES_USER | quote }}
+            - name: POSTGRES_PASSWORD
+              value: {{ .Values.postgres.env.POSTGRES_PASSWORD | quote }}
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql     # changed for PG 18+
+
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.postgres.env.POSTGRES_USER | quote }}]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.postgres.env.POSTGRES_USER | quote }}]
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+{{- end }}

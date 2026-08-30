@@ -1,0 +1,6 @@
+apiVersion: v2
+name: task-api
+description: Task API platform with backend and frontend using Argo Rollouts canary deployments
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

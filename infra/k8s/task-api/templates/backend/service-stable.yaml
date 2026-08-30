@@ -1,0 +1,22 @@
+# ==============================================================================
+# Backend Stable Service
+# ==============================================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-stable
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "task-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/version: stable
+spec:
+  type: ClusterIP
+  selector:
+    app: backend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

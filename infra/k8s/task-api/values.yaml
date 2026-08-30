@@ -1,0 +1,106 @@
+# ==============================================================================
+# Task API Helm chart values
+# ==============================================================================
+
+backend:
+  enabled: true
+  image:
+    repository: acrtaskapistgf41930.azurecr.io/backend
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 2
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 600
+  serverPort: 8080
+  otelServiceName: task-api-backend
+  appInsightsSamplingPercentage: "100"
+  otelResourceAttributes: ""
+  canary:
+    initialPause: 30s       # wait for readiness at 0%
+    k6Pause: 2m             # default if not using indefinite pause; overwritten by script
+    trafficPause: 2m        # pause after shifting 10% for Azure telemetry query
+    steps:
+      - setWeight: 0
+        pauseDuration: 30s
+      - setWeight: 0
+        pauseDuration: 2m
+      - setWeight: 10
+        pauseDuration: 2m
+      - setWeight: 100
+        pauseDuration: 0s
+  hpa:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 80
+    targetMemoryUtilizationPercentage: 80
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  probes:
+    readiness:
+      initialDelaySeconds: 15
+      periodSeconds: 10
+    liveness:
+      initialDelaySeconds: 30
+      periodSeconds: 15
+    startup:
+      initialDelaySeconds: 30
+      periodSeconds: 10
+
+frontend:
+  enabled: true
+  image:
+    repository: acrtaskapistgf41930.azurecr.io/frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 2
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 600
+  canary:
+    initialPause: 30s
+    k6Pause: 1m
+    trafficPause: 1m
+  hpa:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+  probes:
+    readiness:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    liveness:
+      initialDelaySeconds: 10
+      periodSeconds: 15
+
+postgres:
+  enabled: false
+  image:
+    repository: postgres
+    tag: "18.6-alpine"
+    pullPolicy: IfNotPresent
+  storage:
+    size: 1Gi
+  service:
+    port: 5432
+  env:
+    POSTGRES_DB: taskdb
+    POSTGRES_USER: taskuser
+    POSTGRES_PASSWORD: ""   # provided via Secret or override
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
