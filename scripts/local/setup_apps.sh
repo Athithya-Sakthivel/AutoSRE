@@ -44,9 +44,11 @@ helm upgrade --install eso-config ./infra/k8s/externalsecrets \
   --set keyVault.tenantId="${TENANT_ID}" \
   --set auth.mode=ServicePrincipal
 
-
 helm upgrade --install cloudflared infra/k8s/cloudflared   --namespace cloudflared   --create-namespace
 
+helm upgrade --install cilium infra/k8s/cilium \
+  --namespace gateway \
+  --create-namespace
 
 helm upgrade --install task-api infra/k8s/task-api \
   --namespace task-api \
