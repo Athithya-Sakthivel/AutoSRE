@@ -23,8 +23,8 @@ azure-pipelines/
 │   └── cd-terraform.yaml
 ├── templates/
 │   ├── docker-build-push.yaml   # Reusable Docker build + Trivy scan + push to ACR
-│   ├── backend-deploy.yaml      # Deploy backend to AKS (canary)
-│   └── frontend-deploy.yaml     # Deploy frontend to AKS (rolling)
+│   ├── backend-deploy.yaml      # Deploy backend to AKS
+│   └── frontend-deploy.yaml     # Deploy frontend to AKS
 └── README.md
 ```
 

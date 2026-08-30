@@ -66,17 +66,6 @@ variable "enable_js_detections" {
   default = true
 }
 
-variable "origin_ca_validity_days" {
-  description = "Validity period for Origin CA certificate in days"
-  type        = number
-  default     = 5475  # 15 years
-
-  validation {
-    condition     = contains([7, 30, 90, 365, 730, 1095, 5475], var.origin_ca_validity_days)
-    error_message = "Origin CA validity must be one of: 7, 30, 90, 365, 730, 1095, 5475 days."
-  }
-}
-
 # ------------------------------------------------------------------------------
 # Locals
 # ------------------------------------------------------------------------------
