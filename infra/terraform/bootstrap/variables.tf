@@ -152,15 +152,3 @@ variable "cloudflare_tunnel_id" {
   description = "Cloudflare Tunnel ID"
   type        = string
 }
-
-variable "origin_cert" {
-  description = "Cloudflare Origin CA certificate"
-  type        = string
-  sensitive   = true
-}
-
-variable "origin_key" {
-  description = "Cloudflare Origin CA private key"
-  type        = string
-  sensitive   = true
-}

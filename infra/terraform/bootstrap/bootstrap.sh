@@ -30,8 +30,6 @@ export TF_VAR_jwt_secret="${TF_VAR_jwt_secret:-$(openssl rand -base64 64)}"
 export TF_VAR_cloudflare_tunnel_token="${TF_VAR_cloudflare_tunnel_token:-$(tofu -chdir=infra/terraform/edge output -raw cloudflare_tunnel_token 2>/dev/null || true)}"
 export TF_VAR_cloudflare_tunnel_name="${TF_VAR_cloudflare_tunnel_name:-task-api-default}"
 export TF_VAR_cloudflare_tunnel_id="${TF_VAR_cloudflare_tunnel_id:-$(tofu -chdir=infra/terraform/edge output -raw cloudflare_tunnel_id 2>/dev/null || true)}"
-export TF_VAR_origin_cert="${TF_VAR_origin_cert:-$(tofu -chdir=infra/terraform/edge output -raw origin_ca_certificate 2>/dev/null || true)}"
-export TF_VAR_origin_key="${TF_VAR_origin_key:-$(tofu -chdir=infra/terraform/edge output -raw origin_ca_private_key 2>/dev/null || true)}"
 
 export AZURE_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
 export SUBSCRIPTION_SUFFIX="${AZURE_SUBSCRIPTION_ID: -6}"
