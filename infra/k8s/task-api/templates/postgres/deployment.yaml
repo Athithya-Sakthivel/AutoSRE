@@ -1,15 +1,5 @@
 # ==============================================================================
 # PostgreSQL Deployment – only for kind/local development
-#
-# Used to provide a local PostgreSQL instance when running on kind.
-# Disabled by default; enable with postgres.enabled=true.
-#
-# The PostgreSQL credentials (username and password) are sourced from the
-# `backend-secrets` secret, which is synced by External Secrets Operator from
-# Azure Key Vault. This ensures the local database uses the same credentials
-# as the backend application, eliminating authentication mismatches.
-#
-# Volume mount path is /var/lib/postgresql for PostgreSQL 18+.
 # ==============================================================================
 
 {{- if .Values.postgres.enabled }}
@@ -68,7 +58,7 @@ spec:
 
           readinessProbe:
             exec:
-              command: ["sh", "-c", "pg_isready -U ${DATABASEUSERNAME} -d ${POSTGRES_DB}"]
+              command: ["/bin/sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
@@ -76,7 +66,7 @@ spec:
 
           livenessProbe:
             exec:
-              command: ["sh", "-c", "pg_isready -U ${DATABASEUSERNAME} -d ${POSTGRES_DB}"]
+              command: ["/bin/sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
             initialDelaySeconds: 15
             periodSeconds: 15
             failureThreshold: 3
