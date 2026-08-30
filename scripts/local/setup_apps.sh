@@ -46,3 +46,16 @@ helm upgrade --install eso-config ./infra/k8s/externalsecrets \
 
 
 helm upgrade --install cloudflared infra/k8s/cloudflared   --namespace cloudflared   --create-namespace
+
+
+helm upgrade --install task-api infra/k8s/task-api \
+  --namespace task-api \
+  --create-namespace \
+  --set postgres.enabled=true \
+  --set postgres.env.POSTGRES_PASSWORD="local-dev-password" \
+  --set backend.image.repository="ghcr.io/athithya-sakthivel/task-api-backend" \
+  --set backend.image.tag="v1" \
+  --set frontend.image.repository="ghcr.io/athithya-sakthivel/task-api-frontend" \
+  --set frontend.image.tag="v1" \
+  --set backend.canary.trafficPause="30s" \
+  --set frontend.canary.trafficPause="30s"

@@ -1,0 +1,22 @@
+# ==============================================================================
+# Frontend Stable Service
+# ==============================================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-stable
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "task-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/version: stable
+spec:
+  type: ClusterIP
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
