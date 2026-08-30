@@ -1,5 +1,13 @@
 # ==============================================================================
 # Task API Helm chart values
+#
+# Design decisions:
+#   - Backend and frontend use Argo Rollouts (canary) instead of Deployments.
+#   - Canary is disabled by default for first deployment; enable later.
+#   - HPA is disabled by default; enable after canary promotion.
+#   - Backend secrets come from External Secrets Operator (backend-secrets).
+#   - PostgreSQL is disabled by default; enable for kind local development.
+#   - App Insights sampling is 100% for dev; reduce in production.
 # ==============================================================================
 
 backend:
@@ -13,14 +21,16 @@ backend:
   progressDeadlineSeconds: 600
   serverPort: 8080
   otelServiceName: task-api-backend
-  appInsightsSamplingPercentage: "100"
+  appInsightsSamplingPercentage: "100"   # 100% for dev; 30% recommended for prod
   otelResourceAttributes: ""
   canary:
+    # Disable canary for initial deploy. Enable for subsequent releases.
     enabled: false
     initialPause: 30s
     k6Pause: 2m
     trafficPause: 2m
   hpa:
+    # Disabled until canary is promoted to stable
     enabled: false
     minReplicas: 1
     maxReplicas: 3
@@ -79,6 +89,7 @@ frontend:
       periodSeconds: 15
 
 postgres:
+  # Disabled for AKS; enabled only for kind local development
   enabled: false
   image:
     repository: postgres
@@ -90,10 +101,8 @@ postgres:
     port: 5432
   env:
     POSTGRES_DB: taskdb
-    # POSTGRES_USER and POSTGRES_PASSWORD are now sourced from the backend-secrets
-    # secret created by External Secrets Operator. Do NOT set them here as
-    # literals; the values below are placeholders only and will be overridden
-    # by the secret references in postgres/deployment.yaml.
+    # Credentials are sourced from backend-secrets (created by ESO).
+    # Do NOT set literals here; postgres/deployment.yaml uses secretKeyRef.
     POSTGRES_USER: ""          # ignored; provided via secret
     POSTGRES_PASSWORD: ""      # ignored; provided via secret
 

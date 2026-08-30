@@ -1,14 +1,26 @@
 # ==============================================================================
 # Cloudflared Helm Chart – Values
+#
+# Design decisions:
+#   - Token-only mode: Cloudflared gets the tunnel token from a Kubernetes
+#     Secret (created by ESO), no local config.yml needed.
+#   - Remote configuration: The ingress route (hostname → service) is stored
+#     in Cloudflare, not in this chart.
+#   - Two replicas for high availability, with pod disruption budget min 1.
+#   - Metrics server on port 2000 for health checks.
+#   - Non-root user 65532, read-only root filesystem.
 # ==============================================================================
 
+# Namespace where Cloudflared runs
 namespace: cloudflared
 
+# Two pods for HA. Cloudflare recommends multiple replicas for redundancy.
 replicaCount: 2
 
 image:
   repository: docker.io/cloudflare/cloudflared
   tag: "2026.8.2"
+  # Pinned by digest for reproducibility and security
   digest: "sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38"
   pullPolicy: IfNotPresent
 
@@ -16,22 +28,27 @@ serviceAccount:
   name: cloudflared-sa
 
 tunnel:
-  tokenSecretName: cloudflared-token # Created by ESO
+  # This secret is synced from Azure Key Vault by External Secrets Operator
+  tokenSecretName: cloudflared-token
 
 service:
   enabled: true
+  # Metrics port for Prometheus and health probes
   metricsPort: 2000
 
 cloudflared:
   args:
     - tunnel
+    # Do not auto-update; image is pinned
     - --no-autoupdate
     - --loglevel
     - info
+    # Expose Prometheus metrics on all interfaces
     - --metrics
     - 0.0.0.0:2000
     - run
 
+# Probes use /ready endpoint on metrics port
 probes:
   liveness:
     enabled: true
@@ -52,11 +69,13 @@ probes:
 
 securityContext:
   runAsNonRoot: true
+  # Cloudflared official image uses UID 65532
   runAsUser: 65532
   runAsGroup: 65532
 
 podDisruptionBudget:
   enabled: true
+  # Keep at least one replica available during voluntary disruptions
   minAvailable: 1
 
 resources:
@@ -73,6 +92,7 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
+# Spread pods across nodes for HA (only one node in kind, but good practice)
 topologySpreadConstraints:
   - maxSkew: 1
     topologyKey: kubernetes.io/hostname
@@ -81,4 +101,5 @@ topologySpreadConstraints:
       matchLabels:
         app.kubernetes.io/name: cloudflared
 
+# High priority to keep tunnel alive
 priorityClassName: system-cluster-critical

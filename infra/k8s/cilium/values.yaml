@@ -1,30 +1,67 @@
+# ==============================================================================
+# Cilium Gateway API + NetworkPolicy chart values
+#
+# Design decisions:
+#   - GatewayClass is not created here (Cilium manages it) to avoid conflicts.
+#   - HTTPRoutes use stable/canary services with initial weights 100/0.
+#     Argo Rollouts updates these weights during canary deployments.
+#   - NetworkPolicies are enabled with default-deny to enforce least privilege.
+#   - Cloudflared egress policy allows DNS, Cloudflare Tunnel (7844), HTTPS (443),
+#     and frontend service (8080). The last one was the missing piece that
+#     caused 502 errors.
+#   - Gateway to frontend traffic is allowed via the special `ingress` entity
+#     (Cilium Envoy), not a pod selector.
+# ==============================================================================
+
 gateway:
+  # Whether to create the GatewayClass. Cilium itself can create this when
+  # configured with gatewayAPI.gatewayClass.create=auto. Keep false to avoid
+  # fighting with Cilium-managed GatewayClass.
   createGatewayClass: false
+
+  # Gateway resource name and namespace
   name: gateway
   namespace: gateway
+
+  # GatewayClass used by Cilium
   className: cilium
   controllerName: io.cilium/gateway-controller
+
   listeners:
+    # Single HTTP listener on port 80 (internal cluster traffic only)
     - name: http
       protocol: HTTP
       port: 80
+      # Allow routes from any namespace. This is necessary because the
+      # HTTPRoutes live in the `task-api` namespace while the Gateway is in
+      # the `gateway` namespace.
       allowedRoutes:
         namespaces:
           from: All
 
 routes:
   backend:
+    # Backend route serves /api/* traffic
     enabled: true
     name: backend-route
     namespace: task-api
+
+    # Parent Gateway reference (must match gateway.name/namespace)
     parentRefs:
       - name: gateway
         namespace: gateway
+
+    # Path-based routing: /api goes to backend
     matches:
       - path:
           type: PathPrefix
           value: /api
+
+    # No hostname filtering – all hostnames match
     hostnames: []
+
+    # Initial weights: 100% stable, 0% canary. Argo Rollouts manages these
+    # during canary rollouts.
     backendRefs:
       - name: backend-stable
         kind: Service
@@ -36,17 +73,23 @@ routes:
         weight: 0
 
   frontend:
+    # Frontend route serves everything else (SPA)
     enabled: true
     name: frontend-route
     namespace: task-api
+
     parentRefs:
       - name: gateway
         namespace: gateway
+
     matches:
       - path:
           type: PathPrefix
           value: /
+
     hostnames: []
+
+    # Same canary pattern: stable 100%, canary 0% initially
     backendRefs:
       - name: frontend-stable
         kind: Service
@@ -58,17 +101,35 @@ routes:
         weight: 0
 
 networkPolicies:
+  # Master switch for all policies
   enabled: true
+
+  # Namespace names used across policies
   taskApiNamespace: task-api
   cloudflaredNamespace: cloudflared
   gatewayNamespace: gateway
   dnsNamespace: kube-system
+
+  # Default-deny all traffic for task-api pods. This requires explicit allow
+  # policies for every legitimate flow.
   defaultDeny: true
+
+  # Allow DNS resolution from task-api pods to kube-dns
   dnsEgress: true
+
+  # Cloudflared egress rules (DNS, Tunnel, HTTPS, frontend)
   cloudflaredEgress: true
+
+  # Allow Cilium Envoy ingress to frontend pods (Gateway API traffic)
   gatewayToFrontend: true
+
+  # Allow frontend pods to talk to backend pods
   frontendToBackend: true
+
+  # Allow backend pods to talk to PostgreSQL
   backendToPostgres: true
+
+  # Pod selectors used by policies
   frontendSelector:
     matchLabels:
       app: frontend

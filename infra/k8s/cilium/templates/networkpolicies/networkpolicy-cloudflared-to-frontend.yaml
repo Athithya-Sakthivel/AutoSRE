@@ -1,0 +1,19 @@
+{{- if and .Values.networkPolicies.enabled .Values.networkPolicies.cloudflaredToFrontend }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-cloudflared-to-frontend
+  namespace: {{ .Values.networkPolicies.taskApiNamespace | quote }}
+spec:
+  description: Allow cloudflared pods to reach frontend pods on TCP/8080.
+  endpointSelector:
+{{ toYaml .Values.networkPolicies.frontendSelector | nindent 4 }}
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.cloudflaredNamespace | quote }}
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+{{- end }}

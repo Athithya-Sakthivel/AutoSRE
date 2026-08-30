@@ -5,15 +5,18 @@
 #   1. Resolve DNS via kube-dns (UDP/TCP 53)
 #   2. Connect to Cloudflare Tunnel endpoints (UDP/TCP 7844)
 #   3. Access HTTPS management endpoints (TCP 443)
+#   4. Reach the frontend service in the task-api namespace (TCP 8080)
+#      so Cloudflare Tunnel can forward public traffic to the application.
 # ==============================================================================
 
+{{- if and .Values.networkPolicies.enabled .Values.networkPolicies.cloudflaredEgress }}
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
   name: allow-cloudflared-egress
   namespace: {{ .Values.networkPolicies.cloudflaredNamespace | quote }}
 spec:
-  description: Allow Cloudflared DNS resolution and Cloudflare Tunnel connectivity.
+  description: Allow Cloudflared DNS, Cloudflare Tunnel, and application traffic.
   endpointSelector:
 {{ toYaml .Values.networkPolicies.cloudflaredSelector | nindent 4 }}
   egress:
@@ -46,3 +49,14 @@ spec:
         - ports:
             - port: "443"
               protocol: TCP
+
+    # Application traffic: cloudflared -> frontend service
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.taskApiNamespace | quote }}
+            app: frontend
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+{{- end }}
