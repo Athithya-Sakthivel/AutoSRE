@@ -90,7 +90,7 @@ postgres:
     port: 5432
   env:
     POSTGRES_DB: taskdb
-    POSTGRES_USER: taskuser
+    POSTGRES_USER: admin
     POSTGRES_PASSWORD: ""   # provided via Secret or override
 
 serviceAccount:
