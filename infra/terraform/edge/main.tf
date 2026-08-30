@@ -155,38 +155,21 @@ resource "cloudflare_bot_management" "zone" {
   }
 }
 
-# ------------------------------------------------------------------------------
-# Origin CA Certificate Generation
-# ------------------------------------------------------------------------------
+resource "cloudflare_zero_trust_tunnel_cloudflared_config" "default" {
+  account_id = var.account_id
+  tunnel_id  = data.cloudflare_zero_trust_tunnel_cloudflared.default.id
 
-# Generate the origin server's private RSA key
-resource "tls_private_key" "origin" {
-  algorithm = "RSA"
-  rsa_bits  = 2048
-}
-
-# Generate CSR for app.<domain>
-resource "tls_cert_request" "origin" {
-  private_key_pem = tls_private_key.origin.private_key_pem
-
-  subject {
-    common_name  = local.hostname
-    organization = "Task API Platform"
+  config = {
+    ingress = [
+      {
+        hostname = local.hostname
+        service  = "http://frontend-stable.task-api.svc.cluster.local:8080"
+      },
+      {
+        service = "http_status:404"
+      }
+    ]
   }
-
-  dns_names = [local.hostname]
-}
-
-# Request Cloudflare Origin CA certificate
-resource "cloudflare_origin_ca_certificate" "origin" {
-  csr = tls_cert_request.origin.cert_request_pem
-
-  hostnames = [
-    local.hostname
-  ]
-
-  request_type       = "origin-rsa"
-  requested_validity = var.origin_ca_validity_days
 }
 
 # ------------------------------------------------------------------------------
@@ -208,27 +191,4 @@ output "cloudflare_tunnel_token" {
 
 output "app_url" {
   value = "https://${local.hostname}"
-}
-
-# Origin CA Certificate outputs
-output "origin_ca_certificate" {
-  description = "Cloudflare Origin CA certificate (PEM)"
-  value       = cloudflare_origin_ca_certificate.origin.certificate
-  sensitive   = true
-}
-
-output "origin_ca_private_key" {
-  description = "Origin server private key (PEM)"
-  value       = tls_private_key.origin.private_key_pem
-  sensitive   = true
-}
-
-output "origin_ca_certificate_id" {
-  description = "Cloudflare Origin CA certificate ID"
-  value       = cloudflare_origin_ca_certificate.origin.id
-}
-
-output "origin_ca_expires_on" {
-  description = "Origin CA certificate expiration date"
-  value       = cloudflare_origin_ca_certificate.origin.expires_on
 }

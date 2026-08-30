@@ -87,24 +87,3 @@ resource "azurerm_key_vault_secret" "cloudflare_tunnel_token" {
     ignore_changes = [value]
   }
 }
-
-
-resource "azurerm_key_vault_secret" "origin_cert" {
-  name         = "OriginCaCert"
-  value        = var.origin_cert
-  key_vault_id = azurerm_key_vault.bootstrap.id
-
-  lifecycle {
-    ignore_changes = [value]
-  }
-}
-
-resource "azurerm_key_vault_secret" "origin_key" {
-  name         = "OriginCaKey"
-  value        = var.origin_key
-  key_vault_id = azurerm_key_vault.bootstrap.id
-
-  lifecycle {
-    ignore_changes = [value]
-  }
-}
