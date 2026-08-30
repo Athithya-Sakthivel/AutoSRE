@@ -15,7 +15,8 @@ infra/k8s/cilium
 │   └── networkpolicies/
 │       ├── networkpolicy-default-deny.yaml
 │       ├── networkpolicy-dns.yaml
-│       ├── networkpolicy-cloudflared-to-gateway.yaml
+│       ├── networkpolicy-cloudflared-egress.yaml
+│       ├── networkpolicy-cloudflared-to-frontend.yaml
 │       ├── networkpolicy-gateway-to-frontend.yaml
 │       ├── networkpolicy-frontend-to-backend.yaml
 │       └── networkpolicy-backend-to-postgres.yaml
@@ -47,7 +48,8 @@ infra/k8s/cilium
 
 - `default-deny` – deny all ingress/egress for `task-api` pods.
 - `allow-task-api-dns` – allow DNS queries to CoreDNS.
-- `allow-cloudflared-to-gateway` – allow cloudflared pods to make in-cluster HTTP connections (port 80).
+- `allow-cloudflared-egress` – allow Cloudflared pods to reach DNS, Cloudflare Tunnel endpoints (UDP/TCP 7844), and HTTPS (TCP 443).
+- `allow-cloudflared-to-frontend` – allow Cloudflared pods to reach frontend pods on TCP 8080.
 - `allow-gateway-to-frontend` – allow Cilium Envoy ingress to frontend pods on port 8080.
 - `allow-frontend-to-backend` – allow frontend pods to connect to backend pods on port 8080.
 - `allow-backend-to-postgres` – allow backend pods to connect to PostgreSQL pods on port 5432.
@@ -64,16 +66,17 @@ helm upgrade --install cilium infra/k8s/cilium \
 
 Key values (see `values.yaml` for full list):
 
-| Value                         | Default   | Description                        |
-| ----------------------------- | --------- | ---------------------------------- |
-| `gateway.createGatewayClass`  | `false`   | Whether to create the GatewayClass |
-| `gateway.name`                | `gateway` | Gateway resource name              |
-| `gateway.namespace`           | `gateway` | Gateway namespace                  |
-| `routes.backend.enabled`      | `true`    | Enable backend HTTPRoute           |
-| `routes.frontend.enabled`     | `true`    | Enable frontend HTTPRoute          |
-| `networkPolicies.enabled`     | `true`    | Enable all network policies        |
-| `networkPolicies.defaultDeny` | `true`    | Enable default-deny policy         |
-| `networkPolicies.dnsEgress`   | `true`    | Allow DNS for task-api pods        |
+| Value                               | Default   | Description                             |
+| ----------------------------------- | --------- | --------------------------------------- |
+| `gateway.createGatewayClass`        | `false`   | Whether to create the GatewayClass      |
+| `gateway.name`                      | `gateway` | Gateway resource name                   |
+| `gateway.namespace`                 | `gateway` | Gateway namespace                       |
+| `routes.backend.enabled`            | `true`    | Enable backend HTTPRoute                |
+| `routes.frontend.enabled`           | `true`    | Enable frontend HTTPRoute               |
+| `networkPolicies.enabled`           | `true`    | Enable all network policies             |
+| `networkPolicies.defaultDeny`       | `true`    | Enable default-deny policy              |
+| `networkPolicies.dnsEgress`         | `true`    | Allow DNS for task-api pods             |
+| `networkPolicies.cloudflaredEgress` | `true`    | Allow Cloudflared outbound connectivity |
 
 ## Canary Traffic Splitting
 
@@ -92,7 +95,7 @@ helm uninstall cilium -n gateway
 
 ## Security Notes
 
-- The `CiliumNetworkPolicy` for cloudflared intentionally restricts egress to HTTP port 80 only.
+- The `CiliumNetworkPolicy` for Cloudflared now allows DNS, Cloudflare Tunnel transport, and application traffic to frontend pods on TCP 8080.
 - Cilium Gateway API traffic is handled by Cilium Envoy and is modelled using the special `ingress` identity, not a pod label.
 - Default-deny policies require explicit DNS allowance (included).
 
@@ -106,3 +109,4 @@ helm uninstall cilium -n gateway
 
 - `task-api` – application workloads
 - `cloudflared` – Cloudflare Tunnel
+- `externalsecrets` – External Secrets Operator configuration
