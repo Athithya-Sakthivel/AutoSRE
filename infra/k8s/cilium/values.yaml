@@ -65,7 +65,7 @@ networkPolicies:
   dnsNamespace: kube-system
   defaultDeny: true
   dnsEgress: true
-  cloudflaredToGateway: true
+  cloudflaredEgress: true
   gatewayToFrontend: true
   frontendToBackend: true
   backendToPostgres: true
