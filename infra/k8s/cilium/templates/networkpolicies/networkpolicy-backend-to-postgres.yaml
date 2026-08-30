@@ -1,0 +1,20 @@
+{{- if and .Values.networkPolicies.enabled .Values.networkPolicies.backendToPostgres }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-backend-to-postgres
+  namespace: {{ .Values.networkPolicies.taskApiNamespace | quote }}
+spec:
+  description: Allow backend pods to reach PostgreSQL pods on TCP/5432.
+  endpointSelector:
+{{ toYaml .Values.networkPolicies.backendSelector | nindent 4 }}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.taskApiNamespace | quote }}
+            app: postgres
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+{{- end }}

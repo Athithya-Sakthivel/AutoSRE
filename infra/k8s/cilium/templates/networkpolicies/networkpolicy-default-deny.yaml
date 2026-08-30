@@ -1,0 +1,12 @@
+{{- if and .Values.networkPolicies.enabled .Values.networkPolicies.defaultDeny }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: default-deny
+  namespace: {{ .Values.networkPolicies.taskApiNamespace | quote }}
+spec:
+  description: Default-deny ingress and egress for the task-api namespace.
+  endpointSelector: {}
+  ingress: []
+  egress: []
+{{- end }}

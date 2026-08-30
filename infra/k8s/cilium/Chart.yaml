@@ -1,0 +1,7 @@
+apiVersion: v2
+name: cilium
+description: Cilium Gateway API and NetworkPolicy resources for the Task API platform
+type: application
+version: 0.2.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.25.0-0"
