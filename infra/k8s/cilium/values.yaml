@@ -119,6 +119,7 @@ networkPolicies:
 
   # Cloudflared egress rules (DNS, Tunnel, HTTPS, frontend)
   cloudflaredEgress: true
+  cloudflaredToFrontend: true
 
   # Allow Cilium Envoy ingress to frontend pods (Gateway API traffic)
   gatewayToFrontend: true

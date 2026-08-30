@@ -1,6 +1,6 @@
 # Cilium Gateway API & NetworkPolicy Chart
 
-This Helm chart manages Cilium Gateway API resources and Cilium Network Policies for the Task API platform. It assumes Cilium is already installed in the cluster with Gateway API support enabled.
+This Helm chart manages the Cilium Gateway and Cilium Network Policies for the Task API platform. It assumes Cilium is already installed in the cluster with Gateway API support enabled.
 
 ## Directory Structure
 
@@ -10,8 +10,6 @@ infra/k8s/cilium
 ├── values.yaml
 ├── templates/
 │   ├── gateway.yaml
-│   ├── backend-httproute.yaml
-│   ├── frontend-httproute.yaml
 │   └── networkpolicies/
 │       ├── networkpolicy-default-deny.yaml
 │       ├── networkpolicy-dns.yaml
@@ -39,11 +37,6 @@ infra/k8s/cilium
 
 - A `Gateway` resource in the `gateway` namespace using the `cilium` GatewayClass.
 
-### HTTPRoutes
-
-- `backend-route` in `task-api` – routes `/api` traffic to `backend-stable` (100%) and `backend-canary` (0%) initially.
-- `frontend-route` in `task-api` – routes all other traffic to `frontend-stable` (100%) and `frontend-canary` (0%) initially.
-
 ### CiliumNetworkPolicies
 
 - `default-deny` – deny all ingress/egress for `task-api` pods.
@@ -66,26 +59,20 @@ helm upgrade --install cilium infra/k8s/cilium \
 
 Key values (see `values.yaml` for full list):
 
-| Value                               | Default   | Description                             |
-| ----------------------------------- | --------- | --------------------------------------- |
-| `gateway.createGatewayClass`        | `false`   | Whether to create the GatewayClass      |
-| `gateway.name`                      | `gateway` | Gateway resource name                   |
-| `gateway.namespace`                 | `gateway` | Gateway namespace                       |
-| `routes.backend.enabled`            | `true`    | Enable backend HTTPRoute                |
-| `routes.frontend.enabled`           | `true`    | Enable frontend HTTPRoute               |
-| `networkPolicies.enabled`           | `true`    | Enable all network policies             |
-| `networkPolicies.defaultDeny`       | `true`    | Enable default-deny policy              |
-| `networkPolicies.dnsEgress`         | `true`    | Allow DNS for task-api pods             |
-| `networkPolicies.cloudflaredEgress` | `true`    | Allow Cloudflared outbound connectivity |
+| Value                                   | Default   | Description                             |
+| --------------------------------------- | --------- | --------------------------------------- |
+| `gateway.createGatewayClass`            | `false`   | Whether to create the GatewayClass      |
+| `gateway.name`                          | `gateway` | Gateway resource name                   |
+| `gateway.namespace`                     | `gateway` | Gateway namespace                       |
+| `networkPolicies.enabled`               | `true`    | Enable all network policies             |
+| `networkPolicies.defaultDeny`           | `true`    | Enable default-deny policy              |
+| `networkPolicies.dnsEgress`             | `true`    | Allow DNS for task-api pods             |
+| `networkPolicies.cloudflaredEgress`     | `true`    | Allow Cloudflared outbound connectivity |
+| `networkPolicies.cloudflaredToFrontend` | `true`    | Allow Cloudflared to reach frontend     |
 
-## Canary Traffic Splitting
+## HTTPRoutes
 
-Argo Rollouts updates the `backendRefs` weights in the HTTPRoutes during canary deployments. The initial weights are:
-
-- Stable: `100`
-- Canary: `0`
-
-During a rollout, Argo Rollouts temporarily adjusts these weights and then restores them.
+HTTPRoutes are **not** created by this chart. They are managed by Argo Rollouts during canary deployments. The initial weights (stable: 100%, canary: 0%) are set by Argo Rollouts and adjusted during rollouts.
 
 ## Uninstall
 
@@ -103,6 +90,7 @@ helm uninstall cilium -n gateway
 
 - Cilium CNI (v1.20.1+)
 - Gateway API CRDs
+- Argo Rollouts (for HTTPRoute management)
 - External Secrets Operator (for `backend-secrets`) – but not required by this chart.
 
 ## Related Charts
