@@ -21,16 +21,15 @@ backend:
   progressDeadlineSeconds: 600
   serverPort: 8080
   otelServiceName: task-api-backend
-  appInsightsSamplingPercentage: "100"   # 100% for dev; 30% recommended for prod
+  appInsightsSamplingPercentage: "100"
   otelResourceAttributes: ""
   canary:
     # Disable canary for initial deploy. Enable for subsequent releases.
     enabled: false
-    initialPause: 30s
+    initialPause: 30s      # unused in current step model; kept for reference
     k6Pause: 2m
-    trafficPause: 2m
+    trafficPause: 2m       # unused in current step model; kept for reference
   hpa:
-    # Disabled until canary is promoted to stable
     enabled: false
     minReplicas: 1
     maxReplicas: 3
@@ -89,7 +88,6 @@ frontend:
       periodSeconds: 15
 
 postgres:
-  # Disabled for AKS; enabled only for kind local development
   enabled: false
   image:
     repository: postgres
@@ -101,8 +99,6 @@ postgres:
     port: 5432
   env:
     POSTGRES_DB: taskdb
-    # Credentials are sourced from backend-secrets (created by ESO).
-    # Do NOT set literals here; postgres/deployment.yaml uses secretKeyRef.
     POSTGRES_USER: ""          # ignored; provided via secret
     POSTGRES_PASSWORD: ""      # ignored; provided via secret
 
