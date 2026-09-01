@@ -29,17 +29,15 @@ spec:
             namespace: {{ .Release.Namespace }}
       steps:
         {{- if .Values.backend.canary.enabled }}
+        # Canary steps: 0% -> indefinite pause -> 10% -> indefinite pause -> 100%
+        # The indefinite pauses are advanced by the external script via `promote`.
         - setWeight: 0
-        - pause:
-            duration: {{ .Values.backend.canary.initialPause | default "30s" }}
-        # Indefinite pause – script promotes after k6 validation
         - pause: {}
         - setWeight: 10
-        - pause:
-            duration: {{ .Values.backend.canary.trafficPause | default "2m" }}
+        - pause: {}
         - setWeight: 100
         {{- else }}
-        # First deployment or canary disabled: immediate stable rollout
+        # Stable mode: immediate 100% traffic
         - setWeight: 100
         {{- end }}
 

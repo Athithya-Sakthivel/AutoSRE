@@ -1,157 +1,142 @@
 #!/usr/bin/env python3
+"""Validate Argo Rollout manifests for the canary shape used by this project.
 
-"""Fail closed when pod-mode canary percentages would create zero replicas."""
+Expected canary steps:
+    setWeight: 0
+    pause: {}                  # indefinite validation pause
+    setWeight: 10
+    pause: {}                  # indefinite observation pause
+    setWeight: 100
 
-from __future__ import annotations
+Also requires:
+    strategy.canary.canaryService and stableService
+    trafficRouting.plugins with `argoproj-labs/gatewayAPI`
+    that plugin references an httpRoute and namespace
 
-import argparse
+Usage:
+    validate-canary-manifests.py <manifest.yaml>
+
+The script runs `kubectl apply --dry-run=client -f <manifest> -o json`
+to obtain a schema-validated JSON representation, then performs shape checks.
+"""
+
 import json
-import math
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 
-def get_manifest_replicas(deployment_manifest: str) -> int:
-    manifest_path = Path(deployment_manifest)
+def fail(msg: str) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
 
-    if not manifest_path.is_file():
-        raise SystemExit(
-            f"Deployment manifest does not exist: {deployment_manifest}"
+
+def get_rollout_json(manifest_file: str) -> dict[str, Any]:
+    """Return JSON for the Rollout after server dry-run validation."""
+    cmd = [
+        "kubectl",
+        "apply",
+        "--dry-run=client",
+        "-f",
+        manifest_file,
+        "-o",
+        "json",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        fail(
+            f"kubectl dry-run failed:\n"
+            f"{result.stderr or result.stdout or 'unknown error'}"
         )
 
-    result = subprocess.run(
-        [
-            "kubectl",
-            "create",
-            "--dry-run=client",
-            "-f",
-            str(manifest_path),
-            "-o",
-            "json",
-        ],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
     try:
-        obj: dict[str, Any] = json.loads(result.stdout)
+        data = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise SystemExit(
-            "Deployment manifest did not produce valid JSON via kubectl"
-        ) from exc
+        fail(f"kubectl output was not valid JSON: {exc}")
 
-    if obj.get("kind") != "Deployment":
-        raise SystemExit(
-            f"Expected a Deployment manifest, got {obj.get('kind')!r}"
+    if data.get("kind") != "Rollout":
+        fail(f"Expected kind Rollout, got {data.get('kind')}")
+
+    return data
+
+
+def validate_canary(rollout: dict[str, Any]) -> None:
+    strategy = rollout.get("spec", {}).get("strategy", {})
+    canary = strategy.get("canary")
+    if not isinstance(canary, dict):
+        fail("Rollout does not define a canary strategy")
+
+    # Services
+    canary_service = canary.get("canaryService")
+    stable_service = canary.get("stableService")
+    if not canary_service:
+        fail("canaryService is missing")
+    if not stable_service:
+        fail("stableService is missing")
+
+    # Traffic routing plugin
+    plugins = canary.get("trafficRouting", {}).get("plugins", {})
+    gateway_plugin = plugins.get("argoproj-labs/gatewayAPI")
+    if not isinstance(gateway_plugin, dict):
+        fail(
+            "trafficRouting.plugins must contain "
+            "'argoproj-labs/gatewayAPI'"
         )
+    if not gateway_plugin.get("httpRoute"):
+        fail("gatewayAPI plugin must specify httpRoute")
+    if not gateway_plugin.get("namespace"):
+        fail("gatewayAPI plugin must specify namespace")
 
-    spec = obj.get("spec")
+    # Canary steps shape
+    steps = canary.get("steps")
+    if not isinstance(steps, list) or len(steps) < 5:
+        fail("canary steps must contain at least 5 entries")
 
-    if not isinstance(spec, dict):
-        raise SystemExit("Deployment manifest must contain spec")
+    first_weight = steps[0].get("setWeight")
+    if first_weight != 0:
+        fail("first step must be setWeight: 0")
 
-    if "replicas" not in spec:
-        raise SystemExit(
-            "Deployment manifest must declare spec.replicas explicitly "
-            "for pod-mode canary validation"
-        )
+    if not isinstance(steps[1].get("pause"), dict):
+        fail("second step must be an indefinite pause")
 
-    replicas = spec["replicas"]
+    # Check 10% step and following indefinite pause
+    ten_percent_found = False
+    for i in range(2, len(steps) - 2):
+        if steps[i].get("setWeight") == 10:
+            ten_percent_found = True
+            if not isinstance(steps[i + 1].get("pause"), dict):
+                fail("step after setWeight: 10 must be an indefinite pause")
+            break
 
-    if isinstance(replicas, bool):
-        raise SystemExit(f"Invalid deployment replica count: {replicas!r}")
+    if not ten_percent_found:
+        fail("must contain setWeight: 10 followed by pause")
 
-    try:
-        value = int(replicas)
-    except (TypeError, ValueError) as exc:
-        raise SystemExit(
-            f"Invalid deployment replica count: {replicas!r}"
-        ) from exc
-
-    if value < 1:
-        raise SystemExit(
-            "Deployment must have at least one replica"
-        )
-
-    return value
-
-
-def parse_percentages(raw_value: str) -> list[int]:
-    values = [item.strip() for item in raw_value.split(",") if item.strip()]
-
-    if not values:
-        raise SystemExit("No canary percentages were provided")
-
-    percentages: list[int] = []
-
-    for raw in values:
-        try:
-            pct = int(raw)
-        except ValueError as exc:
-            raise SystemExit(
-                f"Invalid canary percentage: {raw!r}"
-            ) from exc
-
-        if not 1 <= pct <= 99:
-            raise SystemExit(
-                f"Canary percentage must be between 1 and 99: {pct}"
-            )
-
-        percentages.append(pct)
-
-    if percentages != sorted(set(percentages)):
-        raise SystemExit(
-            "Canary percentages must be unique and strictly increasing"
-        )
-
-    return percentages
+    last_weight = steps[-1].get("setWeight")
+    if last_weight != 100:
+        fail("final step must be setWeight: 100")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} <manifest.yaml>", file=sys.stderr)
+        return 2
 
-    parser.add_argument("--percentages", required=True)
-    parser.add_argument("--deployment-manifest", required=True)
-    parser.add_argument(
-        "--mode",
-        choices=["pod", "smi"],
-        required=True,
-    )
-    parser.add_argument(
-        "--baseline-and-canary-replicas",
-        type=int,
-        default=1,
-    )
+    manifest_file = sys.argv[1]
+    path = Path(manifest_file)
+    if not path.is_file():
+        print(f"Manifest not found: {manifest_file}", file=sys.stderr)
+        return 2
 
-    args = parser.parse_args()
+    rollout = get_rollout_json(manifest_file)
+    try:
+        validate_canary(rollout)
+    except Exception as exc:
+        fail(f"Validation failed: {exc}")
 
-    percentages = parse_percentages(args.percentages)
-
-    if args.mode == "smi":
-        if args.baseline_and_canary_replicas < 1:
-            raise SystemExit(
-                "baseline-and-canary-replicas must be at least 1 for SMI canary"
-            )
-        return 0
-
-    replicas = get_manifest_replicas(args.deployment_manifest)
-
-    for pct in percentages:
-        canary_replicas = math.floor(replicas * pct / 100)
-
-        if canary_replicas < 1:
-            print(
-                f"ERROR: {pct}% of {replicas} replicas floors to 0 "
-                "canary replicas. Increase replicas or use SMI.",
-                file=sys.stderr,
-            )
-            return 1
-
+    print("Canary manifest is valid.")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

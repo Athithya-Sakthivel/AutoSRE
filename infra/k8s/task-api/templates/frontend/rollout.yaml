@@ -30,16 +30,11 @@ spec:
       steps:
         {{- if .Values.frontend.canary.enabled }}
         - setWeight: 0
-        - pause:
-            duration: {{ .Values.frontend.canary.initialPause | default "30s" }}
-        # Indefinite pause – script promotes after k6 validation
         - pause: {}
         - setWeight: 10
-        - pause:
-            duration: {{ .Values.frontend.canary.trafficPause | default "1m" }}
+        - pause: {}
         - setWeight: 100
         {{- else }}
-        # First deployment or canary disabled: immediate stable rollout
         - setWeight: 100
         {{- end }}
 

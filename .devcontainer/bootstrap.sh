@@ -12,6 +12,8 @@ export CLOUDFLARED_VERSION=2026.8.2
 export PRECOMMIT_VERSION=4.6.0
 export NODE_VERSION=24.20.0
 export NPM_VERSION=11.13.0
+export ARGO_PLUGIN_VERSION=v1.9.1
+export PLAYWRIGHT_VERSION=1.62.0
 
 detect_arch() {
   case "$(dpkg --print-architecture)" in
@@ -185,7 +187,7 @@ else
 fi
 
 # Return to root directory
-cd /
+cd /workspace
 
 # Install Node.js via nvm
 curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
@@ -197,33 +199,30 @@ npm install -g "npm@$NPM_VERSION"
 # Add npm global bin to PATH for verification
 export PATH="$NVM_DIR/versions/node/v${NODE_VERSION}/bin:${PATH}"
 
+
+curl -LO https://github.com/argoproj/argo-rollouts/releases/download/$ARGO_PLUGIN_VERSION/kubectl-argo-rollouts-linux-amd64
+chmod +x kubectl-argo-rollouts-linux-amd64
+sudo mv kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
+
+
+cd azure-pipelines/tests/playwright
+npm install -D @playwright/test@$PLAYWRIGHT_VERSION
+npx playwright install --with-deps
+cd -
 # Verification
 echo "=== Environment Verification ==="
-echo "Java:"
-java -version 2>&1
-echo "Maven:"
-mvn -version
-echo "Azure CLI:"
-az version --query '"azure-cli"' 2>/dev/null || echo "Azure CLI not available"
-echo "OpenTofu:"
-tofu version
-echo "kubectl:"
-kubectl version --client 2>&1 | head -n 1
-echo "kind:"
-kind version
-echo "Helm:"
-helm version --short
-echo "k6:"
-k6 version
-echo "Node.js:"
-node --version
-echo "npm:"
-npm --version
-echo "npm path:"
-which npm
-echo "cloudflared:"
-cloudflared --version 2>&1 | head -n 1
-echo "pre-commit:"
-pre-commit --version
-
+echo "Java: $(java -version 2>&1 | head -n 1)"
+echo "Maven: $(mvn -version 2>&1 | head -n 1)"
+echo "Azure CLI: $(az version --query '"azure-cli"' -o tsv 2>/dev/null || echo unavailable)"
+echo "OpenTofu: $(tofu version)"
+echo "kubectl: $(kubectl version --client 2>&1 | head -n 1)"
+echo "kind: $(kind version)"
+echo "Helm: $(helm version --short)"
+echo "Node.js: $(node --version)"
+echo "npm: $(npm --version)"
+echo "k6: $(k6 version)"
+echo "argo rollouts plugin verison: $(kubectl argo rollouts version)"
+echo "Playwright: $(cd azure-pipelines/tests/playwright && npx playwright --version)"
+echo "cloudflared: $(cloudflared --version 2>&1 | head -n 1)"
+echo "pre-commit: $(pre-commit --version)"
 echo "=== All tools installed and verified ==="

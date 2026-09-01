@@ -6,6 +6,7 @@ import com.prod.taskapi.entity.Status;
 import com.prod.taskapi.entity.Task;
 import com.prod.taskapi.repository.TaskRepository;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -17,6 +18,7 @@ public class TaskService {
   private static final Logger log = LoggerFactory.getLogger(TaskService.class);
 
   private final TaskRepository taskRepository;
+  private final AtomicInteger requestCounter = new AtomicInteger(0);
 
   public TaskService(TaskRepository taskRepository) {
     this.taskRepository = taskRepository;
@@ -40,6 +42,12 @@ public class TaskService {
 
   @Transactional(readOnly = true)
   public List<TaskResponse> getTasks(Long userId) {
+    // Simulate intermittent failure: every 3rd request throws 500
+    if (requestCounter.incrementAndGet() % 3 == 0) {
+      log.warn("Simulated canary failure for GET /api/v1/tasks");
+      throw new RuntimeException("Simulated failure for canary testing (v2)");
+    }
+
     log.info("Fetch tasks userId={}", userId);
     return taskRepository.findByUserId(userId).stream().map(this::toResponse).toList();
   }
