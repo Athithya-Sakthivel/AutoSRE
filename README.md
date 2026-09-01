@@ -4,7 +4,7 @@
 
 ## Prerequisites
 
-1. **Docker installed, running _without_ sudo access (sudo usermod -aG docker $USER && newgrp docker)**
+1. **Docker installed and running _without_ sudo access (sudo usermod -aG docker $USER && newgrp docker)**
 2. **Visual Studio Code with the Dev Containers extension installed (for a deterministic environments): [devcontainers](https://code.visualstudio.com/docs/devcontainers/containers)**
 3. **An Azure subscription(Temporary resources, free tier or azure for students is sufficient)** with permissions to create:
    - **Azure Kubernetes Service (AKS)** (Compute cluster)
