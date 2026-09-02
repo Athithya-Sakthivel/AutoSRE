@@ -1,4 +1,3 @@
-```typescript
 import http from 'k6/http';
 import { check } from 'k6';
 
@@ -50,9 +49,7 @@ if (!Number.isInteger(PREALLOCATED_VUS) || PREALLOCATED_VUS < 1) {
   );
 }
 
-const BASE_URL = (
-  __ENV.FRONTEND_CANARY_URL || 'http://frontend:8080'
-).replace(/\/+$/, '');
+const BASE_URL = (__ENV.BASE_URL || 'http://frontend:8080').replace(/\/+$/, '');
 
 const iterationsPerMinute = Math.max(
   1,
@@ -97,4 +94,3 @@ export default function (): void {
       typeof res.body === 'string' && res.body.includes('Task API'),
   });
 }
-```

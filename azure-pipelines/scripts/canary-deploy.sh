@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # canary-deploy.sh – Bulletproof Argo Rollouts canary orchestrator
+#
+# - Auto-detects canary strategy; does not support blue-green/stable.
+# - Uses only supported Argo Rollouts commands for state transitions.
+# - Waits for exact CanaryPauseStep pause, not phase==Paused alone.
+# - Runs Playwright/k6 via local port-forward to the canary Service.
+# - Automates promotion to 10%, observation, then full promotion.
+# - Robust rollback: abort + restore previous image + wait Healthy.
+# - `--cleanup` resets both backend/frontend to stable v1 and promotes --full.
+# - Idempotent: skips deployment if target image is already current.
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -46,9 +55,17 @@ ROLLING_BACK=false
 PORT_FORWARD_PID=""
 PORT_FORWARD_LOG=""
 
-log()   { printf '[%s] %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
-warn()  { printf '[%s] WARN: %s\n' "$(date -u +%H:%M:%SZ)" "$*" >&2; }
-fail()  { log "ERROR: $*" >&2; exit 1; }
+# Colors
+C_RESET='\033[0m'
+C_RED='\033[0;31m'
+C_GREEN='\033[0;32m'
+C_YELLOW='\033[1;33m'
+C_CYAN='\033[0;36m'
+
+log()   { printf "${C_CYAN}[%s]${C_RESET} %s\n" "$(date +%H:%M:%SZ)" "$*"; }
+warn()  { printf "${C_YELLOW}[%s] WARN:${C_RESET} %s\n" "$(date +%H:%M:%SZ)" "$*" >&2; }
+fail()  { printf "${C_RED}[%s] ERROR:${C_RESET} %s\n" "$(date +%H:%M:%SZ)" "$*" >&2; exit 1; }
+success(){ printf "${C_GREEN}[%s] SUCCESS:${C_RESET} %s\n" "$(date +%H:%M:%SZ)" "$*"; }
 
 usage() {
   cat <<USAGE
@@ -57,7 +74,7 @@ Usage:
   $0 --cleanup [options]
 
 Modes:
-  --cleanup         Reset backend/frontend Rollouts to stable v1 images.
+  --cleanup         Force stabilize all Rollouts to stable v1 images.
 
 Required for canary:
   --service <backend|frontend|all>   Service to deploy (default: all)
@@ -212,11 +229,7 @@ rollback() {
   if [[ -n "$PREVIOUS_IMAGE" && -n "$CONTAINER" ]]; then
     log "Restoring previous image '$PREVIOUS_IMAGE'..."
     kubectl argo rollouts set image "$ROLLOUT_NAME" "$CONTAINER=$PREVIOUS_IMAGE" -n "$NAMESPACE"
-
-    # Force full promotion to skip any remaining canary steps and return to stable.
-    log "Promoting to full to complete rollback..."
-    kubectl argo rollouts promote "$ROLLOUT_NAME" -n "$NAMESPACE" --full 2>/dev/null || true
-
+    promote_to_full
     kubectl argo rollouts status "$ROLLOUT_NAME" -n "$NAMESPACE" --timeout "${WAIT_TIMEOUT}s" 2>/dev/null || true
   fi
 
@@ -292,8 +305,10 @@ start_port_forward() {
 
 run_k6() {
   [[ "$SKIP_K6" == false ]] || return 0
-  log "Running k6 (QPS=$QPS, duration=$DURATION)..."
-  timeout 10m "$K6_BIN" run \
+  log "Running k6 load test (QPS=$QPS, duration=$DURATION)..."
+
+  set +e
+  timeout 10m "$K6_BIN" run --quiet \
     --env "BASE_URL=http://127.0.0.1:${LOCAL_PORT}" \
     --env "QPS=$QPS" \
     --env "P95_THRESHOLD=$P95_THRESHOLD" \
@@ -302,26 +317,90 @@ run_k6() {
     --env "DURATION=$DURATION" \
     --env "GRACEFUL_STOP=$GRACEFUL_STOP" \
     "$K6_SCRIPT"
+  local rc=$?
+  set -e
+
+  if [[ $rc -eq 0 ]]; then
+    success "k6 load test passed"
+  else
+    fail "k6 load test failed (exit=$rc)"
+  fi
 }
 
 run_playwright() {
   [[ "$SKIP_PLAYWRIGHT" == false ]] || return 0
-  log "Running Playwright..."
+  log "Running Playwright tests..."
+
   (
     cd "$PLAYWRIGHT_DIR"
-    [[ -d node_modules ]] || npm ci
+    [[ -d node_modules ]] || npm ci --silent >/dev/null 2>&1
     if [[ "${PLAYWRIGHT_INSTALL:-1}" == "1" ]]; then
-      npx playwright install --with-deps chromium
+      npx playwright install --with-deps chromium >/dev/null 2>&1
     fi
     CI=true \
-    PLAYWRIGHT_TEST_BASE_URL="http://127.0.0.1:${LOCAL_PORT}" \
-      timeout 10m npx playwright test
+    FRONTEND_CANARY_URL="http://127.0.0.1:${LOCAL_PORT}" \
+      timeout 10m npx playwright test --reporter=line
   )
+}
+
+ensure_services() {
+  log "Ensuring stable/canary Services exist..."
+
+  kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-stable
+  namespace: $NAMESPACE
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-canary
+  namespace: $NAMESPACE
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-stable
+  namespace: $NAMESPACE
+spec:
+  selector:
+    app: frontend
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-canary
+  namespace: $NAMESPACE
+spec:
+  selector:
+    app: frontend
+  ports:
+    - port: 8080
+      targetPort: 8080
+EOF
 }
 
 deploy_one() {
   local svc="$1"
   local img="$2"
+  CONTAINER=""   # reset per service
 
   case "$svc" in
     backend)
@@ -329,6 +408,7 @@ deploy_one() {
       STABLE_SERVICE="backend-stable"
       CANARY_SERVICE="backend-canary"
       K6_SCRIPT="${K6_SCRIPT:-$SCRIPT_DIR/../tests/k6/backend-load.ts}"
+      SKIP_PLAYWRIGHT=true
       ;;
     frontend)
       ROLLOUT_NAME="frontend"
@@ -347,7 +427,7 @@ deploy_one() {
 
   # Idempotency: skip if target image already current.
   if [[ "$PREVIOUS_IMAGE" == "$img" ]]; then
-    log "Rollout already using image $img. Skipping update."
+    success "Rollout already using image $img. Skipping."
     return 0
   fi
 
@@ -357,7 +437,6 @@ deploy_one() {
     return 0
   fi
 
-  # Ensure HTTPRoute exists for Argo Gateway plugin.
   ensure_httproute "$ROLLOUT_NAME-route" "$STABLE_SERVICE" "$CANARY_SERVICE"
 
   log "Setting image on Rollout..."
@@ -373,10 +452,10 @@ deploy_one() {
     stop_port_forward
   fi
 
-  log "All validations passed."
+  success "All validations passed."
 
   if [[ "$SKIP_PROMOTE" == true ]]; then
-    log "--skip-promote set; leaving Rollout paused at current step."
+    warn "--skip-promote set; leaving Rollout paused."
     return 0
   fi
 
@@ -389,33 +468,81 @@ deploy_one() {
   wait_for_healthy
 
   ROLL_OUT_UPDATED=false
-  log "$svc canary deployment completed successfully."
+  success "$svc canary deployment completed successfully."
 }
 
+# ------------------------------------------------------------------------------
+# Cleanup / force stabilize mode
+# ------------------------------------------------------------------------------
+force_stabilize_one() {
+  local rollout="$1"
+  local container="$2"
+  local stable_image="$3"
+
+  ROLLOUT_NAME="$rollout"
+  CONTAINER="$container"
+
+  log "Force stabilizing $rollout to $stable_image"
+
+  # Ensure Rollout exists
+  if ! kubectl get rollout "$rollout" -n "$NAMESPACE" >/dev/null 2>&1; then
+    log "Rollout $rollout not found; creating stable Rollout..."
+    kubectl apply -f - <<EOF
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: $rollout
+  namespace: $NAMESPACE
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: $rollout
+  strategy:
+    canary:
+      steps:
+        - setWeight: 100
+  template:
+    metadata:
+      labels:
+        app: $rollout
+    spec:
+      containers:
+        - name: $container
+          image: $stable_image
+          ports:
+            - containerPort: 8080
+EOF
+  fi
+
+  # Patch strategy steps to single setWeight:100
+  kubectl patch rollout "$rollout" -n "$NAMESPACE" \
+    --type merge \
+    -p '{"spec":{"strategy":{"canary":{"steps":[{"setWeight":100}]}}}}'
+
+  # Abort any active canary
+  kubectl argo rollouts abort "$rollout" -n "$NAMESPACE" 2>/dev/null || true
+
+  # Set desired stable image
+  kubectl argo rollouts set image "$rollout" "$container=$stable_image" -n "$NAMESPACE"
+
+  # Promote to full (will be no-op if already stable)
+  kubectl argo rollouts promote "$rollout" -n "$NAMESPACE" --full || true
+
+  # Wait for Healthy
+  kubectl argo rollouts status "$rollout" -n "$NAMESPACE" --timeout "${WAIT_TIMEOUT}s"
+}
+
+
 cleanup() {
-  log "Cleanup mode: resetting Rollouts to stable v1 images."
-  local rollouts=("backend:backend:$BACKEND_STABLE_IMAGE" "frontend:frontend:$FRONTEND_STABLE_IMAGE")
+  log "Cleanup mode: force stabilizing both backend and frontend to stable images."
 
-  for entry in "${rollouts[@]}"; do
-    IFS=':' read -r rollout container image <<< "$entry"
-    ROLLOUT_NAME="$rollout"
-    CONTAINER="$container"
+  # Ensure Services exist (idempotent) before touching Rollouts
+  ensure_services
 
-    log "Resetting $rollout to $image..."
-    if [[ "$DRY_RUN" == true ]]; then
-      log "DRY-RUN: kubectl argo rollouts abort $rollout -n $NAMESPACE"
-      log "DRY-RUN: kubectl argo rollouts set image $rollout $container=$image -n $NAMESPACE"
-      log "DRY-RUN: kubectl argo rollouts promote $rollout --full -n $NAMESPACE"
-      log "DRY-RUN: kubectl argo rollouts status $rollout -n $NAMESPACE"
-      continue
-    fi
-
-    kubectl argo rollouts abort "$rollout" -n "$NAMESPACE" 2>/dev/null || true
-    kubectl argo rollouts set image "$rollout" "$container=$image" -n "$NAMESPACE"
-    promote_to_full
-    kubectl argo rollouts status "$rollout" -n "$NAMESPACE" --timeout "${WAIT_TIMEOUT}s"
-  done
-  log "Cleanup complete."
+  force_stabilize_one backend backend "$BACKEND_STABLE_IMAGE"
+  force_stabilize_one frontend frontend "$FRONTEND_STABLE_IMAGE"
+  success "Cleanup complete. Both Rollouts are stable."
 }
 
 parse_args() {
@@ -466,7 +593,7 @@ preflight() {
   if [[ "$DRY_RUN" == false && "$CLEANUP_MODE" == false ]]; then
     if [[ "$SKIP_K6" == false ]]; then
       [[ -x "$K6_BIN" || $(command -v "$K6_BIN" 2>/dev/null) ]] || fail "k6 not found: $K6_BIN"
-      [[ -f "$K6_SCRIPT" ]] || fail "k6 script not found: $K6_SCRIPT"
+      # K6_SCRIPT will be checked per service
     fi
     if [[ "$SKIP_PLAYWRIGHT" == false ]]; then
       [[ -n "$PLAYWRIGHT_DIR" && -d "$PLAYWRIGHT_DIR" ]] || fail "Playwright dir required: $PLAYWRIGHT_DIR"
@@ -501,25 +628,10 @@ main() {
     fi
 
     SERVICE="$svc"
-    case "$svc" in
-      backend)
-        ROLLOUT_NAME="backend"
-        STABLE_SERVICE="backend-stable"
-        CANARY_SERVICE="backend-canary"
-        K6_SCRIPT="${K6_SCRIPT:-$SCRIPT_DIR/../tests/k6/backend-load.ts}"
-        ;;
-      frontend)
-        ROLLOUT_NAME="frontend"
-        STABLE_SERVICE="frontend-stable"
-        CANARY_SERVICE="frontend-canary"
-        K6_SCRIPT="${K6_SCRIPT:-$SCRIPT_DIR/../tests/k6/frontend-load.ts}"
-        ;;
-    esac
-
     deploy_one "$svc" "$img"
   done
 
-  log "All requested deployments completed."
+  success "All requested deployments completed."
 }
 
 main "$@"

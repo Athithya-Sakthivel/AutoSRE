@@ -77,10 +77,7 @@ if (
 
 // Strip trailing slashes so URL construction below cannot accidentally produce
 // `//api/...` when an operator supplies a URL ending in `/`.
-const BASE_URL = (
-  __ENV.BACKEND_CANARY_URL || 'http://backend:8080'
-).replace(/\/+$/, '');
-
+const BASE_URL = (__ENV.BASE_URL || 'http://backend:8080').replace(/\/+$/, '');
 /**
  * One iteration performs exactly three HTTP requests:
  *   1. register

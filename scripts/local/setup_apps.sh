@@ -32,6 +32,7 @@ az role assignment create \
 
 kubectl create namespace external-secrets --dry-run=client -o yaml | kubectl apply -f -
 
+# for kind cluster
 kubectl create secret generic azure-sp-creds \
   --namespace external-secrets \
   --from-literal=clientId="${APP_ID}" \
@@ -50,6 +51,7 @@ helm upgrade --install cilium infra/k8s/cilium \
   --namespace gateway \
   --create-namespace
 
+# deploy stable version without canary
 helm upgrade --install task-api infra/k8s/task-api \
   --namespace task-api \
   --create-namespace \
@@ -59,5 +61,7 @@ helm upgrade --install task-api infra/k8s/task-api \
   --set backend.image.tag="v1" \
   --set frontend.image.repository="ghcr.io/athithya-sakthivel/task-api-frontend" \
   --set frontend.image.tag="v1" \
-  --set backend.canary.trafficPause="30s" \
-  --set frontend.canary.trafficPause="30s"
+  --set backend.enabled=true \
+  --set frontend.enabled=true \
+  --set backend.canary.enabled=false \
+  --set frontend.canary.enabled=false
