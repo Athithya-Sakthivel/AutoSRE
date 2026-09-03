@@ -43,3 +43,7 @@ dist
 .env.*
 !.env.example
 Dockerfile
+
+
+playwright-report
+test-results

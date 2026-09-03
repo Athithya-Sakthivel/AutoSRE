@@ -57,3 +57,6 @@ tsconfig.tsbuildinfo
 .cache/
 .cache/
 .plans/
+
+playwright-report
+test-results

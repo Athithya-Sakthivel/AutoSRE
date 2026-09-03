@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: task-api
+data:
+  OTEL_SERVICE_NAME: "task-api-backend"
+  SERVER_PORT: "8080"
+  APPLICATIONINSIGHTS_SAMPLING_PERCENTAGE: "100"
+  OTEL_RESOURCE_ATTRIBUTES: ""
