@@ -50,18 +50,3 @@ helm upgrade --install cloudflared infra/k8s/cloudflared   --namespace cloudflar
 helm upgrade --install cilium infra/k8s/cilium \
   --namespace gateway \
   --create-namespace
-
-# deploy stable version without canary
-helm upgrade --install task-api infra/k8s/task-api \
-  --namespace task-api \
-  --create-namespace \
-  --set postgres.enabled=true \
-  --set postgres.env.POSTGRES_PASSWORD="local-dev-password" \
-  --set backend.image.repository="ghcr.io/athithya-sakthivel/task-api-backend" \
-  --set backend.image.tag="v1" \
-  --set frontend.image.repository="ghcr.io/athithya-sakthivel/task-api-frontend" \
-  --set frontend.image.tag="v1" \
-  --set backend.enabled=true \
-  --set frontend.enabled=true \
-  --set backend.canary.enabled=false \
-  --set frontend.canary.enabled=false

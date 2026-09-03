@@ -10,8 +10,8 @@ azure-pipelines/
 ├── scripts/
 │   ├── trivy_report.py          # parse Trivy JSON, fail on HIGH/CRITICAL
 │   ├── push_manifests.py        # create deploy manifest with image digest
-│   ├── canary-deploy.sh         # canary rollout for backend
-│   └── k6-load-test.js          # load test script used by canary-deploy
+│   ├── frontend-deploy.sh         # canary rollout for backend
+│   └──           # load test script used by canary-deploy
 ├── ci/
 │   ├── ci-backend.yaml
 │   ├── ci-frontend.yaml

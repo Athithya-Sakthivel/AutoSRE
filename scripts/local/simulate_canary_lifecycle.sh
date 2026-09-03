@@ -1,22 +1,22 @@
-
-# prerequesites
+# prerequesites in kind cluster
 # bash scripts/local/cluster_bootstrap.sh
 # bash scripts/local/setup_charts.sh
-# bash scripts/local/setup_apps.sh
+
+kubectl delete ns task-api --force || true
+
+bash scripts/local/setup_apps.sh
 
 
-# patch those steps to [{"setWeight":100}] again and abort/restore v1, making it fully idempotent.
-bash azure-pipelines/scripts/canary-deploy.sh --cleanup
+bash scripts/local/deploy-postgres.sh
 
+bash azure-pipelines/scripts/backend-deploy.sh --stable --stable-tag v1
+bash azure-pipelines/scripts/frontend-deploy.sh --stable --stable-tag v1
 
-# simulate rollback
-bash azure-pipelines/scripts/canary-deploy.sh \
-  --service frontend \
-  --image ghcr.io/athithya-sakthivel/task-api-frontend:v2 \
-  --playwright-dir azure-pipelines/tests/playwright \
-  --k6-script azure-pipelines/tests/k6/frontend-load.ts \
-  --qps 30 \
-  --error-threshold 0.02 \
-  --p95-threshold 300 \
+bash azure-pipelines/scripts/backend-deploy.sh \
+  --canary \
+  --image ghcr.io/athithya-sakthivel/task-api-backend:v2 \
+  --qps 2 \
+  --p95-threshold 5000 \
+  --error-threshold 0.05 \
   --duration 15s \
   --observation-duration 15s
