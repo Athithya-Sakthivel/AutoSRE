@@ -448,7 +448,7 @@ export SKIP_IP_FETCH="$SKIP_IP_FETCH"
 # ===========================================================================
 resolve_git_remote() {
   command -v git >/dev/null 2>&1 || return 1
-  local u="$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)"
+  local u="$(git remote get-url origin 2>/dev/null || true)"
   [[ -n "$u" ]] || return 1
   case "$u" in
     https://github.com/*) u="${u#https://github.com/}" ;;

@@ -87,21 +87,28 @@ module "postgresql" {
 module "observability" {
   source = "./modules/observability"
 
-  resource_group_name           = module.state.resource_group_name
-  location                      = var.location
-  environment                   = var.environment
-  log_analytics_workspace_name  = local.log_analytics_workspace_name
-  log_analytics_retention_days  = var.log_analytics_retention_days
-  application_insights_name     = local.application_insights_name
-  alert_email_address           = var.alert_email_address
-  aks_cluster_id                = module.aks.cluster_id
-  postgresql_server_id          = module.postgresql.server_id
-  enable_cpu_alert              = var.enable_cpu_alert
-  enable_memory_alert           = var.enable_memory_alert
-  enable_pod_restarts_alert     = var.enable_pod_restarts_alert
-  enable_failed_requests_alert  = var.enable_failed_requests_alert
-  enable_postgres_storage_alert = var.enable_postgres_storage_alert
-  tags                          = local.common_tags
+  resource_group_name = module.state.resource_group_name
+  location            = var.location
+  environment         = var.environment
+
+  log_analytics_workspace_name = local.log_analytics_workspace_name
+  log_analytics_retention_days = var.log_analytics_retention_days
+
+  application_insights_name = local.application_insights_name
+
+  alert_email_address = var.alert_email_address
+
+  aks_cluster_id = module.aks.cluster_id
+
+  postgresql_server_id = module.postgresql.server_id
+
+  enable_cpu_alert                         = var.enable_cpu_alert
+  enable_memory_alert                      = var.enable_memory_alert
+  enable_pod_restarts_alert                = var.enable_pod_restarts_alert
+  enable_failed_requests_alert             = var.enable_failed_requests_alert
+  enable_postgres_storage_alert            = var.enable_postgres_storage_alert
+  application_insights_sampling_percentage = var.application_insights_sampling_percentage
+  tags                                     = local.common_tags
 }
 
 module "azure_devops" {

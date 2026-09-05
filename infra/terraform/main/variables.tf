@@ -46,15 +46,6 @@ variable "tags" {
   default     = {}
 }
 
-variable "alert_email_address" {
-  description = "Email for Azure Monitor alerts. Provided via TF_VAR_alert_email_address environment variable, not in .tfvars."
-  type        = string
-  validation {
-    condition     = can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.alert_email_address))
-    error_message = "alert_email_address must be a valid email address."
-  }
-}
-
 # ------------------------------------------------------------------------------
 # AKS
 # ------------------------------------------------------------------------------
@@ -159,34 +150,75 @@ variable "acr_sku" {
 # Observability
 # ------------------------------------------------------------------------------
 
+variable "alert_email_address" {
+  description = "Email address used by the Azure Monitor observability action group."
+  type        = string
+
+  validation {
+    condition = can(
+      regex(
+        "^[^@]+@[^@]+\\.[^@]+$",
+        trimspace(var.alert_email_address)
+      )
+    )
+
+    error_message = "alert_email_address must be a valid email address."
+  }
+}
+
+variable "application_insights_sampling_percentage" {
+  description = "Server-side Application Insights sampling percentage."
+  type        = number
+  default     = 100
+
+  validation {
+    condition = (
+      var.application_insights_sampling_percentage > 0 &&
+      var.application_insights_sampling_percentage <= 100
+    )
+
+    error_message = "application_insights_sampling_percentage must be between 1 and 100."
+  }
+}
+
 variable "log_analytics_retention_days" {
-  description = "Retention days for Log Analytics."
+  description = "Log Analytics retention period in days."
   type        = number
   default     = 30
+
+  validation {
+    condition = (
+      var.log_analytics_retention_days >= 30 &&
+      var.log_analytics_retention_days <= 730 &&
+      floor(var.log_analytics_retention_days) == var.log_analytics_retention_days
+    )
+
+    error_message = "log_analytics_retention_days must be an integer between 30 and 730."
+  }
 }
 
 variable "enable_cpu_alert" {
-  description = "Enable CPU alert."
+  description = "Enable AKS node CPU alert."
   type        = bool
   default     = true
 }
 
 variable "enable_memory_alert" {
-  description = "Enable memory alert."
+  description = "Enable AKS node memory alert."
   type        = bool
   default     = true
 }
 
 variable "enable_pod_restarts_alert" {
-  description = "Enable pod restarts alert."
+  description = "Enable pod restart scheduled query alert."
   type        = bool
   default     = true
 }
 
 variable "enable_failed_requests_alert" {
-  description = "Enable failed requests alert."
+  description = "Enable Application Insights failed request rate alert."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "enable_postgres_storage_alert" {

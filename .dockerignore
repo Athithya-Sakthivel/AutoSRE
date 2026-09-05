@@ -47,3 +47,22 @@ Dockerfile
 
 playwright-report
 test-results
+
+
+node_modules/
+dist/
+.vite/
+.env
+.env.*
+!.env.example
+npm-debug.log*
+tsconfig.tsbuildinfo
+.DS_Store
+.cache/
+.cache/
+.plans/
+
+target
+playwright-report
+test-results
+

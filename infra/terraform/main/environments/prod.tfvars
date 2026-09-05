@@ -1,49 +1,68 @@
 # ==============================================================================
-# Production environment – non‑secret values only
+# Production environment – illustrative production-grade values
+#
+# NOTE: This file is illustrative. It demonstrates what a production deployment
+#       would use in a real Azure subscription with adequate quota and budget.
+#       The current subscription (Azure for Students) cannot provision these
+#       resources due to vCPU quota limits. 
 # ==============================================================================
 
 environment = "prod"
 location    = "centralindia"
 
 # ------------------------------------------------------------------------------
-# AKS
+# AKS – Production
 # ------------------------------------------------------------------------------
 
-# A single-node production cluster is not ideal, but with a small vCPU quota
-# and low expected traffic it is acceptable. For higher availability, consider
-# increasing node_count after raising the regional vCPU quota.
-aks_vm_size            = "Standard_D4s_v4" # 4 vCPU / 16 GiB RAM
-aks_node_count         = 1
-aks_kubernetes_version = "1.36"
+# Production workload: 3 nodes across availability zones.
+# Each node: Standard_D4s_v4 (4 vCPU / 16 GiB RAM)
+# Total: 12 vCPU / 48 GiB RAM
+aks_vm_size            = "Standard_D4s_v4"
+aks_node_count         = 3
+aks_kubernetes_version = "1.36.3"
 aks_os_disk_size_gb    = 100
 
+# Enable availability zones for node pool resilience.
+# Requires a region with 3 zones (centralindia supports this).
+aks_availability_zones = ["1", "2", "3"]
 
+# Use Azure CNI Overlay with Cilium (unchanged from staging).
 
 # ------------------------------------------------------------------------------
-# PostgreSQL
+# PostgreSQL – Production
 # ------------------------------------------------------------------------------
 
+# General Purpose SKU with zone-redundant high availability.
+# 2 vCPU / 8 GiB RAM – suitable for moderate production workloads.
 postgresql_version               = "18"
-postgresql_sku_name              = "B_Standard_B1ms" # 1 vCPU / 2 GiB RAM
-postgresql_storage_mb            = 65536             # 64 GB
-postgresql_backup_retention_days = 35                # Maximum supported
+postgresql_sku_name              = "GP_Standard_D2s_v3"
+postgresql_storage_mb            = 131072 # 128 GB
+postgresql_backup_retention_days = 35     # Maximum supported
+
+# Enable high availability (zone-redundant standby).
+postgresql_high_availability_mode = "ZoneRedundant"
 
 # ------------------------------------------------------------------------------
-# Azure Container Registry
+# Azure Container Registry – Production
 # ------------------------------------------------------------------------------
 
-# Basic SKU is sufficient for low-volume container pulls. For geo‑replication
-# or higher throughput, consider Standard or Premium.
-acr_sku = "Basic"
+# Standard SKU provides higher throughput, geo-replication, and private endpoints.
+acr_sku = "Standard"
+
+# Enable geo-replication for disaster recovery.
+acr_geo_replication_locations = ["southindia"]
 
 # ------------------------------------------------------------------------------
-# Observability
+# Observability – Production
 # ------------------------------------------------------------------------------
 
-# 30 days is a good default for production. Increase to 90 or 180 if needed.
-log_analytics_retention_days = 30
+# 90 days retention for production auditing and trend analysis.
+log_analytics_retention_days = 90
 
-# All critical alerts are enabled in production.
+# 100% server-side sampling in production (cost is acceptable for this workload).
+application_insights_sampling_percentage = 100
+
+# All critical alerts enabled.
 enable_cpu_alert              = true
 enable_memory_alert           = true
 enable_pod_restarts_alert     = true
@@ -51,20 +70,20 @@ enable_failed_requests_alert  = true
 enable_postgres_storage_alert = true
 
 # ------------------------------------------------------------------------------
-# Budget & cost management
+# Budget & Cost Management
 # ------------------------------------------------------------------------------
 
-# Realistic monthly budget for a small production stack:
-#   AKS node (1 x D4s_v4)        ~ $150/month
-#   PostgreSQL (B1ms + storage)  ~ $25/month
-#   NAT Gateway + Public IP      ~ $35/month
-#   ACR Basic                    ~ $5/month
-#   Log Analytics/App Insights   ~ $10/month
-#   Bandwidth / misc             ~ $25/month
+# Production cost estimate:
+#   AKS (3 x D4s_v4)              ~ $450/month
+#   PostgreSQL (GP_D2s_v3 + HA)   ~ $350/month
+#   NAT Gateway + Public IP       ~ $35/month
+#   ACR Standard                  ~ $25/month
+#   Log Analytics / App Insights  ~ $25/month
+#   Bandwidth / misc              ~ $50/month
 #   --------------------------------
-#   Approximate total            ~ $250/month
-budget_monthly_amount = 250
+#   Approximate total             ~ $935/month
+budget_monthly_amount = 1000
 
-# Budget period – one year from deployment. Adjust as needed.
+# Budget period – one year from deployment.
 budget_start_date = "2026-09-01T00:00:00Z"
 budget_end_date   = "2027-09-01T00:00:00Z"

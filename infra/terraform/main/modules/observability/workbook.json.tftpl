@@ -1,72 +1,172 @@
-{
-  "version": "Notebook/1.0",
-  "items": [
+${jsonencode({
+  "$schema" = "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+
+  version = "Notebook/1.0"
+
+  items = [
     {
-      "type": 1,
-      "content": {
-        "json": ${jsonencode(format("## Task API Monitoring\nEnvironment: %s", environment))}
-      },
-      "name": "title"
+      type = 1
+      name = "title"
+
+      content = {
+        json = format(
+          "# Task API Observability\n\n## Environment: %s\n\nWorkspace-backed Application Insights monitoring.",
+          environment
+        )
+      }
     },
+
     {
-      "type": 3,
-      "content": {
-        "version": "KqlItem/1.0",
-        "query": ${jsonencode(request_query)},
-        "size": 1,
-        "title": "Request Volume and Failure Rate",
-        "queryType": 0,
-        "resourceType": "microsoft.insights/components",
-        "resourceId": ${jsonencode(app_insights_id)},
-        "visualization": "timechart"
-      },
-      "name": "requests"
+      type = 1
+      name = "context"
+
+      content = {
+        json = format(
+          "### Monitoring context\n\n**Log Analytics workspace**  \n`%s`\n\n**Application Insights component**  \n`%s`\n\nAll KQL widgets use the Log Analytics workspace as their explicit query resource and are filtered to this Application Insights component.",
+          workspace_id,
+          application_insights_id
+        )
+      }
     },
+
     {
-      "type": 3,
-      "content": {
-        "version": "KqlItem/1.0",
-        "query": ${jsonencode(dependency_query)},
-        "size": 1,
-        "title": "Dependencies",
-        "queryType": 0,
-        "resourceType": "microsoft.insights/components",
-        "resourceId": ${jsonencode(app_insights_id)},
-        "visualization": "timechart"
-      },
-      "name": "dependencies"
+      type = 3
+      name = "snapshot"
+
+      content = {
+        version = "KqlItem/1.0"
+
+        title = "24-hour telemetry snapshot"
+
+        query = snapshot_query
+
+        queryType    = 0
+        resourceType = "microsoft.operationalinsights/workspaces"
+
+        resourceIds = [
+          workspace_id
+        ]
+
+        visualization = "table"
+
+        size = 0
+
+        noDataMessage = "No Application Insights telemetry has arrived yet. The workbook is deployed and will populate as the application emits telemetry."
+      }
     },
+
     {
-      "type": 3,
-      "content": {
-        "version": "KqlItem/1.0",
-        "query": ${jsonencode(exception_query)},
-        "size": 1,
-        "title": "Exceptions",
-        "queryType": 0,
-        "resourceType": "microsoft.insights/components",
-        "resourceId": ${jsonencode(app_insights_id)},
-        "visualization": "barchart"
-      },
-      "name": "exceptions"
+      type = 3
+      name = "requests"
+
+      content = {
+        version = "KqlItem/1.0"
+
+        title = "Request volume and failure rate"
+
+        query = request_query
+
+        queryType    = 0
+        resourceType = "microsoft.operationalinsights/workspaces"
+
+        resourceIds = [
+          workspace_id
+        ]
+
+        visualization = "timechart"
+
+        size = 0
+
+        noDataMessage = "No request telemetry was returned for the last 24 hours."
+      }
     },
+
     {
-      "type": 3,
-      "content": {
-        "version": "KqlItem/1.0",
-        "query": ${jsonencode(metric_query)},
-        "size": 1,
-        "title": "Custom Metrics",
-        "queryType": 0,
-        "resourceType": "microsoft.insights/components",
-        "resourceId": ${jsonencode(app_insights_id)},
-        "visualization": "timechart"
-      },
-      "name": "metrics"
+      type = 3
+      name = "dependencies"
+
+      content = {
+        version = "KqlItem/1.0"
+
+        title = "Dependency traffic and failures"
+
+        query = dependency_query
+
+        queryType    = 0
+        resourceType = "microsoft.operationalinsights/workspaces"
+
+        resourceIds = [
+          workspace_id
+        ]
+
+        visualization = "timechart"
+
+        size = 0
+
+        noDataMessage = "No dependency telemetry was returned for the last 24 hours."
+      }
+    },
+
+    {
+      type = 3
+      name = "exceptions"
+
+      content = {
+        version = "KqlItem/1.0"
+
+        title = "Application exceptions"
+
+        query = exception_query
+
+        queryType    = 0
+        resourceType = "microsoft.operationalinsights/workspaces"
+
+        resourceIds = [
+          workspace_id
+        ]
+
+        visualization = "timechart"
+
+        size = 0
+
+        noDataMessage = "No Application Insights exceptions were returned for the last 24 hours."
+      }
+    },
+
+    {
+      type = 3
+      name = "custom-metrics"
+
+      content = {
+        version = "KqlItem/1.0"
+
+        title = "Application custom metrics"
+
+        query = metric_query
+
+        queryType    = 0
+        resourceType = "microsoft.operationalinsights/workspaces"
+
+        resourceIds = [
+          workspace_id
+        ]
+
+        visualization = "timechart"
+
+        size = 0
+
+        noDataMessage = "No Application Insights custom metrics were returned for the last 24 hours."
+      }
     }
-  ],
-  "isLocked": false,
-  "fallbackResourceIds": [
-    "Azure Monitor"
   ]
-}
+
+  isLocked = false
+
+  defaultResourceIds = [
+    workspace_id
+  ]
+
+  fallbackResourceIds = [
+    workspace_id
+  ]
+})}

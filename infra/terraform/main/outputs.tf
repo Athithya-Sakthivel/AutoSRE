@@ -137,39 +137,49 @@ output "postgresql_private_endpoint_ip" {
 # ------------------------------------------------------------------------------
 
 output "log_analytics_workspace_id" {
-  description = "Log Analytics workspace resource ID."
+  description = "Log Analytics workspace ARM resource ID."
   value       = module.observability.log_analytics_workspace_id
 }
 
 output "log_analytics_workspace_name" {
-  description = "Name of the Log Analytics workspace."
+  description = "Log Analytics workspace name."
   value       = module.observability.log_analytics_workspace_name
 }
 
 output "log_analytics_workspace_customer_id" {
-  description = "Customer ID (workspace ID) of Log Analytics."
+  description = "Log Analytics workspace/customer GUID."
   value       = module.observability.log_analytics_workspace_customer_id
 }
 
 output "application_insights_id" {
-  description = "ARM resource ID of the Application Insights component."
+  description = "Application Insights ARM resource ID."
   value       = module.observability.application_insights_id
 }
 
 output "application_insights_name" {
-  description = "Name of the Application Insights component."
+  description = "Application Insights component name."
   value       = module.observability.application_insights_name
-}
-
-output "application_insights_connection_string" {
-  description = "Application Insights connection string for the Java agent."
-  value       = module.observability.application_insights_connection_string
-  sensitive   = true
 }
 
 output "application_insights_app_id" {
   description = "Application Insights App ID."
   value       = module.observability.application_insights_app_id
+}
+
+output "application_insights_connection_string" {
+  description = "Application Insights connection string."
+  value       = module.observability.application_insights_connection_string
+  sensitive   = true
+}
+
+output "observability_action_group_id" {
+  description = "Azure Monitor action group ARM resource ID."
+  value       = module.observability.action_group_id
+}
+
+output "observability_workbook_id" {
+  description = "Azure Monitor Workbook ARM resource ID."
+  value       = module.observability.workbook_id
 }
 
 # ------------------------------------------------------------------------------
