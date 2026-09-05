@@ -1,8 +1,3 @@
-# ============================================================================
-# modules/observability/outputs.tf
-# Outputs consumed by the application/platform layer.
-# ============================================================================
-
 output "log_analytics_workspace_id" {
   description = "ARM resource ID of the Log Analytics workspace."
   value       = azurerm_log_analytics_workspace.this.id
@@ -14,7 +9,7 @@ output "log_analytics_workspace_name" {
 }
 
 output "log_analytics_workspace_customer_id" {
-  description = "Log Analytics workspace/customer ID used by workspace-aware tooling."
+  description = "Workspace/customer GUID of the Log Analytics workspace."
   value       = azurerm_log_analytics_workspace.this.workspace_id
 }
 
@@ -29,24 +24,24 @@ output "application_insights_name" {
 }
 
 output "application_insights_app_id" {
-  description = "Application Insights App ID."
+  description = "Application Insights application ID."
   value       = azurerm_application_insights.this.app_id
 }
 
 output "application_insights_connection_string" {
-  description = "Sensitive Application Insights connection string for the Java agent runtime configuration."
+  description = "Application Insights connection string."
   value       = azurerm_application_insights.this.connection_string
   sensitive   = true
 }
 
 output "application_insights_instrumentation_key" {
-  description = "Sensitive legacy Application Insights instrumentation key. Prefer the connection string for new deployments."
+  description = "Legacy Application Insights instrumentation key."
   value       = azurerm_application_insights.this.instrumentation_key
   sensitive   = true
 }
 
 output "action_group_id" {
-  description = "ARM resource ID of the Azure Monitor action group used by alerts."
+  description = "ARM resource ID of the Azure Monitor action group."
   value       = azurerm_monitor_action_group.this.id
 }
 

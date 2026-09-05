@@ -14,7 +14,7 @@ bash azure-pipelines/scripts/frontend-deploy.sh --stable --stable-tag v1
 
 bash azure-pipelines/scripts/backend-deploy.sh \
   --canary \
-  --image ghcr.io/athithya-sakthivel/task-api-backend:v2 \
+  --image ghcr.io/athithya-sakthivel/task-api-backend:v3 \
   --qps 2 \
   --p95-threshold 5000 \
   --error-threshold 0.05 \

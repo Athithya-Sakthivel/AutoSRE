@@ -15,22 +15,17 @@ repos:
       - id: check-json
       - id: check-toml
 
-  # Java formatting/checking via the backend Maven wrapper.
-  #
-  # Requires:
-  #   services/backend/mvnw
-  #   services/backend/.mvn/wrapper/*
-  #
-  # Generate once from services/backend:
-  #   mvn wrapper:wrapper
-  - repo: local
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: 01a675ea018f2fb714478a5ffb83fcea8374bb06  # v0.15.21
     hooks:
-      - id: spotless
-        name: Spotless (Java)
-        entry: services/backend/mvnw -q -f services/backend/pom.xml spotless:check
-        language: system
-        files: ^services/backend/src/.*\.java$
-        pass_filenames: false
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/DetachHead/basedpyright-pre-commit-mirror
+    rev: 78e6efd50b63647fecb7e65fc7032745d861e2c5  # 1.39.6
+    hooks:
+      - id: basedpyright
 
   # Frontend ESLint.
   #
