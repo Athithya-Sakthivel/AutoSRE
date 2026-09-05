@@ -1,4 +1,4 @@
-# Ignored temprorily for local development, RBAC remains enabled to protect key vault access.
+# network_acls are disabled for one shot automation. kv is still protected by RBAC.
 AZU-0013
 
 # AKS API server authorized IP ranges configured via Azure CLI using AzureCloud service tag

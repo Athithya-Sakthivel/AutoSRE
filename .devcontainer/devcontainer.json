@@ -1,5 +1,5 @@
 {
-  "name": "aks-canary-platform",
+  "name": "AutoSRE",
   "build": {
     "dockerfile": "Dockerfile",
     "context": "."
@@ -7,7 +7,25 @@
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
   "remoteUser": "root",
-  "forwardPorts": [8080, 50051, 6379, 9090],
+  "forwardPorts": [
+    3000,
+    3001,
+    8000,
+    8001,
+    8080,
+    50051,
+    8005,
+    7000,
+    7001,
+    7002,
+    7003,
+    6379,
+    9153,
+    9090,
+    30080,
+    443,
+    80
+  ],
   "runArgs": [
     "--privileged",
     "--network=host",
@@ -18,28 +36,21 @@
     "--shm-size=10g"
   ],
   "containerEnv": {
-    "DOCKER_HOST": "unix:///var/run/docker.sock",
-    "DOCKER_BUILDKIT": "1",
-    "BUILDKIT_PROGRESS": "plain"
+    "DOCKER_GID": "999",
+    "DOCKER_PROXY_HOST": "",
+    "DOCKER_PROXY_PORT": ""
   },
   "customizations": {
     "vscode": {
       "extensions": [
-        "vscjava.vscode-java-pack",
-        "vmware.vscode-boot-dev-pack",
-        "ms-kubernetes-tools.vscode-kubernetes-tools",
-        "ms-azuretools.vscode-docker",
-        "redhat.vscode-yaml"
+        "ms-vscode-remote.remote-containers"
       ],
       "settings": {
         "files.autoSave": "afterDelay",
         "files.autoSaveDelay": 1000,
-        "terminal.integrated.scrollback": 5000,
+        "terminal.integrated.scrollback": 2500,
         "workbench.colorTheme": "Default Dark Modern",
-        "workbench.preferredDarkColorTheme": "Default Dark Modern",
-        "java.configuration.updateBuildConfiguration": "automatic",
-        "java.compile.nullAnalysis.mode": "automatic",
-        "maven.terminal.useJavaHome": true
+        "workbench.preferredDarkColorTheme": "Default Dark Modern"
       }
     }
   }
