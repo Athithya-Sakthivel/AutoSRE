@@ -1,38 +1,20 @@
 {
   "name": "AutoSRE",
-  "build": {
-    "dockerfile": "Dockerfile",
-    "context": "."
-  },
+  "image": "ghcr.io/athithya-sakthivel/autosre-devcontainer:2026.09.11@sha256:76987043539ed3d809b96d719bf86a3548e0ba82ddd5330bd391e5d919fa24cb",
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
   "remoteUser": "root",
   "forwardPorts": [
-    3000,
-    3001,
-    8000,
-    8001,
-    8080,
-    50051,
-    8005,
-    7000,
-    7001,
-    7002,
-    7003,
-    6379,
-    9153,
-    9090,
-    30080,
-    443,
-    80
+    3000, 3001, 8000, 8001, 8080, 50051,
+    8005, 7000, 7001, 7002, 7003, 6379,
+    9153, 9090, 30080, 443, 80
   ],
   "runArgs": [
     "--privileged",
     "--network=host",
     "--cap-add=SYS_PTRACE",
     "--security-opt=seccomp=unconfined",
-    "-v",
-    "/var/run/docker.sock:/var/run/docker.sock",
+    "-v", "/var/run/docker.sock:/var/run/docker.sock",
     "--shm-size=10g"
   ],
   "containerEnv": {

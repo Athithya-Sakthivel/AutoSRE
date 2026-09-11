@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
+FROM docker.io/library/ubuntu:26.04@sha256:513c074113a871b51a8d16ab445c88779d6452d937a164fb5cc479f32668a41d
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
@@ -8,17 +8,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DOCKER_BUILDKIT=1 \
     BUILDKIT_PROGRESS=plain \
     PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PYENV_ROOT="/root/.pyenv"
+    PIPX_HOME=/opt/pipx \
+    PIPX_BIN_DIR=/usr/local/bin \
+    NVM_DIR=/root/.nvm
 
-# Copy the bootstrap script
+# Python 3.14 comes from Ubuntu 26.04 apt — no pyenv, no source builds.
+ENV PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.nvm/versions/node/v24.20.0/bin"
+
 COPY bootstrap.sh /tmp/bootstrap.sh
-
-# Make it executable and run it
-RUN chmod +x /tmp/bootstrap.sh && bash /tmp/bootstrap.sh
-
-# Set environment variables for pyenv and Python
-ENV PATH="${PYENV_ROOT}/bin:${PYENV_ROOT}/versions/3.14.6/bin:/root/.nvm/versions/node/v24.20.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    NVM_DIR="/root/.nvm"
+RUN chmod +x /tmp/bootstrap.sh \
+ && bash /tmp/bootstrap.sh \
+ && rm -f /tmp/bootstrap.sh
 
 WORKDIR /workspace

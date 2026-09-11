@@ -58,6 +58,5 @@ tsconfig.tsbuildinfo
 .cache/
 .plans/
 
-target
 playwright-report
 test-results

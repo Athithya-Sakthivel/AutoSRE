@@ -5,9 +5,10 @@ export DEBIAN_FRONTEND=noninteractive
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 export PYTHONUNBUFFERED=1
 
-AZURE_CLI_VERSION="2.88.0"
-PYENV_TAG="v2.7.3"
-PYTHON_VERSION="3.14.6"
+# ------------------------------------------------------------------
+# Pinned versions (Azure CLI is intentionally unpinned — see below)
+# ------------------------------------------------------------------
+PYTHON_SERIES="3.14"
 PYTEST_VERSION="9.0.3"
 PRE_COMMIT_VERSION="4.6.0"
 OPENTOFU_VERSION="1.12.2"
@@ -20,6 +21,9 @@ NODE_VERSION="24.20.0"
 NPM_VERSION="11.13.0"
 ARGO_PLUGIN_VERSION="v1.9.1"
 
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
 if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
     SUDO=()
 else
@@ -38,9 +42,7 @@ die() {
 trap 'die "Command failed at line $LINENO: $BASH_COMMAND"' ERR
 
 ensure_line() {
-    local file="$1"
-    local line="$2"
-
+    local file="$1" line="$2"
     mkdir -p "$(dirname "$file")"
     touch "$file"
     grep -qxF "$line" "$file" || printf '%s\n' "$line" >>"$file"
@@ -51,13 +53,21 @@ require_cmd() {
 }
 
 detect_arch() {
-  case "$(dpkg --print-architecture)" in
-    amd64) echo "amd64" ;;
-    arm64) echo "arm64" ;;
-    *) die "Unsupported architecture: $(dpkg --print-architecture)" ;;
-  esac
+    case "$(dpkg --print-architecture)" in
+        amd64) echo "amd64" ;;
+        arm64) echo "arm64" ;;
+        *)     die "Unsupported architecture: $(dpkg --print-architecture)" ;;
+    esac
 }
 
+ubuntu_codename() {
+    . /etc/os-release
+    echo "${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+}
+
+# ------------------------------------------------------------------
+# Base packages (includes system Python 3.14 from apt)
+# ------------------------------------------------------------------
 install_base_packages() {
     log "Installing base packages..."
 
@@ -71,45 +81,48 @@ install_base_packages() {
         gh \
         gnupg \
         jq \
-        libbz2-dev \
-        libffi-dev \
-        libgdbm-dev \
-        liblzma-dev \
-        libncursesw5-dev \
-        libreadline-dev \
-        libsqlite3-dev \
-        libssl-dev \
         lsb-release \
         make \
         openssh-client \
         pkg-config \
         postgresql-client \
+        python3 \
         python3-pip \
         python3-venv \
         python3-full \
         pipx \
         socat \
-        tk-dev \
         tree \
         unzip \
-        uuid-dev \
         vim \
         xz-utils \
-        zlib1g-dev \
         zstd
 }
 
+# ------------------------------------------------------------------
+# Docker CLI
+# ------------------------------------------------------------------
 install_docker_cli() {
-    local arch
+    local arch dist repo_dist
     arch="$(detect_arch)"
+    dist="$(ubuntu_codename)"
+    repo_dist="$dist"
 
-    log "Installing Docker CLI..."
+    log "Installing Docker CLI (host suite: ${dist})..."
 
     "${SUDO[@]}" install -d -m 0755 /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
+        gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
     "${SUDO[@]}" chmod 0644 /etc/apt/keyrings/docker.gpg
-    echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+
+    if ! curl -fsI "https://download.docker.com/linux/ubuntu/dists/${repo_dist}/Release" >/dev/null 2>&1; then
+        log "Docker repo has no '${repo_dist}' suite — falling back to 'noble'"
+        repo_dist="noble"
+    fi
+
+    echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${repo_dist} stable" \
         > /etc/apt/sources.list.d/docker.list
+
     "${SUDO[@]}" apt-get update -qq
     "${SUDO[@]}" apt-get install -y --no-install-recommends \
         docker-ce-cli \
@@ -117,121 +130,80 @@ install_docker_cli() {
         docker-compose-plugin
 }
 
+# ------------------------------------------------------------------
+# Azure CLI — uses the official repository for the detected codename.
+# The repository now publishes a `resolute` suite for Ubuntu 26.04,
+# so no hard‑coded version suffix is needed.
+# ------------------------------------------------------------------
 install_azure_cli() {
-    local dist arch current
-    local keyring="/etc/apt/keyrings/microsoft.gpg"
-    local sources="/etc/apt/sources.list.d/azure-cli.sources"
-    local expected_pkg_version="${AZURE_CLI_VERSION}-1~"
-
-    . /etc/os-release
-    dist="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
-    [[ -n "$dist" ]] || die "Unable to determine distro codename from /etc/os-release"
+    local dist arch
+    dist="$(ubuntu_codename)"
     arch="$(dpkg --print-architecture)"
 
+    [[ -n "$dist" ]] || die "Unable to determine distro codename from /etc/os-release"
+
     if command -v az >/dev/null 2>&1; then
-        current="$(az version --query '"azure-cli"' -o tsv 2>/dev/null || true)"
-        if [[ "$current" == "$AZURE_CLI_VERSION" ]]; then
-            log "Azure CLI ${AZURE_CLI_VERSION} already installed."
-            return
-        fi
+        log "Azure CLI already installed: $(az version --query '"azure-cli"' -o tsv 2>/dev/null)"
+        return
     fi
 
-    log "Installing Azure CLI ${AZURE_CLI_VERSION}..."
+    log "Installing Azure CLI for Ubuntu ${dist}..."
 
     "${SUDO[@]}" install -d -m 0755 /etc/apt/keyrings
     curl -fsSL https://packages.microsoft.com/keys/microsoft.asc |
         gpg --dearmor |
-        "${SUDO[@]}" tee "$keyring" >/dev/null
-    "${SUDO[@]}" chmod 0644 "$keyring"
+        "${SUDO[@]}" tee /etc/apt/keyrings/microsoft.gpg >/dev/null
+    "${SUDO[@]}" chmod 0644 /etc/apt/keyrings/microsoft.gpg
 
-    "${SUDO[@]}" tee "$sources" >/dev/null <<EOF
+    "${SUDO[@]}" tee /etc/apt/sources.list.d/azure-cli.sources >/dev/null <<EOF
 Types: deb
 URIs: https://packages.microsoft.com/repos/azure-cli/
 Suites: ${dist}
 Components: main
 Architectures: ${arch}
-Signed-By: ${keyring}
+Signed-By: /etc/apt/keyrings/microsoft.gpg
 EOF
-    "${SUDO[@]}" chmod 0644 "$sources"
+    "${SUDO[@]}" chmod 0644 /etc/apt/sources.list.d/azure-cli.sources
 
     "${SUDO[@]}" apt-get update -qq
+    "${SUDO[@]}" apt-get install -y azure-cli
 
-    if ! apt-cache madison azure-cli | awk -v want="$expected_pkg_version" '$3 ~ "^" want "[0-9A-Za-z.~:-]*$" { found=1 } END { exit(found ? 0 : 1) }'; then
-        die "Azure CLI ${AZURE_CLI_VERSION} package not found for ${dist}"
-    fi
-
-    "${SUDO[@]}" apt-get install -y \
-        --allow-downgrades \
-        --allow-change-held-packages \
-        "azure-cli=${AZURE_CLI_VERSION}-1~${dist}"
-
-    current="$(az version --query '"azure-cli"' -o tsv)"
-    [[ "$current" == "$AZURE_CLI_VERSION" ]] || die "Azure CLI version check failed: expected ${AZURE_CLI_VERSION}, got ${current}"
-
-    log "Azure CLI ${current} installed."
+    log "Azure CLI installed: $(az version --query '"azure-cli"' -o tsv)"
 }
 
-install_pyenv() {
-    local pyenv_root="${PYENV_ROOT:-$HOME/.pyenv}"
-
-    if [[ -d "$pyenv_root/.git" ]]; then
-        log "Updating pyenv to ${PYENV_TAG}..."
-        git -C "$pyenv_root" fetch --tags --force origin
-        git -C "$pyenv_root" checkout -q "$PYENV_TAG"
-        git -C "$pyenv_root" reset --hard "$PYENV_TAG" >/dev/null
-    else
-        log "Installing pyenv ${PYENV_TAG}..."
-        git clone --branch "$PYENV_TAG" --depth 1 https://github.com/pyenv/pyenv.git "$pyenv_root"
-    fi
-
-    export PYENV_ROOT="$pyenv_root"
-    export PATH="$PYENV_ROOT/bin:$PATH"
-
-    require_cmd pyenv
-    eval "$(pyenv init - bash)"
-
-    ensure_line "$HOME/.bashrc" 'export PYENV_ROOT="$HOME/.pyenv"'
-    ensure_line "$HOME/.bashrc" '[ -d "$PYENV_ROOT/bin" ] && export PATH="$PYENV_ROOT/bin:$PATH"'
-    ensure_line "$HOME/.bashrc" 'eval "$(pyenv init - bash)"'
-
-    ensure_line "$HOME/.profile" '[ -n "$BASH_VERSION" ] && [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"'
-
-    log "pyenv ready: $(pyenv --version)"
-}
-
+# ------------------------------------------------------------------
+# Python — verify the apt-provided version. NO pyenv.
+# ------------------------------------------------------------------
 install_python() {
-    local python_bin
+    log "Verifying system Python ${PYTHON_SERIES}.x (apt, no pyenv)..."
 
-    log "Installing Python ${PYTHON_VERSION} with pyenv..."
+    require_cmd python3
 
-    pyenv install -s "$PYTHON_VERSION"
+    local major_minor
+    major_minor="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    [[ "$major_minor" == "$PYTHON_SERIES" ]] || die "Expected Python ${PYTHON_SERIES}.x, got ${major_minor}"
 
-    python_bin="$PYENV_ROOT/versions/$PYTHON_VERSION/bin/python"
-    [[ -x "$python_bin" ]] || die "Python binary not found after install: $python_bin"
+    export PYTHON_BIN
+    PYTHON_BIN="$(command -v python3)"
 
-    export PATH="$(dirname "$python_bin"):$PATH"
-    export PYTHON_BIN="$python_bin"
-
-    "$PYTHON_BIN" --version | grep -qx "Python ${PYTHON_VERSION}" || die "Installed Python does not match ${PYTHON_VERSION}"
-    pyenv global "$PYTHON_VERSION"
-    "$PYTHON_BIN" -m ensurepip --upgrade
-    "$PYTHON_BIN" -m pip install --upgrade pip setuptools wheel
-    pyenv rehash
-
-    log "Python $($PYTHON_BIN --version 2>&1) ready."
+    log "Python ready: $("$PYTHON_BIN" --version 2>&1) at $PYTHON_BIN"
 }
 
 install_python_tools() {
-    log "Installing Python tools..."
+    log "Installing Python CLI tools (pytest, pre-commit) via pipx..."
 
-    "$PYTHON_BIN" -m pip install \
-        "pytest==${PYTEST_VERSION}" \
-        "pre-commit==${PRE_COMMIT_VERSION}"
+    require_cmd pipx
+
+    pipx install --force "pytest==${PYTEST_VERSION}"
+    pipx install --force "pre-commit==${PRE_COMMIT_VERSION}"
 
     require_cmd pytest
     require_cmd pre-commit
 }
 
+# ------------------------------------------------------------------
+# Everything else
+# ------------------------------------------------------------------
 install_opentofu() {
     local arch
     arch="$(detect_arch)"
@@ -327,6 +299,7 @@ install_nodejs() {
 
     export NVM_DIR="$HOME/.nvm"
     curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+    # shellcheck disable=SC1091
     source "$NVM_DIR/nvm.sh"
     nvm install "$NODE_VERSION"
     nvm use "$NODE_VERSION"
@@ -356,9 +329,10 @@ install_argo_rollouts() {
 print_versions() {
     echo
     echo "=== Versions ==="
-    echo "  Python     : $($PYTHON_BIN --version 2>&1)"
-    echo "  Pip        : $($PYTHON_BIN -m pip --version | awk '{print $2}')"
-    echo "  Azure CLI  : $(az version --query '"azure-cli"' -o tsv)"
+    echo "  Python     : $("$PYTHON_BIN" --version 2>&1)"
+    echo "  Python path: $PYTHON_BIN"
+    echo "  Pip        : $(python3 -m pip --version 2>/dev/null | awk '{print $2}' || echo 'n/a')"
+    echo "  Azure CLI  : $(az version --query '"azure-cli"' -o tsv 2>/dev/null || echo 'n/a')"
     echo "  OpenTofu   : $(tofu version | head -1)"
     echo "  kubectl    : $(kubectl version --client 2>&1 | head -n 1)"
     echo "  kind       : $(kind version)"
@@ -372,11 +346,13 @@ print_versions() {
     echo "=== All tools installed ==="
 }
 
+echo "export PS1='\[\e[1;32m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]# '" >> ~/.bashrc
+source ~/.bashrc
+
 main() {
     install_base_packages
     install_docker_cli
     install_azure_cli
-    install_pyenv
     install_python
     install_python_tools
     install_opentofu
