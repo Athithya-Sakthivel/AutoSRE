@@ -60,3 +60,5 @@ tsconfig.tsbuildinfo
 target
 playwright-report
 test-results
+
+.secrets.openobserve

@@ -1,0 +1,7 @@
+apiVersion: v2
+name: otel-gateway
+description: Production-hardened OTel gateway for OpenObserve
+type: application
+version: 0.2.1
+appVersion: "0.160.0"
+kubeVersion: ">=1.28.0-0"

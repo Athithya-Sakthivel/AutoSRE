@@ -1,0 +1,7 @@
+apiVersion: v2
+name: otel-daemonset
+description: OTel Collector DaemonSet for kubelet_stats — node-local Kubernetes metrics
+type: application
+version: 0.1.2
+appVersion: "0.160.0"
+kubeVersion: ">=1.28.0-0"

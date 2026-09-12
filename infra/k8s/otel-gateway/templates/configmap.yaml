@@ -1,0 +1,212 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "otel-gateway.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "otel-gateway.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    receivers:
+      # Application telemetry via OTLP. Node-local kubelet metrics are
+      # collected by the otel-daemonset chart, not by this gateway.
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+            max_recv_msg_size_mib: 4
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      # MUST be first in every pipeline. Protects the process from OOM.
+      # limit_mib is 75% of the 1Gi container limit. spike_limit_mib is 25%
+      # of limit_mib. The OTel SDK documentation states: "The memory limiter
+      # is used to prevent out of memory situations on the collector. It is
+      # a good practice to configure it before any other processor."
+      memory_limiter:
+        check_interval: 2s
+        limit_mib: 768
+        spike_limit_mib: 192
+
+      # Enriches application telemetry with Kubernetes metadata so that
+      # traces and logs can be correlated by pod, namespace, and deployment.
+      # Component renamed from k8sattributes to k8s_attributes in v0.146.0.
+      # The deprecated alias remains available until the next major release.
+      k8s_attributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata:
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.namespace.name
+            - k8s.node.name
+            - k8s.deployment.name
+            - k8s.statefulset.name
+            - k8s.daemonset.name
+            - k8s.job.name
+            - k8s.cronjob.name
+            - k8s.container.name
+            - k8s.replicaset.name
+          labels:
+            - tag_name: app.kubernetes.io/name
+              key: app.kubernetes.io/name
+              from: pod
+            - tag_name: app.kubernetes.io/component
+              key: app.kubernetes.io/component
+              from: pod
+            - tag_name: app.kubernetes.io/part-of
+              key: app.kubernetes.io/part-of
+              from: pod
+        pod_association:
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.uid
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.name
+              - from: resource_attribute
+                name: k8s.namespace.name
+          - sources:
+              - from: connection
+
+      # Drops server-side health-check spans before they reach OpenObserve.
+      # The condition requires all three: server span kind, health-check path,
+      # and kube-probe user agent. Real user requests to the same paths are
+      # preserved because they do not carry the kube-probe user agent.
+      #
+      # The trace_conditions field is the current schema (v0.146.0+). The
+      # legacy traces.span field was removed.
+      filter/drop_health_checks:
+        error_mode: ignore
+        trace_conditions:
+          - >-
+            span.kind == SPAN_KIND_SERVER and
+            (span.attributes["url.path"] == "/healthz" or
+             span.attributes["url.path"] == "/readyz" or
+             span.attributes["url.path"] == "/livez" or
+             span.attributes["url.path"] == "/health" or
+             span.attributes["url.path"] == "/ready" or
+             span.attributes["http.route"] == "/healthz" or
+             span.attributes["http.route"] == "/readyz" or
+             span.attributes["http.target"] == "/healthz" or
+             span.attributes["http.target"] == "/readyz") and
+            (IsMatch(span.attributes["user_agent.original"], "^kube-probe/") or
+             IsMatch(span.attributes["http.user_agent"], "^kube-probe/"))
+
+      # Defensive filter for application-emitted metrics that collide with
+      # namespaces OpenObserve cannot serialize. The filter processor matches
+      # on the normalized underscore form of the metric name and supports
+      # match_type: regexp, which matches the current schema.
+      filter/drop_openobserve_incompatible:
+        error_mode: ignore
+        metrics:
+          exclude:
+            match_type: regexp
+            metric_names:
+              - "^k8s\\.node\\.memory\\.(major_)?page_faults$"
+              - "^k8s\\.node\\.paging\\.faults$"
+              - "^container\\.filesystem\\.(available|capacity|usage)$"
+              - "^k8s\\.pod\\.filesystem\\.(available|capacity|usage)$"
+
+      # Adds cluster identity to every signal for cross-cluster queries.
+      resource/add_cluster:
+        attributes:
+          - key: cluster.name
+            value: "{{ .Values.cluster.name }}"
+            action: upsert
+          - key: deployment.environment
+            value: "production"
+            action: upsert
+
+      # Batches signals before export. Positioned last so that the
+      # memory_limiter and filters run on individual records, not batches.
+      batch:
+        send_batch_size: 1024
+        send_batch_max_size: 2048
+        timeout: 5s
+
+    exporters:
+      # Single egress point for all three signals.
+      #
+      # The component otlp_http exporter (renamed from otlphttp in v0.144.0)
+      # appends the signal-specific path (/v1/traces, /v1/metrics, /v1/logs)
+      # to the base URL. This differs from the internal telemetry exporter,
+      # which forwards any path present in the URL as-is. The base URL is
+      # therefore correct here without a signal path.
+      otlp_http/openobserve:
+        endpoint: "{{ .Values.openobserve.endpoint }}"
+        headers:
+          Authorization: "Basic ${env:OPENOBSERVE_TOKEN}"
+        compression: gzip
+        timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 4
+          queue_size: 2048
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    service:
+      extensions: [health_check]
+
+      telemetry:
+        logs:
+          level: info
+        metrics:
+          readers:
+            - periodic:
+                # interval is an integer in milliseconds, not a duration string.
+                interval: 60000
+                exporter:
+                  otlp:
+                    protocol: http/protobuf
+                    # The internal telemetry exporter uses the OTel Go SDK's
+                    # OTLP HTTP exporter. Per the official docs: "any path in
+                    # the URL is forwarded to the exporter; if no path is
+                    # specified, the default signal-specific path is used."
+                    # OpenObserve's endpoint contains /api/default, so the
+                    # signal path must be appended explicitly. Without it,
+                    # requests hit /api/default and return 404.
+                    endpoint: "{{ .Values.openobserve.endpoint }}/v1/metrics"
+                    headers:
+                      # Internal telemetry headers are a list of name/value pairs.
+                      - name: "Authorization"
+                        value: "Basic ${env:OPENOBSERVE_TOKEN}"
+
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors:
+            - memory_limiter
+            - k8s_attributes
+            - filter/drop_health_checks
+            - resource/add_cluster
+            - batch
+          exporters: [otlp_http/openobserve]
+
+        metrics:
+          receivers: [otlp]
+          processors:
+            - memory_limiter
+            - filter/drop_openobserve_incompatible
+            - resource/add_cluster
+            - batch
+          exporters: [otlp_http/openobserve]
+
+        logs:
+          receivers: [otlp]
+          processors:
+            - memory_limiter
+            - k8s_attributes
+            - resource/add_cluster
+            - batch
+          exporters: [otlp_http/openobserve]
