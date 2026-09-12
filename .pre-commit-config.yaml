@@ -1,11 +1,22 @@
+# .pre-commit-config.yaml
+#
+# Repository hygiene, Python, Go, Java, and frontend hooks.
+#
+# Go tooling uses `go tool` directives (Go 1.24+) declared in
+# microservices/catalog/go.mod. No `go install` step is required;
+# versions are resolved from the module's go.sum.
+#
+# Java requires microservices/orders/mvnw (Maven wrapper).
+# Frontend requires Node.js and the project's local ESLint and Prettier.
+
 repos:
-  # Secrets
+  # --- Secrets ---
   - repo: https://github.com/gitleaks/gitleaks
     rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e # v8.30.1
     hooks:
       - id: gitleaks
 
-  # General repository hygiene
+  # --- Repository hygiene ---
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # v6.0.0
     hooks:
@@ -14,42 +25,101 @@ repos:
       - id: check-merge-conflict
       - id: check-json
       - id: check-toml
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
 
+  # --- Python ---
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: 01a675ea018f2fb714478a5ffb83fcea8374bb06  # v0.15.21
+    rev: 01a675ea018f2fb714478a5ffb83fcea8374bb06 # v0.15.21
     hooks:
       - id: ruff
         args: [--fix]
       - id: ruff-format
 
   - repo: https://github.com/DetachHead/basedpyright-pre-commit-mirror
-    rev: 78e6efd50b63647fecb7e65fc7032745d861e2c5  # 1.39.6
+    rev: 78e6efd50b63647fecb7e65fc7032745d861e2c5 # 1.39.6
     hooks:
       - id: basedpyright
 
-  # Frontend ESLint.
+  # --- Go (microservices/catalog) ---
   #
-  # ESLint 10 requires flat config:
-  #   services/frontend/eslint.config.js
+  # Tools are declared in microservices/catalog/go.mod:
   #
-  # Uses frontend project's local ESLint.
+  #   tool (
+  #       mvdan.cc/gofumpt
+  #       github.com/golangci/golangci-lint/v2/cmd/golangci-lint
+  #       golang.org/x/vuln/cmd/govulncheck
+  #   )
+  #
+  # Run `go mod tidy` in microservices/catalog to resolve versions.
+  # No manual `go install` is needed; `go tool` resolves from go.sum.
+  - repo: local
+    hooks:
+      - id: go-fumpt
+        name: gofumpt
+        entry: bash -c 'cd microservices/catalog && go tool gofumpt -w'
+        language: system
+        files: ^microservices/catalog/.*\.go$
+
+      - id: go-vet
+        name: go vet
+        entry: bash -c 'cd microservices/catalog && go vet ./...'
+        language: system
+        files: ^microservices/catalog/.*\.go$
+        pass_filenames: false
+
+      - id: go-mod-tidy
+        name: go mod tidy
+        entry: bash -c 'cd microservices/catalog && go mod tidy'
+        language: system
+        files: ^microservices/catalog/go\.(mod|sum)$
+        pass_filenames: false
+
+      - id: golangci-lint
+        name: golangci-lint
+        entry: bash -c 'cd microservices/catalog && go tool golangci-lint run --timeout=5m'
+        language: system
+        files: ^microservices/catalog/.*\.go$
+        pass_filenames: false
+
+      - id: govulncheck
+        name: govulncheck
+        entry: bash -c 'cd microservices/catalog && go tool govulncheck ./...'
+        language: system
+        files: ^microservices/catalog/go\.(mod|sum)$
+        pass_filenames: false
+
+  # --- Java (microservices/orders) ---
+  #
+  # Requires:
+  #   microservices/orders/mvnw
+  #   microservices/orders/.mvn/wrapper/*
+  #
+  # Generate the wrapper once from microservices/orders:
+  #   mvn wrapper:wrapper
+  - repo: local
+    hooks:
+      - id: spotless
+        name: Spotless (Java)
+        entry: bash -c 'cd microservices/orders && ./mvnw -q spotless:check'
+        language: system
+        files: ^microservices/orders/src/.*\.java$
+        pass_filenames: false
+
+  # --- Frontend (microservices/storefront) ---
   - repo: local
     hooks:
       - id: eslint
-        name: ESLint (frontend)
-        entry: npm --prefix services/frontend exec -- eslint --fix
+        name: ESLint (storefront)
+        entry: npm --prefix microservices/storefront exec -- eslint --fix
         language: system
-        files: ^services/frontend/.*\.(js|jsx|ts|tsx)$
+        files: ^microservices/storefront/.*\.(js|jsx|ts|tsx)$
         pass_filenames: true
 
-  # Frontend / repository formatting.
-  #
-  # Uses frontend project's local Prettier.
-  - repo: local
-    hooks:
       - id: prettier
-        name: Prettier
-        entry: npm --prefix services/frontend exec -- prettier --write
+        name: Prettier (storefront)
+        entry: npm --prefix microservices/storefront exec -- prettier --write
         language: system
-        files: ^(services/frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md)|.*\.(md))$
+        files: ^microservices/storefront/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
         pass_filenames: true

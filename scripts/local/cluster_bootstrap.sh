@@ -2,22 +2,33 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-# Local Kubernetes bootstrap for kind(for AKS parity)
-# Recreates the named cluster on every run by design.
-# Baseline: kind + Kubernetes 1.36.1 + Gateway API v1.6.1 + Cilium 1.20.1 + Metrics Server v0.9.0
+# ==============================================================================
+# Local Kubernetes bootstrap for kind — AKS parity with Envoy Gateway
+#
+# Creates a kind cluster with:
+#   - Kubernetes 1.36.1
+#   - Cilium CNI (data plane only, no Gateway API controller)
+#   - Envoy Gateway v1.9.1 (Gateway API controller)
+#   - GatewayClass "eg"
+#   - Gateway "gateway/gateway" with cross-namespace route support
+#   - Metrics Server
+#
+# This matches the AKS architecture where Azure CNI Powered by Cilium provides
+# the data plane and Envoy Gateway provides Gateway API ingress.
+# ==============================================================================
 
 CLUSTER="${CLUSTER:-kind}"
 K8S_VERSION="${K8S_VERSION:-1.36.1}"
 K8S_IMAGE="${K8S_IMAGE:-kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5}"
-KIND_WORKERS="${KIND_WORKERS:-0}"
+KIND_WORKERS="${KIND_WORKERS:-1}"
 POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
 SERVICE_CIDR="${SERVICE_CIDR:-10.96.0.0/12}"
 
-GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.6.1}"
-GATEWAY_API_URL="https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
-
-CILIUM_VERSION="${CILIUM_VERSION:-1.20.1}"
+CILIUM_VERSION="${CILIUM_VERSION:-1.19.6}"
 CILIUM_CHART="oci://quay.io/cilium/charts/cilium"
+
+ENVOY_GATEWAY_VERSION="${ENVOY_GATEWAY_VERSION:-v1.9.1}"
+ENVOY_GATEWAY_NAMESPACE="${ENVOY_GATEWAY_NAMESPACE:-envoy-gateway-system}"
 
 METRICS_SERVER_VERSION="${METRICS_SERVER_VERSION:-v0.9.0}"
 METRICS_SERVER_URL="https://github.com/kubernetes-sigs/metrics-server/releases/download/${METRICS_SERVER_VERSION}/components.yaml"
@@ -74,6 +85,7 @@ networking:
 nodes:
   - role: control-plane
 EOF
+
   local i
   for (( i=0; i<KIND_WORKERS; i++ )); do
     echo "  - role: worker" >> "${KIND_CONFIG}"
@@ -89,34 +101,75 @@ create_cluster() {
   wait_until "Kubernetes API" 180 kubectl_cmd get --raw='/readyz?verbose'
 }
 
-install_gateway_api() {
-  log "Installing Gateway API ${GATEWAY_API_VERSION}"
-  kubectl_cmd apply --server-side -f "${GATEWAY_API_URL}"
-  for crd in gatewayclasses gateways httproutes referencegrants backendtlspolicies; do
-    kubectl_cmd wait --for=condition=Established "crd/${crd}.gateway.networking.k8s.io" --timeout=120s
-  done
-}
-
 install_cilium() {
-  log "Installing Cilium ${CILIUM_VERSION}"
+  log "Installing Cilium ${CILIUM_VERSION} (CNI only)"
   helm upgrade --install cilium "${CILIUM_CHART}" \
     --namespace kube-system \
     --version "${CILIUM_VERSION}" \
     --set ipam.mode=kubernetes \
     --set kubeProxyReplacement=true \
-    --set gatewayAPI.enabled=true \
     --set operator.replicas=1 \
     --wait --timeout "${WAIT_TIMEOUT}s"
 
   kubectl_cmd rollout status daemonset/cilium -n kube-system --timeout="${WAIT_TIMEOUT}s"
   kubectl_cmd rollout status deployment/cilium-operator -n kube-system --timeout="${WAIT_TIMEOUT}s"
-  wait_until "Cilium GatewayClass" 60 kubectl_cmd get gatewayclass cilium
 }
 
-remove_taint() {
-  (( KIND_WORKERS == 0 )) || return 0
-  log "Removing control-plane taint"
-  kubectl_cmd taint nodes --all node-role.kubernetes.io/control-plane- >/dev/null 2>&1 || true
+install_envoy_gateway() {
+  log "Installing Envoy Gateway ${ENVOY_GATEWAY_VERSION}"
+  helm upgrade --install eg \
+    oci://docker.io/envoyproxy/gateway-helm \
+    --version "${ENVOY_GATEWAY_VERSION}" \
+    --namespace "${ENVOY_GATEWAY_NAMESPACE}" \
+    --create-namespace \
+    --wait --timeout "${WAIT_TIMEOUT}s"
+
+  kubectl_cmd wait \
+    --namespace "${ENVOY_GATEWAY_NAMESPACE}" \
+    --for=condition=Available \
+    deployment/envoy-gateway \
+    --timeout="${WAIT_TIMEOUT}s"
+}
+
+create_gateway_resources() {
+  log "Creating GatewayClass 'eg' and Gateway 'gateway/gateway'"
+
+  kubectl_cmd create namespace gateway --dry-run=client -o yaml | kubectl_cmd apply -f -
+
+  kubectl_cmd apply -f - <<'EOF'
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: gateway
+  namespace: gateway
+spec:
+  gatewayClassName: eg
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              gateway-access: "true"
+EOF
+
+  kubectl_cmd wait --for=condition=Accepted gatewayclass/eg --timeout=120s
+  log "GatewayClass 'eg' accepted"
+}
+
+label_application_namespace() {
+  log "Labeling task-api namespace for Gateway route attachment"
+  kubectl_cmd label namespace task-api gateway-access=true --overwrite
 }
 
 install_metrics_server() {
@@ -131,26 +184,33 @@ install_metrics_server() {
 
 final_validate() {
   log "Final validation"
+
   kubectl_cmd wait --for=condition=Ready nodes --all --timeout=120s
+
   echo
   kubectl_cmd get nodes -o wide
   echo
   kubectl_cmd get pods -n kube-system
   echo
-  kubectl_cmd get gatewayclass cilium -o wide
+  kubectl_cmd get pods -n "${ENVOY_GATEWAY_NAMESPACE}"
+  echo
+  kubectl_cmd get gatewayclass eg -o wide
+  echo
+  kubectl_cmd get gateway -n gateway -o wide
   echo
   kubectl_cmd top nodes
   echo
-  log "READY: kind=${CLUSTER} k8s=${K8S_VERSION} cilium=${CILIUM_VERSION} gatewayapi=${GATEWAY_API_VERSION}"
+  log "READY: kind=${CLUSTER} k8s=${K8S_VERSION} cilium=${CILIUM_VERSION} envoy-gateway=${ENVOY_GATEWAY_VERSION}"
 }
 
 main() {
   preflight
   create_kind_config
   create_cluster
-  install_gateway_api
   install_cilium
-  remove_taint
+  install_envoy_gateway
+  create_gateway_resources
+  label_application_namespace
   install_metrics_server
   final_validate
 }
