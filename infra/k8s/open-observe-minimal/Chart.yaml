@@ -1,0 +1,7 @@
+apiVersion: v2
+name: open-observe-minimal
+description: Single-node OpenObserve for AutoSRE observability
+type: application
+version: 0.1.2
+appVersion: "v0.92.2"
+kubeVersion: ">=1.28.0-0"

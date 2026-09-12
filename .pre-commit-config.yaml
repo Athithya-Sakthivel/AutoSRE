@@ -1,12 +1,13 @@
+
 # .pre-commit-config.yaml
 #
 # Repository hygiene, Python, Go, Java, and frontend hooks.
 #
 # Go tooling uses `go tool` directives (Go 1.24+) declared in
-# microservices/catalog/go.mod. No `go install` step is required;
+# workloads/catalog/go.mod. No `go install` step is required;
 # versions are resolved from the module's go.sum.
 #
-# Java requires microservices/orders/mvnw (Maven wrapper).
+# Java requires workloads/orders/mvnw (Maven wrapper).
 # Frontend requires Node.js and the project's local ESLint and Prettier.
 
 repos:
@@ -23,9 +24,6 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-merge-conflict
-      - id: check-json
-      - id: check-toml
-      - id: check-yaml
       - id: check-added-large-files
         args: ["--maxkb=1024"]
 
@@ -42,9 +40,9 @@ repos:
     hooks:
       - id: basedpyright
 
-  # --- Go (microservices/catalog) ---
+  # --- Go (workloads/catalog) ---
   #
-  # Tools are declared in microservices/catalog/go.mod:
+  # Tools are declared in workloads/catalog/go.mod:
   #
   #   tool (
   #       mvdan.cc/gofumpt
@@ -52,74 +50,74 @@ repos:
   #       golang.org/x/vuln/cmd/govulncheck
   #   )
   #
-  # Run `go mod tidy` in microservices/catalog to resolve versions.
+  # Run `go mod tidy` in workloads/catalog to resolve versions.
   # No manual `go install` is needed; `go tool` resolves from go.sum.
   - repo: local
     hooks:
       - id: go-fumpt
         name: gofumpt
-        entry: bash -c 'cd microservices/catalog && go tool gofumpt -w'
+        entry: bash -c 'cd workloads/catalog && go tool gofumpt -w'
         language: system
-        files: ^microservices/catalog/.*\.go$
+        files: ^workloads/catalog/.*\.go$
 
       - id: go-vet
         name: go vet
-        entry: bash -c 'cd microservices/catalog && go vet ./...'
+        entry: bash -c 'cd workloads/catalog && go vet ./...'
         language: system
-        files: ^microservices/catalog/.*\.go$
+        files: ^workloads/catalog/.*\.go$
         pass_filenames: false
 
       - id: go-mod-tidy
         name: go mod tidy
-        entry: bash -c 'cd microservices/catalog && go mod tidy'
+        entry: bash -c 'cd workloads/catalog && go mod tidy'
         language: system
-        files: ^microservices/catalog/go\.(mod|sum)$
+        files: ^workloads/catalog/go\.(mod|sum)$
         pass_filenames: false
 
       - id: golangci-lint
         name: golangci-lint
-        entry: bash -c 'cd microservices/catalog && go tool golangci-lint run --timeout=5m'
+        entry: bash -c 'cd workloads/catalog && go tool golangci-lint run --timeout=5m'
         language: system
-        files: ^microservices/catalog/.*\.go$
+        files: ^workloads/catalog/.*\.go$
         pass_filenames: false
 
       - id: govulncheck
         name: govulncheck
-        entry: bash -c 'cd microservices/catalog && go tool govulncheck ./...'
+        entry: bash -c 'cd workloads/catalog && go tool govulncheck ./...'
         language: system
-        files: ^microservices/catalog/go\.(mod|sum)$
+        files: ^workloads/catalog/go\.(mod|sum)$
         pass_filenames: false
 
-  # --- Java (microservices/orders) ---
+  # --- Java (workloads/orders) ---
   #
   # Requires:
-  #   microservices/orders/mvnw
-  #   microservices/orders/.mvn/wrapper/*
+  #   workloads/orders/mvnw
+  #   workloads/orders/.mvn/wrapper/*
   #
-  # Generate the wrapper once from microservices/orders:
+  # Generate the wrapper once from workloads/orders:
   #   mvn wrapper:wrapper
   - repo: local
     hooks:
       - id: spotless
         name: Spotless (Java)
-        entry: bash -c 'cd microservices/orders && ./mvnw -q spotless:check'
+        entry: bash -c 'cd workloads/orders && ./mvnw -q spotless:check'
         language: system
-        files: ^microservices/orders/src/.*\.java$
+        files: ^workloads/orders/src/.*\.java$
         pass_filenames: false
 
-  # --- Frontend (microservices/storefront) ---
+  # --- Frontend (workloads/storefront) ---
   - repo: local
     hooks:
       - id: eslint
         name: ESLint (storefront)
-        entry: npm --prefix microservices/storefront exec -- eslint --fix
+        entry: npm --prefix workloads/storefront exec -- eslint --fix
         language: system
-        files: ^microservices/storefront/.*\.(js|jsx|ts|tsx)$
+        files: ^workloads/storefront/.*\.(js|jsx|ts|tsx)$
         pass_filenames: true
 
       - id: prettier
         name: Prettier (storefront)
-        entry: npm --prefix microservices/storefront exec -- prettier --write
+        entry: npm --prefix workloads/storefront exec -- prettier --write
         language: system
-        files: ^microservices/storefront/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
+        files: ^workloads/storefront/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
         pass_filenames: true

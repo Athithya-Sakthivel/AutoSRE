@@ -1,0 +1,192 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "otel-daemonset.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "otel-daemonset.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    receivers:
+      # Node-local kubelet metrics. Each DaemonSet pod scrapes its own node.
+      #
+      # Receiver renamed from kubeletstats to kubelet_stats in v0.152.0.
+      # The deprecated alias kubeletstats remains available but is not used.
+      #
+      # The endpoint uses the node's host IP from the downward API rather
+      # than the node name. The node name requires DNS resolution, which
+      # fails in clusters that do not resolve node hostnames from pods.
+      kubelet_stats:
+        collection_interval: {{ .Values.collectionInterval }}
+        auth_type: serviceAccount
+        endpoint: "https://${env:K8S_NODE_IP}:10250"
+        insecure_skip_verify: true
+        metric_groups:
+          - node
+          - pod
+          - container
+        # Only the 12 essential metrics are enabled. Everything else is
+        # explicitly disabled to reduce volume and to avoid metric families
+        # that OpenObserve cannot serialize to Parquet.
+        metrics:
+          # Node resource usage
+          k8s.node.cpu.usage:
+            enabled: true
+          k8s.node.memory.usage:
+            enabled: true
+          k8s.node.filesystem.usage:
+            enabled: true
+          k8s.node.network.io:
+            enabled: true
+
+          # Pod resource usage and limits
+          k8s.pod.cpu.usage:
+            enabled: true
+          k8s.pod.memory.usage:
+            enabled: true
+          k8s.pod.cpu_limit_utilization:
+            enabled: true
+          k8s.pod.memory_limit_utilization:
+            enabled: true
+          k8s.pod.uptime:
+            enabled: true
+
+          # Container resource usage
+          container.cpu.usage:
+            enabled: true
+          container.memory.usage:
+            enabled: true
+          container.uptime:
+            enabled: true
+
+          # Disabled: node paging faults trigger ArrowJsonEncodeError
+          # in OpenObserve 0.14.x when written to Parquet.
+          k8s.node.memory.page_faults:
+            enabled: false
+          k8s.node.memory.major_page_faults:
+            enabled: false
+          k8s.node.memory.available:
+            enabled: false
+          k8s.node.memory.rss:
+            enabled: false
+          k8s.node.memory.working_set:
+            enabled: false
+          k8s.node.cpu.time:
+            enabled: false
+          k8s.node.filesystem.available:
+            enabled: false
+          k8s.node.filesystem.capacity:
+            enabled: false
+
+          # Disabled: container and pod filesystem metrics trigger
+          # ArrowJsonEncodeError in OpenObserve 0.14.x.
+          container.filesystem.available:
+            enabled: false
+          container.filesystem.capacity:
+            enabled: false
+          container.filesystem.usage:
+            enabled: false
+          k8s.pod.filesystem.available:
+            enabled: false
+          k8s.pod.filesystem.capacity:
+            enabled: false
+          k8s.pod.filesystem.usage:
+            enabled: false
+
+          # Disabled: container memory details not required for SRE.
+          container.memory.available:
+            enabled: false
+          container.memory.major_page_faults:
+            enabled: false
+          container.memory.page_faults:
+            enabled: false
+          container.memory.rss:
+            enabled: false
+          container.memory.working_set:
+            enabled: false
+          container.cpu.time:
+            enabled: false
+
+          # Disabled: pod network and cpu details not required for SRE.
+          k8s.pod.network.errors:
+            enabled: false
+          k8s.pod.network.io:
+            enabled: false
+          k8s.pod.cpu.time:
+            enabled: false
+
+    processors:
+      # MUST be first. limit_mib is 80% of the 256Mi container limit.
+      # spike_limit_mib is 25% of limit_mib.
+      memory_limiter:
+        check_interval: 2s
+        limit_mib: 204
+        spike_limit_mib: 51
+
+      # Drops metric families that OpenObserve cannot serialize to Parquet.
+      # The filter matches on the normalized underscore metric name and
+      # supports match_type: regexp per the current filter processor schema.
+      filter/drop_openobserve_incompatible:
+        error_mode: ignore
+        metrics:
+          exclude:
+            match_type: regexp
+            metric_names:
+              - "^k8s\\.node\\.memory\\.(major_)?page_faults$"
+              - "^k8s\\.node\\.paging\\.faults$"
+              - "^container\\.filesystem\\.(available|capacity|usage)$"
+              - "^k8s\\.pod\\.filesystem\\.(available|capacity|usage)$"
+
+      # Adds cluster identity to every metric for cross-cluster queries.
+      resource/add_cluster:
+        attributes:
+          - key: cluster.name
+            value: "{{ .Values.cluster.name }}"
+            action: upsert
+          - key: deployment.environment
+            value: "production"
+            action: upsert
+
+      batch:
+        send_batch_size: 512
+        send_batch_max_size: 1024
+        timeout: 5s
+
+    exporters:
+      # The component otlp_http exporter appends /v1/metrics to the base URL.
+      # The base URL is correct here without a signal path.
+      otlp_http/openobserve:
+        endpoint: "{{ .Values.openobserve.endpoint }}"
+        headers:
+          Authorization: "Basic ${env:OPENOBSERVE_TOKEN}"
+        compression: gzip
+        timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 2
+          queue_size: 1024
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    service:
+      extensions: [health_check]
+      telemetry:
+        logs:
+          level: info
+
+      pipelines:
+        metrics:
+          receivers: [kubelet_stats]
+          processors:
+            - memory_limiter
+            - filter/drop_openobserve_incompatible
+            - resource/add_cluster
+            - batch
+          exporters: [otlp_http/openobserve]
