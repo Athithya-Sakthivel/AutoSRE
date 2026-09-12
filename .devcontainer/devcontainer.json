@@ -1,9 +1,10 @@
 {
   "name": "AutoSRE",
-  "image": "ghcr.io/athithya-sakthivel/autosre-devcontainer:2026.09.11@sha256:76987043539ed3d809b96d719bf86a3548e0ba82ddd5330bd391e5d919fa24cb",
+  "image": "ghcr.io/athithya-sakthivel/autosre-devcontainer:2026.09.12@sha256:210b6f102ee90b2e220910ae58508c392d35689417d3f4808a94788f07aa4402",
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
   "remoteUser": "root",
+  "postCreateCommand": "bash /usr/local/share/devcontainer-bootstrap.sh --post-create",
   "forwardPorts": [
     3000, 3001, 8000, 8001, 8080, 50051,
     8005, 7000, 7001, 7002, 7003, 6379,
