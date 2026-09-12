@@ -1,25 +1,27 @@
 # syntax=docker/dockerfile:1.7
 
-FROM docker.io/library/ubuntu:26.04@sha256:513c074113a871b51a8d16ab445c88779d6452d937a164fb5cc479f32668a41d
+FROM mcr.microsoft.com/devcontainers/java:3.0.0-25-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     DOCKER_BUILDKIT=1 \
     BUILDKIT_PROGRESS=plain \
-    PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIPX_HOME=/opt/pipx \
-    PIPX_BIN_DIR=/usr/local/bin \
-    NVM_DIR=/root/.nvm
+    MAVEN_HOME=/opt/maven \
+    PYTHON314_HOME=/opt/python/3.14.6 \
+    GO127_HOME=/opt/go/1.27.1 \
+    JAVA_HOME=/usr/lib/jvm/msopenjdk-current \
+    NVM_DIR=/usr/local/share/nvm \
+    NVM_SYMLINK_CURRENT=true
 
-# Python 3.14 comes from Ubuntu 26.04 apt — no pyenv, no source builds.
-ENV PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.nvm/versions/node/v24.20.0/bin"
+# IMPORTANT:
+# Extend the PATH inherited from the Java base image.
+# Do NOT replace it.
+ENV PATH="/usr/local/share/nvm/current/bin:${MAVEN_HOME}/bin:${PATH}"
 
-COPY bootstrap.sh /tmp/bootstrap.sh
-RUN chmod +x /tmp/bootstrap.sh \
- && bash /tmp/bootstrap.sh \
- && rm -f /tmp/bootstrap.sh
+COPY bootstrap.sh /usr/local/share/devcontainer-bootstrap.sh
+
+RUN chmod 0755 /usr/local/share/devcontainer-bootstrap.sh \
+    && /usr/local/share/devcontainer-bootstrap.sh --build
 
 WORKDIR /workspace

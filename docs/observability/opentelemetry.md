@@ -14,7 +14,7 @@ resource, giving you a single pane of glass for the entire incident pipeline.
 
 ### target-system
 
-Every HTTP request creates **one span** – e.g. `api.process` or `api.query`.  
+Every HTTP request creates **one span** – e.g. `api.process` or `api.query`.
 Log messages (`target-system started`, `Chaos: simulated OOM`) are exported as
 trace events.
 
@@ -77,11 +77,11 @@ etc.), so you can control them consistently.
 
 ### The three sampling modes
 
-| Mode    | What it does | When to use |
-|---------|--------------|-------------|
-| `off`   | 100% of traces are kept | Demos, AI‑agent evaluation, debugging |
-| `rate`  | At most `N` traces per second are kept (rest are dropped) | Production, load testing, cost control |
-| `ratio` | A fixed percentage of traces are kept (e.g. 10%) | Environments with unpredictable traffic |
+| Mode    | What it does                                              | When to use                             |
+| ------- | --------------------------------------------------------- | --------------------------------------- |
+| `off`   | 100% of traces are kept                                   | Demos, AI‑agent evaluation, debugging   |
+| `rate`  | At most `N` traces per second are kept (rest are dropped) | Production, load testing, cost control  |
+| `ratio` | A fixed percentage of traces are kept (e.g. 10%)          | Environments with unpredictable traffic |
 
 Set the mode with the environment variable `OTEL_SAMPLING_MODE`:
 
@@ -103,7 +103,7 @@ or
 export OTEL_SAMPLING_MODE=off
 ```
 
-### Important: sampling is *client‑side*
+### Important: sampling is _client‑side_
 
 The decision to drop a span happens **inside your process**, before it is sent
 over the network. This means you never pay for telemetry that was thrown away,
@@ -155,7 +155,7 @@ There is no measurable latency added by telemetry in normal operation.
 ### a) Fail‑fast on missing connection string
 
 If the environment is **not** `development` and no Application Insights
-connection string is found, both services **refuse to start**.  
+connection string is found, both services **refuse to start**.
 This prevents the dreaded “I thought telemetry was on but it was only printing
 to the console” situation.
 
@@ -220,6 +220,7 @@ union AppTraces, AppRequests
 3. Query the `AppTraces` table via the portal’s Logs blade or the CLI:
 
 **KQL for all recent traces:**
+
 ```kql
 AppTraces
 | where TimeGenerated > ago(1h)
@@ -230,6 +231,7 @@ AppTraces
 ```
 
 **REST API (from CLI):**
+
 ```bash
 TOKEN=$(az account get-access-token \
   --resource https://api.loganalytics.io \
@@ -258,14 +260,14 @@ the MCP server.
 ## 8. When things go wrong
 
 - **No data in Log Analytics?** Wait longer (first ingestion can take up to
-  15 min).  
+  15 min).
 - **`PathNotFoundError` for a table?** The table might not exist yet – the
-  first trace creates it.  
+  first trace creates it.
 - **Service started but telemetry is disabled?** Check that
   `APPLICATIONINSIGHTS_CONNECTION_STRING` is set correctly and that the
-  environment is not `development`.  
+  environment is not `development`.
 - **Console exporter being used?** That’s normal in development. In staging/prod
-  the services will refuse to start if Azure isn’t reachable.  
+  the services will refuse to start if Azure isn’t reachable.
 - **Only one service appears?** Verify both are using the same workspace ID and
   connection string. The battle‑test scripts automatically set them.
 
@@ -273,5 +275,5 @@ the MCP server.
 
 ## 9. Where to go next
 
-- **Azure Monitor documentation:** [Configure OpenTelemetry](https://learn.microsoft.com/en-us/azure/azure-monitor/app/opentelemetry-configuration)  
-- **OpenTelemetry specification:** [opentelemetry.io](https://opentelemetry.io/)  
+- **Azure Monitor documentation:** [Configure OpenTelemetry](https://learn.microsoft.com/en-us/azure/azure-monitor/app/opentelemetry-configuration)
+- **OpenTelemetry specification:** [opentelemetry.io](https://opentelemetry.io/)
