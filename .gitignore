@@ -62,3 +62,6 @@ playwright-report
 test-results
 
 .secrets.openobserve
+
+core.25465
+.sp-state

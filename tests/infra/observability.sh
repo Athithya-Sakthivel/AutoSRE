@@ -16,6 +16,10 @@
 #   --dry-run   Print the manifests that would be applied; do not deploy.
 #   --keep      Do not delete the test pods on exit (for debugging).
 # ==============================================================================
+# kubectl -n openobserve port-forward svc/openobserve 5080:5080
+## Fetch Username (email) and password
+# kubectl -n openobserve get secret openobserve-auth -o jsonpath='{.data.ZO_ROOT_USER_EMAIL}' | base64 -d; echo
+# kubectl -n openobserve get secret openobserve-auth -o jsonpath='{.data.ZO_ROOT_USER_PASSWORD}' | base64 -d; echo
 
 set -Eeuo pipefail
 IFS=$'\n\t'
