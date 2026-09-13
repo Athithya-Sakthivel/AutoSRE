@@ -1,0 +1,339 @@
+# ==============================================================================
+# External Secrets configuration
+#
+# This chart DOES NOT install:
+#   - External Secrets Operator
+#   - ESO CRDs
+#   - Azure identities
+#   - Azure federated identity credentials
+#   - Azure Service Principals
+#
+# Those are infrastructure/bootstrap concerns.
+#
+# Supported authentication modes:
+#
+#   ServicePrincipal
+#     Intended for local/staging kind clusters.
+#     Credentials are supplied through an EXISTING Kubernetes Secret.
+#
+#   WorkloadIdentity
+#     Intended for AKS production.
+#     Authentication uses an AKS Workload Identity ServiceAccount.
+#
+# ==============================================================================
+
+enabled: false
+
+# Namespace used for:
+#   - ClusterSecretStore references
+#   - Workload Identity ServiceAccount
+#
+# ExternalSecret resources continue to be created in their individual
+# targetNamespace values.
+namespace: external-secrets
+
+nameOverride: ""
+
+# ------------------------------------------------------------------------------
+# Secret store
+# ------------------------------------------------------------------------------
+
+store:
+  name: azure-keyvault
+
+  # Keep true because the same Azure Key Vault store is consumed by resources
+  # across multiple namespaces.
+  clusterScope: true
+
+# ------------------------------------------------------------------------------
+# Azure Key Vault
+# ------------------------------------------------------------------------------
+
+keyVault:
+  url: ""
+  tenantId: ""
+
+# ------------------------------------------------------------------------------
+# Authentication
+# ------------------------------------------------------------------------------
+
+auth:
+
+  # Valid values:
+  #
+  #   ServicePrincipal
+  #   WorkloadIdentity
+  #
+  mode: WorkloadIdentity
+
+  # --------------------------------------------------------------------------
+  # Service Principal authentication
+  #
+  # Used by kind/staging.
+  #
+  # The Kubernetes Secret MUST already exist.
+  #
+  # Expected keys:
+  #
+  #   clientId
+  #   clientSecret
+  #
+  # Do not put the actual credentials in this values.yaml.
+  # --------------------------------------------------------------------------
+
+  servicePrincipal:
+    existingSecret:
+      name: azure-sp-creds
+
+      # Namespace containing the credentials Secret.
+      #
+      # Required for ClusterSecretStore.
+      namespace: external-secrets
+
+      clientIdKey: clientId
+      clientSecretKey: clientSecret
+
+  # --------------------------------------------------------------------------
+  # AKS Workload Identity authentication
+  #
+  # The ServiceAccount should normally be created/annotated here by this chart
+  # when createServiceAccount=true.
+  #
+  # The corresponding Azure Federated Identity Credential is created externally
+  # by the bootstrap/infrastructure layer.
+  # --------------------------------------------------------------------------
+
+  workloadIdentity:
+    serviceAccountName: eso-azure-kv
+    serviceAccountNamespace: external-secrets
+
+    createServiceAccount: true
+
+    # Microsoft Entra tenant.
+    #
+    # Normally use keyVault.tenantId rather than duplicating this.
+    tenantId: ""
+
+    annotations:
+      azure.workload.identity/client-id: ""
+
+      # Optional. Azure Workload Identity can derive the tenant from the
+      # workload identity environment, but explicitly setting it makes the
+      # ServiceAccount self-contained and easier to inspect.
+      azure.workload.identity/tenant-id: ""
+
+# ------------------------------------------------------------------------------
+# ExternalSecrets
+# ------------------------------------------------------------------------------
+
+secrets:
+
+  # ----------------------------------------------------------------------------
+  # OpenObserve: backend credentials
+  # ----------------------------------------------------------------------------
+
+  - name: openobserve-auth
+    targetNamespace: openobserve
+    refreshInterval: 1h
+    data:
+      - secretKey: ZO_ROOT_USER_EMAIL
+        remoteRef: OpenObserveRootEmail
+
+      - secretKey: ZO_ROOT_USER_PASSWORD
+        remoteRef: OpenObserveRootPassword
+
+      - secretKey: OPENOBSERVE_AUTH
+        remoteRef: OpenObserveBasicAuth
+
+  # ----------------------------------------------------------------------------
+  # OpenObserve: Azure Blob storage
+  # ----------------------------------------------------------------------------
+
+  - name: openobserve-storage
+    targetNamespace: openobserve
+    refreshInterval: 1h
+    data:
+      - secretKey: account-name
+        remoteRef: OpenObserveStorageAccountName
+
+      - secretKey: account-key
+        remoteRef: OpenObserveStorageAccountKey
+
+  # ----------------------------------------------------------------------------
+  # OTLP gateway token
+  # ----------------------------------------------------------------------------
+
+  - name: otel-gateway-token
+    targetNamespace: openobserve
+    refreshInterval: 1h
+    data:
+      - secretKey: token
+        remoteRef: OtelGatewayToken
+
+      - secretKey: otel-exporter-headers
+        remoteRef: OtelGatewayExporterHeaders
+
+  - name: otel-gateway-token
+    targetNamespace: apps
+    refreshInterval: 1h
+    data:
+      - secretKey: otel-exporter-headers
+        remoteRef: OtelGatewayExporterHeaders
+
+  - name: otel-gateway-token
+    targetNamespace: sre
+    refreshInterval: 1h
+    data:
+      - secretKey: otel-exporter-headers
+        remoteRef: OtelGatewayExporterHeaders
+
+  # ----------------------------------------------------------------------------
+  # GHCR pull secret
+  # ----------------------------------------------------------------------------
+
+  - name: ghcr-pull-secret
+    targetNamespace: openobserve
+    refreshInterval: 24h
+    type: kubernetes.io/dockerconfigjson
+    data:
+      - secretKey: .dockerconfigjson
+        remoteRef: GhcrDockerConfig
+
+  - name: ghcr-pull-secret
+    targetNamespace: apps
+    refreshInterval: 24h
+    type: kubernetes.io/dockerconfigjson
+    data:
+      - secretKey: .dockerconfigjson
+        remoteRef: GhcrDockerConfig
+
+  - name: ghcr-pull-secret
+    targetNamespace: sre
+    refreshInterval: 24h
+    type: kubernetes.io/dockerconfigjson
+    data:
+      - secretKey: .dockerconfigjson
+        remoteRef: GhcrDockerConfig
+
+  # ----------------------------------------------------------------------------
+  # PostgreSQL
+  # ----------------------------------------------------------------------------
+
+  - name: postgres-app
+    targetNamespace: apps
+    refreshInterval: 1h
+    data:
+      - secretKey: username
+        remoteRef: PostgresAppUsername
+
+      - secretKey: password
+        remoteRef: PostgresAppPassword
+
+      - secretKey: host
+        remoteRef: PostgresAppHost
+
+      - secretKey: port
+        remoteRef: PostgresAppPort
+
+      - secretKey: dbname
+        remoteRef: PostgresAppDbName
+
+      - secretKey: uri
+        remoteRef: PostgresAppUri
+
+      - secretKey: jdbc-uri
+        remoteRef: PostgresAppJdbcUri
+
+      - secretKey: pgpass
+        remoteRef: PostgresAppPgpass
+
+  - name: postgres-app
+    targetNamespace: sre
+    refreshInterval: 1h
+    data:
+      - secretKey: uri
+        remoteRef: PostgresAppUri
+
+  # ----------------------------------------------------------------------------
+  # Valkey
+  # ----------------------------------------------------------------------------
+
+  - name: valkey-auth
+    targetNamespace: data
+    refreshInterval: 1h
+    data:
+      - secretKey: password
+        remoteRef: ValkeyPassword
+
+  - name: valkey-auth
+    targetNamespace: apps
+    refreshInterval: 1h
+    data:
+      - secretKey: password
+        remoteRef: ValkeyPassword
+
+  # ----------------------------------------------------------------------------
+  # OpenObserve reader
+  # ----------------------------------------------------------------------------
+
+  - name: openobserve-reader
+    targetNamespace: sre
+    refreshInterval: 1h
+    data:
+      - secretKey: email
+        remoteRef: OpenObserveReaderEmail
+
+      - secretKey: password
+        remoteRef: OpenObserveReaderPassword
+
+  - name: openobserve-reader
+    targetNamespace: eval
+    refreshInterval: 1h
+    data:
+      - secretKey: email
+        remoteRef: OpenObserveReaderEmail
+
+      - secretKey: password
+        remoteRef: OpenObserveReaderPassword
+
+  # ----------------------------------------------------------------------------
+  # Agent LLM credentials
+  # ----------------------------------------------------------------------------
+
+  - name: llm-credentials
+    targetNamespace: sre
+    refreshInterval: 1h
+    data:
+      - secretKey: AZURE_AI_PROJECT_ENDPOINT
+        remoteRef: AzureAiProjectEndpoint
+
+      - secretKey: AZURE_CLIENT_ID
+        remoteRef: AzureAiClientId
+
+  # ----------------------------------------------------------------------------
+  # Ground truth DB
+  # ----------------------------------------------------------------------------
+
+  - name: ground-truth-db
+    targetNamespace: eval
+    refreshInterval: 1h
+    data:
+      - secretKey: username
+        remoteRef: GroundTruthDbUsername
+
+      - secretKey: password
+        remoteRef: GroundTruthDbPassword
+
+      - secretKey: uri
+        remoteRef: GroundTruthDbUri
+
+  # ----------------------------------------------------------------------------
+  # SRE agent API
+  # ----------------------------------------------------------------------------
+
+  - name: sre-agent-api
+    targetNamespace: eval
+    refreshInterval: 1h
+    data:
+      - secretKey: url
+        remoteRef: SreAgentApiUrl
