@@ -1,7 +1,7 @@
 apiVersion: v2
 name: open-observe-minimal
-description: Single-node OpenObserve for AutoSRE observability
+description: Hardened single-node OpenObserve with SQLite metadata and Azure Blob stream storage
 type: application
-version: 0.1.2
-appVersion: "v0.92.2"
-kubeVersion: ">=1.28.0-0"
+version: 2.0.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.29.0-0"

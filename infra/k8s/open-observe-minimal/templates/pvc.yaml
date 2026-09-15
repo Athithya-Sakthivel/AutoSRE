@@ -1,4 +1,3 @@
-{{- if .Values.persistence.enabled }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -6,17 +5,16 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "open-observe-minimal.labels" . | nindent 4 }}
-  {{- with .Values.persistence.annotations }}
   annotations:
+    openobserve.autosre.io/storage-contract: retain
+    {{- with .Values.persistence.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
 spec:
   accessModes:
     - {{ .Values.persistence.accessMode }}
+  volumeMode: Filesystem
+  storageClassName: {{ .Values.persistence.storageClass | quote }}
   resources:
     requests:
       storage: {{ .Values.persistence.size }}
-  {{- if .Values.persistence.storageClass }}
-  storageClassName: {{ .Values.persistence.storageClass }}
-  {{- end }}
-{{- end }}
