@@ -1,13 +1,15 @@
-{{- /* Guard: fail fast if required secret names are missing.
-       An empty secretKeyRef.name produces an opaque RFC 1123 error at apply
-       time. This check makes the failure explicit at render time. */}}
+{{- if ne (int .Values.replicaCount) 1 }}
+{{- fail "single-node OpenObserve requires replicaCount=1" }}
+{{- end }}
 {{- if not .Values.secrets.auth }}
-{{- fail "values.secrets.auth must be set (the Kubernetes Secret holding ZO_ROOT_USER_EMAIL and ZO_ROOT_USER_PASSWORD)" }}
+{{- fail "secrets.auth is required" }}
 {{- end }}
 {{- if not .Values.secrets.storage }}
-{{- fail "values.secrets.storage must be set (the Kubernetes Secret holding account-name and account-key)" }}
+{{- fail "secrets.storage is required" }}
 {{- end }}
-
+{{- if not .Values.persistence.storageClass }}
+{{- fail "persistence.storageClass is required" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,7 +18,10 @@ metadata:
   labels:
     {{- include "open-observe-minimal.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.replicaCount }}
+  replicas: 1
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 900
+  minReadySeconds: 5
   strategy:
     type: Recreate
   selector:
@@ -25,14 +30,9 @@ spec:
   template:
     metadata:
       annotations:
-        {{- with .Values.podAnnotations }}
+        openobserve.autosre.io/secret-revision: {{ .Values.podAnnotations.secretRevision | default "initial" | quote }}
+        {{- with .Values.podAnnotations.additional }}
         {{- toYaml . | nindent 8 }}
-        {{- end }}
-        {{- if .Values.secrets.auth }}
-        checksum/auth-secret: {{ printf "%s-%s" .Values.secrets.auth .Release.Revision | sha256sum }}
-        {{- end }}
-        {{- if .Values.secrets.storage }}
-        checksum/storage-secret: {{ printf "%s-%s" .Values.secrets.storage .Release.Revision | sha256sum }}
         {{- end }}
       labels:
         {{- include "open-observe-minimal.selectorLabels" . | nindent 8 }}
@@ -43,19 +43,12 @@ spec:
       serviceAccountName: {{ include "open-observe-minimal.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
-      {{- if .Values.priorityClassName }}
-      priorityClassName: {{ .Values.priorityClassName }}
-      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      {{- with .Values.extraInitContainers }}
-      initContainers:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
       containers:
         - name: openobserve
           image: {{ include "open-observe-minimal.image" . }}
@@ -67,9 +60,9 @@ spec:
               containerPort: 5080
               protocol: TCP
           env:
-            {{- range $key, $value := .Values.config }}
-            - name: {{ $key }}
-              value: {{ $value | quote }}
+            {{- range $k, $v := .Values.config }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
             {{- end }}
             - name: ZO_ROOT_USER_EMAIL
               valueFrom:
@@ -100,9 +93,7 @@ spec:
           {{- end }}
           {{- if .Values.probes.startup.enabled }}
           startupProbe:
-            httpGet:
-              path: /healthz
-              port: http
+            httpGet: { path: /healthz, port: http }
             initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.startup.periodSeconds }}
             timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
@@ -110,9 +101,7 @@ spec:
           {{- end }}
           {{- if .Values.probes.readiness.enabled }}
           readinessProbe:
-            httpGet:
-              path: /healthz
-              port: http
+            httpGet: { path: /healthz, port: http }
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
             timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
@@ -120,9 +109,7 @@ spec:
           {{- end }}
           {{- if .Values.probes.liveness.enabled }}
           livenessProbe:
-            httpGet:
-              path: /healthz
-              port: http
+            httpGet: { path: /healthz, port: http }
             initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
             timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
@@ -137,10 +124,8 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
-            {{- if .Values.persistence.enabled }}
             - name: data
               mountPath: /data
-            {{- end }}
             - name: tmp
               mountPath: /tmp
             - name: vartmp
@@ -148,15 +133,10 @@ spec:
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-        {{- with .Values.extraContainers }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
       volumes:
-        {{- if .Values.persistence.enabled }}
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "open-observe-minimal.fullname" . }}-data
-        {{- end }}
         - name: tmp
           emptyDir: {}
         - name: vartmp
