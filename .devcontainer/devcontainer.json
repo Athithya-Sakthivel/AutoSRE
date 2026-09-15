@@ -4,7 +4,7 @@
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
   "remoteUser": "root",
-  "postCreateCommand": "bash /usr/local/share/devcontainer-bootstrap.sh --post-create",
+  "postCreateCommand": "bash /usr/local/share/devcontainer-bootstrap.sh --post-create && pre-commit install --install-hooks --overwrite",
   "forwardPorts": [
     3000, 3001, 8000, 8001, 8080, 50051,
     8005, 7000, 7001, 7002, 7003, 6379,

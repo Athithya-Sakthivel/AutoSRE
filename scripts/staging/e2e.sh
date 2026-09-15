@@ -1,16 +1,19 @@
 export LLM_API_KEY=$LLM_API_KEY
 
 # Create the kind cluster (if not already running)
-bash scripts/local/kind_cluster.sh
+bash scripts/staging/kind_cluster.sh
 
 # Azure bootstrap
 bash infra/terraform/staging/run.sh --apply
+
+sleep 300
 
 export KEYVAULT_NAME="$(cd infra/terraform/staging && tofu output -raw key_vault_name)"
 
 az keyvault secret set --vault-name "$KEYVAULT_NAME" --name LlmApiKey --value $LLM_API_KEY
 
 bash scripts/common/eso-azure.sh
+
 
 # Verify
 kubectl get clustersecretstore azure-keyvault
