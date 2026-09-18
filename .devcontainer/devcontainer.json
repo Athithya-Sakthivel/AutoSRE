@@ -1,5 +1,5 @@
 {
-  "name": "AutoSRE",
+  "name": "AgentOps",
   "image": "ghcr.io/athithya-sakthivel/autosre-devcontainer:2026.09.12@sha256:210b6f102ee90b2e220910ae58508c392d35689417d3f4808a94788f07aa4402",
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",

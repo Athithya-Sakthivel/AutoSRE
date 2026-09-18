@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# otel-gateway-deploy.sh — Deploy the OTel Collector
+# otel-gateway-deploy.sh — Deploy the OTel Collector gateway (self-contained)
 #
 # Chart at infra/k8s/otel-gateway. Produces one Deployment, one Service,
 # one ConfigMap, one ServiceAccount, one ClusterRole, one ClusterRoleBinding.
 #
-# Authentication to OpenObserve uses the OPENOBSERVE_AUTH key in the
-# openobserve-auth secret. This key contains base64(email:password)
+# Auth to OpenObserve uses the OPENOBSERVE_AUTH key in the openobserve-auth
+# secret, which contains base64(email:password).
 #
 # Usage: otel-gateway-deploy.sh [--dry-run] [--help]
 # ==============================================================================
@@ -15,12 +15,77 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 0077
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=open-observe/_lib.sh
-source "${SCRIPT_DIR}/open-observe/_lib.sh"
+# ------------------------------------------------------------------------------
+# Defaults
+# ------------------------------------------------------------------------------
 
+O2_VERSION="1.0.0"
 O2_OTEL_CHART_PATH="${O2_OTEL_CHART_PATH:-infra/k8s/otel-gateway}"
 O2_OTEL_RELEASE="${O2_OTEL_RELEASE:-otel-gateway}"
+O2_NAMESPACE="${O2_NAMESPACE:-openobserve}"
+O2_AUTH_SECRET="${O2_AUTH_SECRET:-openobserve-auth}"
+O2_HELM_TIMEOUT="${O2_HELM_TIMEOUT:-600s}"
+O2_POD_READY_TIMEOUT="${O2_POD_READY_TIMEOUT:-300s}"
+KUBECTL="${KUBECTL:-kubectl}"
+HELM="${HELM:-helm}"
+
+DRY_RUN=false
+O2_RUN_ID="$(date -u +%Y%m%d-%H%M%S)"
+TMP_DIR=""
+
+# ------------------------------------------------------------------------------
+# Logging + runtime helpers (previously from _lib.sh)
+# ------------------------------------------------------------------------------
+
+log_info()  { printf '%s [INFO]  %s\n'  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+log_warn()  { printf '%s [WARN]  %s\n'  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+log_error() { printf '%s [ERROR] %s\n'  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+log_debug() { [[ "${O2_DEBUG:-false}" == "true" ]] && \
+              printf '%s [DEBUG] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2 || true; }
+die()       { log_error "$*"; exit 1; }
+
+cleanup_tmpdir() {
+  [[ -n "${TMP_DIR}" && -d "${TMP_DIR}" ]] && rm -rf -- "${TMP_DIR}" || true
+}
+trap cleanup_tmpdir EXIT
+trap 'exit 130' INT TERM
+
+init_runtime() {
+  TMP_DIR="$(mktemp -d -t otel-gateway.XXXXXX)"
+  chmod 0700 "${TMP_DIR}"
+}
+
+preflight() {
+  command -v "${KUBECTL}" >/dev/null 2>&1 || die "kubectl not found"
+  command -v "${HELM}"    >/dev/null 2>&1 || die "helm not found"
+  "${KUBECTL}" cluster-info >/dev/null 2>&1 || die "kubectl cannot reach the cluster"
+  [[ -d "${O2_OTEL_CHART_PATH}" ]] || die "Chart not found: ${O2_OTEL_CHART_PATH}"
+  [[ -f "${O2_OTEL_CHART_PATH}/Chart.yaml" ]] || die "Invalid chart: missing Chart.yaml"
+}
+
+o2_parse_common_flags() {
+  local arg
+  for arg in "$@"; do
+    case "${arg}" in
+      --dry-run)  DRY_RUN=true ;;
+      "")         ;;
+      *)          die "Unknown argument: ${arg}" ;;
+    esac
+  done
+}
+
+_o2_check_secret() {
+  local secret="$1" key="$2"
+  "${KUBECTL}" get secret "${secret}" -n "${O2_NAMESPACE}" >/dev/null 2>&1 || return 1
+  local v
+  v="$("${KUBECTL}" get secret "${secret}" -n "${O2_NAMESPACE}" \
+        -o jsonpath="{.data.${key}}" 2>/dev/null || true)"
+  [[ -n "${v}" ]]
+}
+
+# ------------------------------------------------------------------------------
+# Usage
+# ------------------------------------------------------------------------------
 
 usage() {
   cat <<EOF
@@ -51,6 +116,10 @@ Production example:
   O2_OTEL_REPLICAS=2 bash scripts/common/otel-gateway-deploy.sh
 EOF
 }
+
+# ------------------------------------------------------------------------------
+# Values rendering
+# ------------------------------------------------------------------------------
 
 render_values() {
   local out="$1"
@@ -86,7 +155,7 @@ service:
 openobserve:
   endpoint: "${O2_OPENOBSERVE_ENDPOINT:-http://openobserve.openobserve.svc.cluster.local:5080/api/default}"
   tokenSecret:
-    name: ${O2_AUTH_SECRET:-openobserve-auth}
+    name: ${O2_AUTH_SECRET}
     key: OPENOBSERVE_AUTH
 
 cluster:
@@ -173,35 +242,27 @@ EOF
   log_debug "Rendered values to ${out} (mode 0600)"
 }
 
+# ------------------------------------------------------------------------------
+# Deploy
+# ------------------------------------------------------------------------------
+
 action_deploy() {
   log_info "Deploy (release=${O2_OTEL_RELEASE}, namespace=${O2_NAMESPACE}, chart=${O2_OTEL_CHART_PATH})"
 
-  [[ -d "${O2_OTEL_CHART_PATH}" ]] || die "Chart not found: ${O2_OTEL_CHART_PATH}"
-  [[ -f "${O2_OTEL_CHART_PATH}/Chart.yaml" ]] || die "Invalid chart: missing Chart.yaml in ${O2_OTEL_CHART_PATH}"
-
   if ! "${KUBECTL}" get namespace "${O2_NAMESPACE}" >/dev/null 2>&1; then
     log_info "Creating namespace ${O2_NAMESPACE}"
-    k create namespace "${O2_NAMESPACE}"
+    "${KUBECTL}" create namespace "${O2_NAMESPACE}" >/dev/null
   fi
 
-  _o2_check_secret "${O2_AUTH_SECRET:-openobserve-auth}" "OPENOBSERVE_AUTH" \
-    || die "Secret '${O2_AUTH_SECRET:-openobserve-auth}' missing key 'OPENOBSERVE_AUTH'. \
-Re-run scripts/local/local_secrets.sh to regenerate it."
+  _o2_check_secret "${O2_AUTH_SECRET}" "OPENOBSERVE_AUTH" \
+    || die "Secret '${O2_AUTH_SECRET}' missing key 'OPENOBSERVE_AUTH'. \
+Run scripts/common/openobserve.sh deploy first, or re-run ESO sync."
 
   local values_file="${TMP_DIR}/values.yaml"
   render_values "${values_file}"
 
-  local helm_args=(
-    upgrade --install "${O2_OTEL_RELEASE}" "${O2_OTEL_CHART_PATH}"
-    --namespace "${O2_NAMESPACE}"
-    --create-namespace
-    --values "${values_file}"
-    --wait
-    --timeout "${O2_HELM_TIMEOUT}"
-  )
-
   if [[ "${DRY_RUN}" == "true" ]]; then
-    log_info "Would deploy release ${O2_OTEL_RELEASE} with replicas=${O2_OTEL_REPLICAS:-1}"
+    log_info "Would deploy release ${O2_OTEL_RELEASE} to namespace ${O2_NAMESPACE}"
     local template_args=(
       template "${O2_OTEL_RELEASE}" "${O2_OTEL_CHART_PATH}"
       --namespace "${O2_NAMESPACE}"
@@ -220,11 +281,16 @@ Re-run scripts/local/local_secrets.sh to regenerate it."
   fi
 
   log_info "Running helm upgrade --install"
-  "${HELM}" "${helm_args[@]}"
+  "${HELM}" upgrade --install "${O2_OTEL_RELEASE}" "${O2_OTEL_CHART_PATH}" \
+    --namespace "${O2_NAMESPACE}" \
+    --create-namespace \
+    --values "${values_file}" \
+    --wait \
+    --timeout "${O2_HELM_TIMEOUT}"
 
   log_info "Waiting for rollout"
   "${KUBECTL}" rollout status deployment/"${O2_OTEL_RELEASE}" \
-    -n "${O2_NAMESPACE}" --timeout="${O2_POD_READY_TIMEOUT}s"
+    -n "${O2_NAMESPACE}" --timeout="${O2_POD_READY_TIMEOUT}"
 
   local pod running_image
   pod="$("${KUBECTL}" get pods -n "${O2_NAMESPACE}" \
@@ -236,6 +302,10 @@ Re-run scripts/local/local_secrets.sh to regenerate it."
   log_info "Running image: ${running_image}"
   log_info "Deploy complete"
 }
+
+# ------------------------------------------------------------------------------
+# Main
+# ------------------------------------------------------------------------------
 
 main() {
   local filtered=()
