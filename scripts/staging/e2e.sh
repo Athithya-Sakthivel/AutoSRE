@@ -1,9 +1,9 @@
 export LLM_API_KEY=$LLM_API_KEY
 
-# Create the kind cluster (if not already running)
+
+
 bash scripts/staging/kind_cluster.sh
 
-# Azure bootstrap
 bash infra/terraform/staging/run.sh --apply
 
 sleep 300
@@ -14,6 +14,8 @@ az keyvault secret set --vault-name "$KEYVAULT_NAME" --name LlmApiKey --value $L
 
 bash scripts/common/eso-azure.sh
 
+bash scripts/staging/postgres-deploy.sh
+bash scripts/staging/valkey-deploy.sh
 
 # Verify
 kubectl get clustersecretstore azure-keyvault
@@ -25,7 +27,7 @@ kubectl get secret openobserve-auth -n openobserve -o jsonpath='{.data}' | jq 'k
 
 
 #  Deploy OpenObserve
-bash scripts/common/open-observe/deploy.sh
+bash scripts/common/openobserve.sh deploy
 
 # Deploy the OTel gateway (application traces, metrics, logs)
 bash scripts/common/otel-gateway-deploy.sh

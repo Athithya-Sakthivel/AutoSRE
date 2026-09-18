@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# otel-daemonset-deploy.sh — Deploy the OTel Collector DaemonSet
+# otel-daemonset-deploy.sh — Deploy the OTel Collector DaemonSet (self-contained)
 #
 # Chart at infra/k8s/otel-daemonset. Produces one DaemonSet, one ConfigMap,
 # one ServiceAccount, one ClusterRole, one ClusterRoleBinding.
-# No Service (DaemonSet pods are not load-balanced; they push to OpenObserve).
+# No Service (DaemonSet pods push to OpenObserve; they are not load-balanced).
 #
 # Usage: otel-daemonset-deploy.sh [--dry-run] [--help]
 # ==============================================================================
@@ -13,13 +13,77 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 0077
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=open-observe/_lib.sh
-source "${SCRIPT_DIR}/open-observe/_lib.sh"
+# ------------------------------------------------------------------------------
+# Defaults
+# ------------------------------------------------------------------------------
 
-# DaemonSet-specific defaults
+O2_VERSION="1.0.0"
 O2_DAEMONSET_CHART_PATH="${O2_DAEMONSET_CHART_PATH:-infra/k8s/otel-daemonset}"
 O2_DAEMONSET_RELEASE="${O2_DAEMONSET_RELEASE:-otel-daemonset}"
+O2_NAMESPACE="${O2_NAMESPACE:-openobserve}"
+O2_AUTH_SECRET="${O2_AUTH_SECRET:-openobserve-auth}"
+O2_HELM_TIMEOUT="${O2_HELM_TIMEOUT:-600s}"
+O2_POD_READY_TIMEOUT="${O2_POD_READY_TIMEOUT:-300s}"
+KUBECTL="${KUBECTL:-kubectl}"
+HELM="${HELM:-helm}"
+
+DRY_RUN=false
+O2_RUN_ID="$(date -u +%Y%m%d-%H%M%S)"
+TMP_DIR=""
+
+# ------------------------------------------------------------------------------
+# Logging + runtime helpers (previously from _lib.sh)
+# ------------------------------------------------------------------------------
+
+log_info()  { printf '%s [INFO]  %s\n'  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+log_warn()  { printf '%s [WARN]  %s\n'  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+log_error() { printf '%s [ERROR] %s\n'  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+log_debug() { [[ "${O2_DEBUG:-false}" == "true" ]] && \
+              printf '%s [DEBUG] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2 || true; }
+die()       { log_error "$*"; exit 1; }
+
+cleanup_tmpdir() {
+  [[ -n "${TMP_DIR}" && -d "${TMP_DIR}" ]] && rm -rf -- "${TMP_DIR}" || true
+}
+trap cleanup_tmpdir EXIT
+trap 'exit 130' INT TERM
+
+init_runtime() {
+  TMP_DIR="$(mktemp -d -t otel-daemonset.XXXXXX)"
+  chmod 0700 "${TMP_DIR}"
+}
+
+preflight() {
+  command -v "${KUBECTL}" >/dev/null 2>&1 || die "kubectl not found"
+  command -v "${HELM}"    >/dev/null 2>&1 || die "helm not found"
+  "${KUBECTL}" cluster-info >/dev/null 2>&1 || die "kubectl cannot reach the cluster"
+  [[ -d "${O2_DAEMONSET_CHART_PATH}" ]] || die "Chart not found: ${O2_DAEMONSET_CHART_PATH}"
+  [[ -f "${O2_DAEMONSET_CHART_PATH}/Chart.yaml" ]] || die "Invalid chart: missing Chart.yaml"
+}
+
+o2_parse_common_flags() {
+  local arg
+  for arg in "$@"; do
+    case "${arg}" in
+      --dry-run)  DRY_RUN=true ;;
+      "")         ;;
+      *)          die "Unknown argument: ${arg}" ;;
+    esac
+  done
+}
+
+_o2_check_secret() {
+  local secret="$1" key="$2"
+  "${KUBECTL}" get secret "${secret}" -n "${O2_NAMESPACE}" >/dev/null 2>&1 || return 1
+  local v
+  v="$("${KUBECTL}" get secret "${secret}" -n "${O2_NAMESPACE}" \
+        -o jsonpath="{.data.${key}}" 2>/dev/null || true)"
+  [[ -n "${v}" ]]
+}
+
+# ------------------------------------------------------------------------------
+# Usage
+# ------------------------------------------------------------------------------
 
 usage() {
   cat <<EOF
@@ -49,7 +113,7 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
-# Render complete values.yaml to ${TMP_DIR}
+# Values rendering
 # ------------------------------------------------------------------------------
 
 render_values() {
@@ -79,7 +143,7 @@ rbac:
 openobserve:
   endpoint: "${O2_OPENOBSERVE_ENDPOINT:-http://openobserve.openobserve.svc.cluster.local:5080/api/default}"
   tokenSecret:
-    name: ${O2_AUTH_SECRET:-openobserve-auth}
+    name: ${O2_AUTH_SECRET}
     key: OPENOBSERVE_AUTH
 
 cluster:
@@ -149,29 +213,17 @@ EOF
 action_deploy() {
   log_info "Deploy (release=${O2_DAEMONSET_RELEASE}, namespace=${O2_NAMESPACE}, chart=${O2_DAEMONSET_CHART_PATH})"
 
-  [[ -d "${O2_DAEMONSET_CHART_PATH}" ]] || die "Chart not found: ${O2_DAEMONSET_CHART_PATH}"
-  [[ -f "${O2_DAEMONSET_CHART_PATH}/Chart.yaml" ]] || die "Invalid chart: missing Chart.yaml in ${O2_DAEMONSET_CHART_PATH}"
-
   if ! "${KUBECTL}" get namespace "${O2_NAMESPACE}" >/dev/null 2>&1; then
     log_info "Creating namespace ${O2_NAMESPACE}"
-    k create namespace "${O2_NAMESPACE}"
+    "${KUBECTL}" create namespace "${O2_NAMESPACE}" >/dev/null
   fi
 
-  _o2_check_secret "${O2_AUTH_SECRET:-openobserve-auth}" "OPENOBSERVE_AUTH" \
-    || die "Secret '${O2_AUTH_SECRET:-openobserve-auth}' missing key 'OPENOBSERVE_AUTH'. \
-Re-run scripts/local/local_secrets.sh to regenerate it."
+  _o2_check_secret "${O2_AUTH_SECRET}" "OPENOBSERVE_AUTH" \
+    || die "Secret '${O2_AUTH_SECRET}' missing key 'OPENOBSERVE_AUTH'. \
+Run scripts/common/openobserve.sh deploy first, or re-run ESO sync."
 
   local values_file="${TMP_DIR}/values.yaml"
   render_values "${values_file}"
-
-  local helm_args=(
-    upgrade --install "${O2_DAEMONSET_RELEASE}" "${O2_DAEMONSET_CHART_PATH}"
-    --namespace "${O2_NAMESPACE}"
-    --create-namespace
-    --values "${values_file}"
-    --wait
-    --timeout "${O2_HELM_TIMEOUT}"
-  )
 
   if [[ "${DRY_RUN}" == "true" ]]; then
     log_info "Would deploy release ${O2_DAEMONSET_RELEASE} to namespace ${O2_NAMESPACE}"
@@ -193,13 +245,18 @@ Re-run scripts/local/local_secrets.sh to regenerate it."
   fi
 
   log_info "Running helm upgrade --install"
-  "${HELM}" "${helm_args[@]}"
+  "${HELM}" upgrade --install "${O2_DAEMONSET_RELEASE}" "${O2_DAEMONSET_CHART_PATH}" \
+    --namespace "${O2_NAMESPACE}" \
+    --create-namespace \
+    --values "${values_file}" \
+    --wait \
+    --timeout "${O2_HELM_TIMEOUT}"
 
   log_info "Waiting for DaemonSet rollout"
   "${KUBECTL}" rollout status daemonset/"${O2_DAEMONSET_RELEASE}-daemonset" \
-    -n "${O2_NAMESPACE}" --timeout="${O2_POD_READY_TIMEOUT}s" 2>/dev/null \
+    -n "${O2_NAMESPACE}" --timeout="${O2_POD_READY_TIMEOUT}" 2>/dev/null \
     || "${KUBECTL}" rollout status daemonset/"${O2_DAEMONSET_RELEASE}" \
-      -n "${O2_NAMESPACE}" --timeout="${O2_POD_READY_TIMEOUT}s"
+      -n "${O2_NAMESPACE}" --timeout="${O2_POD_READY_TIMEOUT}"
 
   local ds_name node_count ready_count running_image
   ds_name="$("${KUBECTL}" get daemonset -n "${O2_NAMESPACE}" \
@@ -210,7 +267,6 @@ Re-run scripts/local/local_secrets.sh to regenerate it."
     -o jsonpath='{.status.desiredNumberScheduled}')"
   ready_count="$("${KUBECTL}" get daemonset "${ds_name}" -n "${O2_NAMESPACE}" \
     -o jsonpath='{.status.numberReady}')"
-
   running_image="$("${KUBECTL}" get daemonset "${ds_name}" -n "${O2_NAMESPACE}" \
     -o jsonpath='{.spec.template.spec.containers[0].image}')"
 
@@ -221,7 +277,7 @@ Re-run scripts/local/local_secrets.sh to regenerate it."
 }
 
 # ------------------------------------------------------------------------------
-# Argument parsing and main
+# Main
 # ------------------------------------------------------------------------------
 
 main() {

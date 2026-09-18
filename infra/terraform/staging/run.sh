@@ -173,7 +173,9 @@ retry() {
 }
 
 gen_password() {
-  printf '%sAa1!' "$(openssl rand -hex 8)"
+  # Generates a strong password. Avoids URL-unsafe characters like @, /, :
+  # to prevent URI-encoding bugs when apps construct connection strings.
+  printf '%sAa1' "$(openssl rand -hex 8)"
 }
 
 gen_hex() {
@@ -255,25 +257,24 @@ ensure_storage() {
 
   read_storage_key
 
-local container
-for container in tofu-state openobserve autosre-backups autosre-telemetry; do
-  if az storage container show \
+  local container
+  for container in tofu-state openobserve autosre-backups autosre-telemetry; do
+    if az storage container show \
+        --name "$container" \
+        --account-name "$STORAGE_ACCOUNT_NAME" \
+        --account-key "$STORAGE_KEY" \
+        >/dev/null 2>&1; then
+      continue
+    fi
+
+    log "creating container: $container"
+    az storage container create \
       --name "$container" \
       --account-name "$STORAGE_ACCOUNT_NAME" \
       --account-key "$STORAGE_KEY" \
-      >/dev/null 2>&1; then
-    continue
-  fi
-
-  log "creating container: $container"
-  az storage container create \
-    --name "$container" \
-    --account-name "$STORAGE_ACCOUNT_NAME" \
-    --account-key "$STORAGE_KEY" \
-    --public-access off \
-    --output none
-done
-
+      --public-access off \
+      --output none
+  done
 }
 
 read_storage_key() {
@@ -286,11 +287,6 @@ read_storage_key() {
 
 # -----------------------------------------------------------------------------
 # Soft-deleted Key Vault purge
-#
-# Azure reserves a Key Vault name for the soft-delete retention period after
-# deletion. If a previous run left the name in that state, Terraform cannot
-# create the vault until it is purged. Purge is asynchronous; this function
-# waits up to 60 seconds for the name to become free.
 # -----------------------------------------------------------------------------
 
 purge_soft_deleted_kv() {
@@ -378,10 +374,6 @@ delete_sp() {
 
 # -----------------------------------------------------------------------------
 # Key Vault access policies
-#
-# Access policies are stored on the vault resource and take effect
-# immediately. az keyvault set-policy is additive and idempotent for the
-# same objectId, so both functions can be called on every run.
 # -----------------------------------------------------------------------------
 
 set_operator_policy() {
@@ -414,10 +406,6 @@ set_sp_policy() {
 
 # -----------------------------------------------------------------------------
 # Key Vault write readiness
-#
-# Probe name uses only letters, digits, and dashes. Key Vault rejects any
-# other character with BadParameter. First failure prints the raw error so
-# validation issues are never silent again.
 # -----------------------------------------------------------------------------
 
 wait_for_kv_write() {
@@ -543,9 +531,6 @@ remove_stale_state_addresses() {
 
 # -----------------------------------------------------------------------------
 # Key Vault secret name validation
-#
-# Key Vault accepts only letters, digits, and dashes in secret names.
-# This guard fails fast so naming bugs surface before reaching the API.
 # -----------------------------------------------------------------------------
 
 validate_kv_name() {
@@ -598,9 +583,13 @@ kv_force_set() {
 # -----------------------------------------------------------------------------
 # Key Vault population
 #
-# Key Vault name rules: letters, digits, dashes only.
-# Kubernetes Secret keys: no restrictions in this context; the ESO chart
-# maps the Key Vault name to the Kubernetes Secret key via remoteRef.
+# ARCHITECTURAL DECISION: We ONLY populate discrete variables.
+# We DO NOT generate derived URIs (e.g. postgresql://user:pass@host/db).
+#
+# STAGING DETERMINISM: Passwords here are HARDCODED for staging reproducibility.
+# They match the exact values used in scripts/staging/*-deploy.sh.
+# In true production, Terraform/OpenTofu generates random secrets during
+# resource provisioning (e.g., azurerm_postgresql_flexible_server), not here.
 # -----------------------------------------------------------------------------
 
 populate_kv() {
@@ -608,9 +597,9 @@ populate_kv() {
 
   # Observability
   kv_set_if_absent OpenObserveRootEmail      "admin@autosre.local"
-  kv_set_if_absent OpenObserveRootPassword   "$(gen_password)"
+  kv_set_if_absent OpenObserveRootPassword   "StagingO2RootPass123"
   kv_set_if_absent OpenObserveReaderEmail    "reader@autosre.local"
-  kv_set_if_absent OpenObserveReaderPassword "$(gen_password)"
+  kv_set_if_absent OpenObserveReaderPassword "StagingO2ReadPass123"
 
   kv_force_set OpenObserveStorageAccountName "$STORAGE_ACCOUNT_NAME"
   kv_force_set OpenObserveStorageAccountKey  "$STORAGE_KEY"
@@ -618,24 +607,31 @@ populate_kv() {
   # OTel
   kv_set_if_absent OtelGatewayToken "$(gen_hex 32)"
 
-  # Valkey
-  kv_set_if_absent ValkeyPassword "$(gen_password)"
+  # --- RIVULET DATA STORES (Deterministic Staging Values) ---
 
-  # Postgres
-  kv_set_if_absent PostgresAppUsername "appuser"
-  kv_set_if_absent PostgresAppPassword "$(gen_password)"
-  kv_set_if_absent PostgresAppHost     "postgres-rw.data.svc.cluster.local"
-  kv_set_if_absent PostgresAppPort     "5432"
-  kv_set_if_absent PostgresAppDbName   "autosre"
+  # Postgres (Matches scripts/staging/postgres-deploy.sh)
+  kv_set_if_absent pg-rivulet-host "rivulet-pg.postgres.database.azure.com"
+  kv_set_if_absent pg-rivulet-port "5432"
+  kv_set_if_absent pg-rivulet-db   "app"
+  kv_set_if_absent pg-rivulet-user "app"
+  kv_set_if_absent pg-rivulet-pass "StagingPostgresP123" # Hardcoded staging parity
 
-  # Ground truth
-  kv_set_if_absent GroundTruthDbUsername "eval"
-  kv_set_if_absent GroundTruthDbPassword "$(gen_password)"
+  # Valkey (Matches scripts/staging/valkey-deploy.sh)
+  kv_set_if_absent valkey-rivulet-host "rivulet-valkey.redis.cache.windows.net"
+  kv_set_if_absent valkey-rivulet-port "6380"
+  kv_set_if_absent valkey-rivulet-pass "StagingValkeyP123" # Hardcoded staging parity
+  kv_set_if_absent valkey-rivulet-tls  "true"
 
-  # Static
+  # Ground truth (Eval DB - isolated namespace)
+  kv_set_if_absent gt-eval-host "ground-truth-db.eval.svc.cluster.local"
+  kv_set_if_absent gt-eval-port "5432"
+  kv_set_if_absent gt-eval-db   "groundtruth"
+  kv_set_if_absent gt-eval-user "eval"
+  kv_set_if_absent gt-eval-pass "StagingEvalDbP123" # Hardcoded staging parity
+
+  # Static / LLM
   kv_force_set SreAgentApiUrl "http://sre-agent.sre.svc.cluster.local:8000"
 
-  # LLM
   if [[ -n "$LLM_API_KEY" ]]; then
     kv_force_set LlmApiKey "$LLM_API_KEY"
     log "LLM credential written to Key Vault"
@@ -653,7 +649,7 @@ populate_kv() {
   kv_force_set LlmModelSynthesizer "$LLM_MODEL_SYNTHESIZER"
   kv_force_set LlmModelSelfCheck   "$LLM_MODEL_SELF_CHECK"
 
-  # Derived: OpenObserve Basic Auth
+  # Derived: OpenObserve Basic Auth (Required for OTel HTTP headers)
   local email password basic
   email="$(kv_get OpenObserveRootEmail)"
   password="$(kv_get OpenObserveRootPassword)"
@@ -666,29 +662,7 @@ populate_kv() {
   headers="Authorization=Bearer ${token}"
   kv_force_set OtelGatewayExporterHeaders "$headers"
 
-  # Derived: Postgres URIs
-  local pg_user pg_pass pg_host pg_port pg_db
-  pg_user="$(kv_get PostgresAppUsername)"
-  pg_pass="$(kv_get PostgresAppPassword)"
-  pg_host="$(kv_get PostgresAppHost)"
-  pg_port="$(kv_get PostgresAppPort)"
-  pg_db="$(kv_get PostgresAppDbName)"
-
-  kv_force_set PostgresAppUri \
-    "postgresql://${pg_user}:${pg_pass}@${pg_host}:${pg_port}/${pg_db}?sslmode=prefer"
-  kv_force_set PostgresAppJdbcUri \
-    "jdbc:postgresql://${pg_host}:${pg_port}/${pg_db}?sslmode=prefer"
-  kv_force_set PostgresAppPgpass \
-    "${pg_host}:${pg_port}:${pg_db}:${pg_user}:${pg_pass}"
-
-  # Derived: Ground truth URI
-  local gt_user gt_pass
-  gt_user="$(kv_get GroundTruthDbUsername)"
-  gt_pass="$(kv_get GroundTruthDbPassword)"
-  kv_force_set GroundTruthDbUri \
-    "postgresql://${gt_user}:${gt_pass}@ground-truth-db.eval.svc.cluster.local:5432/groundtruth?sslmode=disable"
-
-  log "Key Vault populated"
+  log "Key Vault populated with deterministic staging contract secrets."
 }
 
 # -----------------------------------------------------------------------------
