@@ -1,0 +1,62 @@
+# =============================================================================
+# application-test.yml — Test profile for Testcontainers-based integration tests
+# =============================================================================
+spring:
+  application:
+    name: api-gateway-test
+
+  datasource:
+    # Overridden by @ServiceConnection PostgresContainer
+    url: jdbc:postgresql://localhost:5432/test
+    username: test
+    password: test
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    clean-disabled: false
+
+  data:
+    redis:
+      # Overridden by @ServiceConnection Valkey container
+      host: localhost
+      port: 6379
+
+  lifecycle:
+    timeout-per-shutdown-phase: 5s
+
+server:
+  port: 0  # Random port for tests
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always
+
+  opentelemetry:
+    enabled: false  # Disable OTel export in tests
+
+  tracing:
+    sampling:
+      probability: 1.0
+
+rivulet:
+  stream:
+    name: test.rivulet.orders.in
+  chaos:
+    port: 0  # Random port for tests
+  idempotency:
+    ttl: 1h
+
+logging:
+  level:
+    com.rivulet.gateway: DEBUG
+    org.testcontainers: INFO

@@ -1,0 +1,114 @@
+# =============================================================================
+# application.yml — Base configuration for Rivulet API Gateway
+# =============================================================================
+# All values use environment variable defaults for Zero-Code-Change parity
+# with the Go ingestion worker. Moving from staging (Kind) to production (AKS)
+# requires only secret/config updates, never code changes.
+#
+# Sync Contract:
+#   - PG* and VALKEY_* env vars match the Go worker exactly
+#   - OTEL_* env vars match the Go worker exactly
+#   - Stream name 'rivulet.orders.in' matches Go consumer
+#   - Chaos port 8081 matches Go chaos server (never exposed via K8s Service)
+# =============================================================================
+
+spring:
+  application:
+    name: api-gateway
+
+  # PostgreSQL (matches Go worker's PG* env vars exactly)
+  datasource:
+    url: jdbc:postgresql://${PGHOST:localhost}:${PGPORT:5432}/${PGDATABASE:app}
+    username: ${PGUSER:app}
+    password: ${PGPASSWORD:password}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 2
+      max-lifetime: 1800000   # 30 minutes
+      idle-timeout: 300000    # 5 minutes
+      connection-timeout: 30000
+      validation-timeout: 5000
+
+  # Flyway: This service OWNS all PostgreSQL migrations
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    validate-on-migrate: true
+
+  # Valkey/Redis (matches Go worker's VALKEY_* env vars exactly)
+  data:
+    redis:
+      host: ${VALKEY_HOST:localhost}
+      port: ${VALKEY_PORT:6379}
+      password: ${VALKEY_PASSWORD:}
+      ssl:
+        enabled: ${VALKEY_TLS_ENABLED:false}
+      lettuce:
+        pool:
+          enabled: true
+          max-active: 20
+          max-idle: 10
+          min-idle: 2
+          max-wait: 2000
+
+  # Graceful shutdown: allow in-flight requests to drain on SIGTERM
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+# HTTP Server
+server:
+  port: ${HTTP_PORT:8080}
+  shutdown: graceful
+
+# Actuator: health, info, and Prometheus metrics
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
+
+  # OpenTelemetry (matches Go worker's OTEL_* env vars exactly)
+  opentelemetry:
+    enabled: true
+    map-environment-variables: true
+    resource-attributes:
+      service.namespace: rivulet
+      service.name: ${OTEL_SERVICE_NAME:api-gateway}
+      deployment.environment.name: ${DEPLOYMENT_ENVIRONMENT:evaluation}
+      service.version: ${GIT_VERSION:unknown}
+    tracing:
+      sampler: ${OTEL_TRACES_SAMPLER:parentbased_always_on}
+      export:
+        otlp:
+          endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:http://localhost:4318/v1/traces}
+          transport: http
+    metrics:
+      export:
+        otlp:
+          enabled: true
+          url: ${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:http://localhost:4318/v1/metrics}
+          step: 10s
+
+  # Distributed tracing configuration
+  tracing:
+    propagation:
+      type: W3C
+    sampling:
+      probability: 1.0
+
+# Rivulet-specific configuration
+rivulet:
+  stream:
+    # Must match Go worker's consumer stream name exactly
+    name: ${STREAM_NAME:rivulet.orders.in}
+  chaos:
+    # Hidden port: NEVER exposed via Kubernetes Service or Ingress
+    port: ${CHAOS_PORT:8081}
+  idempotency:
+    ttl: 24h

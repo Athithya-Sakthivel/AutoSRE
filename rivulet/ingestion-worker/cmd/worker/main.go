@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime/debug"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -29,6 +31,7 @@ const (
 	processorDrainTimeout    = 10 * time.Second
 	processorStopTimeout     = 2 * time.Second
 	chaosShutdownTimeout     = 3 * time.Second
+	healthShutdownTimeout    = 3 * time.Second
 	telemetryShutdownTimeout = 5 * time.Second
 )
 
@@ -110,6 +113,19 @@ func run() error {
 
 	consumer := queue.NewStreamConsumer(valkeyClient, "rivulet.orders.in", "ingestion-workers", consumerID, inst)
 
+	// --- Health Server (Port 8080) ---
+	var isReady atomic.Bool
+	healthAddr := fmt.Sprintf(":%d", cfg.Server.HTTPPort)
+	healthSrv := startHealthServer(healthAddr, &isReady)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), healthShutdownTimeout)
+		defer cancel()
+		if err := healthSrv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("health server shutdown failed", "error", err)
+		}
+	}()
+
+	// --- Chaos Server (Port 8081) ---
 	chaosAddr := fmt.Sprintf(":%d", cfg.Server.ChaosPort)
 	chaosSrv := chaos.NewServer(chaosAddr, pgDB.Pool(), consumerCancel)
 	chaosSrv.Start()
@@ -137,10 +153,17 @@ func run() error {
 		worker.Run(processorCtx, msgChan)
 	}()
 
+	// Flip readiness to true once all components are running
+	isReady.Store(true)
+
 	slog.Info("ingestion-worker started successfully", "http_port", cfg.Server.HTTPPort, "chaos_port", cfg.Server.ChaosPort)
 
 	<-ctx.Done()
 	slog.Info("shutdown signal received, draining in-flight work...")
+
+	// Flip readiness to false immediately so K8s stops routing traffic
+	isReady.Store(false)
+
 	consumerCancel()
 
 	select {
@@ -159,4 +182,43 @@ func run() error {
 
 	slog.Info("shutdown complete")
 	return nil
+}
+
+// startHealthServer creates and starts the HTTP server for liveness and readiness probes.
+func startHealthServer(addr string, isReady *atomic.Bool) *http.Server {
+	mux := http.NewServeMux()
+
+	// Liveness: Returns 200 OK if the process is alive and not deadlocked.
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	// Readiness: Returns 200 OK only if the worker is ready to process messages.
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		if isReady.Load() {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ready"))
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("not ready"))
+		}
+	})
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 2 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      5 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("health server failed", "error", err)
+		}
+	}()
+
+	return srv
 }

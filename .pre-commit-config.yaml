@@ -1,13 +1,9 @@
-
 # .pre-commit-config.yaml
 #
-# Repository hygiene, Python, Go, Java, and frontend hooks.
+# Repository hygiene, Go, Java, and frontend hooks.
 #
-# Go tooling uses `go tool` directives (Go 1.24+) declared in
-# workloads/catalog/go.mod. No `go install` step is required;
-# versions are resolved from the module's go.sum.
-#
-# Java requires workloads/orders/mvnw (Maven wrapper).
+# Go tooling uses standard go commands from rivulet/ingestion-worker/.
+# Java requires rivulet/api-gateway/mvnw (Maven wrapper).
 # Frontend requires Node.js and the project's local ESLint and Prettier.
 
 repos:
@@ -27,97 +23,69 @@ repos:
       - id: check-added-large-files
         args: ["--maxkb=1024"]
 
-  # --- Python ---
+  # --- Python (AI SRE Agent) ---
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: 01a675ea018f2fb714478a5ffb83fcea8374bb06 # v0.15.21
     hooks:
       - id: ruff
         args: [--fix]
+        files: ^agent/.*\.py$
       - id: ruff-format
+        files: ^agent/.*\.py$
 
   - repo: https://github.com/DetachHead/basedpyright-pre-commit-mirror
     rev: 78e6efd50b63647fecb7e65fc7032745d861e2c5 # 1.39.6
     hooks:
       - id: basedpyright
+        files: ^agent/.*\.py$
 
-  # --- Go (workloads/catalog) ---
-  #
-  # Tools are declared in workloads/catalog/go.mod:
-  #
-  #   tool (
-  #       mvdan.cc/gofumpt
-  #       github.com/golangci/golangci-lint/v2/cmd/golangci-lint
-  #       golang.org/x/vuln/cmd/govulncheck
-  #   )
-  #
-  # Run `go mod tidy` in workloads/catalog to resolve versions.
-  # No manual `go install` is needed; `go tool` resolves from go.sum.
+  # --- Go (rivulet/ingestion-worker) ---
   - repo: local
     hooks:
-      - id: go-fumpt
-        name: gofumpt
-        entry: bash -c 'cd workloads/catalog && go tool gofumpt -w'
+      - id: go-fmt
+        name: gofmt (ingestion-worker)
+        entry: bash -c 'cd rivulet/ingestion-worker && gofmt -w .'
         language: system
-        files: ^workloads/catalog/.*\.go$
+        files: ^rivulet/ingestion-worker/.*\.go$
+        pass_filenames: false
 
       - id: go-vet
-        name: go vet
-        entry: bash -c 'cd workloads/catalog && go vet ./...'
+        name: go vet (ingestion-worker)
+        entry: bash -c 'cd rivulet/ingestion-worker && go vet ./...'
         language: system
-        files: ^workloads/catalog/.*\.go$
+        files: ^rivulet/ingestion-worker/.*\.go$
         pass_filenames: false
 
       - id: go-mod-tidy
-        name: go mod tidy
-        entry: bash -c 'cd workloads/catalog && go mod tidy'
+        name: go mod tidy (ingestion-worker)
+        entry: bash -c 'cd rivulet/ingestion-worker && go mod tidy'
         language: system
-        files: ^workloads/catalog/go\.(mod|sum)$
+        files: ^rivulet/ingestion-worker/go\.(mod|sum)$
         pass_filenames: false
 
-      - id: golangci-lint
-        name: golangci-lint
-        entry: bash -c 'cd workloads/catalog && go tool golangci-lint run --timeout=5m'
-        language: system
-        files: ^workloads/catalog/.*\.go$
-        pass_filenames: false
-
-      - id: govulncheck
-        name: govulncheck
-        entry: bash -c 'cd workloads/catalog && go tool govulncheck ./...'
-        language: system
-        files: ^workloads/catalog/go\.(mod|sum)$
-        pass_filenames: false
-
-  # --- Java (workloads/orders) ---
-  #
-  # Requires:
-  #   workloads/orders/mvnw
-  #   workloads/orders/.mvn/wrapper/*
-  #
-  # Generate the wrapper once from workloads/orders:
-  #   mvn wrapper:wrapper
+  # --- Java (rivulet/api-gateway) ---
   - repo: local
     hooks:
       - id: spotless
-        name: Spotless (Java)
-        entry: bash -c 'cd workloads/orders && ./mvnw -q spotless:check'
+        name: Spotless (api-gateway)
+        entry: bash -c 'cd rivulet/api-gateway && ./mvnw -q spotless:check'
         language: system
-        files: ^workloads/orders/src/.*\.java$
+        files: ^rivulet/api-gateway/src/.*\.java$
         pass_filenames: false
 
-  # --- Frontend (workloads/storefront) ---
+  # --- Frontend (rivulet/frontend) ---
   - repo: local
     hooks:
       - id: eslint
-        name: ESLint (storefront)
-        entry: npm --prefix workloads/storefront exec -- eslint --fix
+        name: ESLint (frontend)
+        entry: npm --prefix rivulet/frontend exec -- eslint --fix
         language: system
-        files: ^workloads/storefront/.*\.(js|jsx|ts|tsx)$
+        files: ^rivulet/frontend/.*\.(js|jsx|ts|tsx)$
         pass_filenames: true
 
       - id: prettier
-        name: Prettier (storefront)
-        entry: npm --prefix workloads/storefront exec -- prettier --write
+        name: Prettier (frontend)
+        entry: npm --prefix rivulet/frontend exec -- prettier --write
         language: system
-        files: ^workloads/storefront/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
+        files: ^rivulet/frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
         pass_filenames: true

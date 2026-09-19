@@ -1,0 +1,41 @@
+# =============================================================================
+# application-production.yml — Production environment overrides
+# =============================================================================
+# Activated via: SPRING_PROFILES_ACTIVE=production
+#
+# Purpose: Cost-efficient sampling, TLS enforcement, strict pool limits.
+# Reduces OpenTelemetry collector load while maintaining observability
+# for incident investigation.
+# =============================================================================
+
+spring:
+  datasource:
+    hikari:
+      maximum-pool-size: 50
+      minimum-idle: 5
+  data:
+    redis:
+      ssl:
+        # TLS is mandatory in production (matches Go worker contract)
+        enabled: true
+
+management:
+  # Sample 10% of traces in production to reduce OTel collector load
+  opentelemetry:
+    tracing:
+      sampler: parentbased_traceidratio
+
+  tracing:
+    sampling:
+      probability: 0.1
+
+  # Hide health details in production for security
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    com.rivulet.gateway: INFO
+    io.opentelemetry: WARN
+    org.springframework.data.redis: WARN

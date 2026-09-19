@@ -74,3 +74,45 @@ test-results
 /tmp/
 worker.log
 worker-e2e.log
+.repos
+
+
+cat > .dockerignore << 'EOF'
+# Version control
+.git
+.gitignore
+
+# Build artifacts (rebuilt inside Docker)
+target/
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+
+# Test artifacts (not needed in production image)
+src/test/
+
+# Documentation (not needed in production image)
+README.md
+*.md
+
+# CI/CD scripts (not needed in production image)
+ci.sh
+test_e2e_locally.sh
+
+# Maven wrapper (rebuilt inside Docker using system Maven)
+mvnw
+mvnw.cmd
+.mvn/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+EOF
