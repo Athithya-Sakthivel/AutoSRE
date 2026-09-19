@@ -1,0 +1,37 @@
+# =============================================================================
+# application-evaluation.yml — Evaluation environment overrides
+# =============================================================================
+# Activated via: SPRING_PROFILES_ACTIVE=evaluation
+#
+# Purpose: 100% trace capture for the AI SRE evaluation harness.
+# Every request must produce a complete distributed trace so the agent
+# can reconstruct cross-service flows without sampling gaps.
+# =============================================================================
+
+spring:
+  datasource:
+    hikari:
+      # Smaller pool for evaluation to make connection leaks more visible
+      maximum-pool-size: 10
+      minimum-idle: 1
+
+management:
+  # Force capture of ALL traces
+  opentelemetry:
+    tracing:
+      sampler: parentbased_always_on
+
+  tracing:
+    sampling:
+      probability: 1.0
+
+  # Show full health details for evaluation diagnostics
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.rivulet.gateway: INFO
+    io.opentelemetry: INFO
+    org.springframework.data.redis: INFO
