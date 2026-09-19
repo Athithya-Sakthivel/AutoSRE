@@ -65,3 +65,12 @@ tsconfig.tsbuildinfo
 target
 playwright-report
 test-results
+
+
+.git
+.gitignore
+*.md
+*.sh
+/tmp/
+worker.log
+worker-e2e.log
