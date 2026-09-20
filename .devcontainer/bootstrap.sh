@@ -388,12 +388,14 @@ print(f"pytest {pytest.__version__}")
 PY
 
     log "Python default commands configured"
+    curl -LsSf https://astral.sh/uv/0.12.17/install.sh | sh
 
     python3 --version
     python --version
     python3.14 --version
     pip3 --version
     pytest --version
+    uv --version
 }
 
 ###############################################################################
