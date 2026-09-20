@@ -649,6 +649,15 @@ populate_kv() {
   kv_force_set LlmModelSynthesizer "$LLM_MODEL_SYNTHESIZER"
   kv_force_set LlmModelSelfCheck   "$LLM_MODEL_SELF_CHECK"
 
+
+  # --- AGENT STATE DB (Isolated for LangGraph Checkpointer) ---
+  # We reuse the Rivulet Postgres instance but with a dedicated user/schema
+  kv_set_if_absent pg-agent-host "rivulet-pg.postgres.database.azure.com" # Or internal DNS
+  kv_set_if_absent pg-agent-port "5432"
+  kv_set_if_absent pg-agent-db   "autosre_state" # Separate DB or Schema
+  kv_set_if_absent pg-agent-user "autosre_agent"
+  kv_set_if_absent pg-agent-pass "StagingAgentP123" # Hardcoded staging parity
+
   # Derived: OpenObserve Basic Auth (Required for OTel HTTP headers)
   local email password basic
   email="$(kv_get OpenObserveRootEmail)"

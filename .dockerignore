@@ -116,3 +116,5 @@ Thumbs.db
 # Logs
 *.log
 EOF
+venv
+.venv

@@ -68,3 +68,11 @@ core.25465
 
 temp.md
 .repos
+venv
+.venv
+
+.ruff_cache
+.mypy_cache
+.pytest_cache
+.coverage
+outputs.txt
