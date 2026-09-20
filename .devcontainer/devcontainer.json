@@ -18,6 +18,10 @@
     "-v", "/var/run/docker.sock:/var/run/docker.sock",
     "--shm-size=10g"
   ],
+  "remoteEnv": {
+  "DISPLAY": "",
+  "WAYLAND_DISPLAY": ""
+  },
   "containerEnv": {
     "DOCKER_GID": "999",
     "DOCKER_PROXY_HOST": "",
@@ -31,7 +35,7 @@
       "settings": {
         "files.autoSave": "afterDelay",
         "files.autoSaveDelay": 1000,
-        "terminal.integrated.scrollback": 2500,
+        "terminal.integrated.scrollback": 3500,
         "workbench.colorTheme": "Default Dark Modern",
         "workbench.preferredDarkColorTheme": "Default Dark Modern"
       }
