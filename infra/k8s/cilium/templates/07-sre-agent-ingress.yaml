@@ -1,0 +1,62 @@
+{{- if .Values.networkPolicies.enabled }}
+# =============================================================================
+# Ingress on openobserve — who may scrape / query it
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: openobserve-ingress
+  namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+  labels:
+    app.kubernetes.io/part-of: rivulet
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: openobserve
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.sreNamespace }}
+            app.kubernetes.io/name: autosre-agent
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.evalNamespace }}
+      toPorts:
+        - ports:
+            - port: "5080"
+              protocol: TCP
+---
+# =============================================================================
+# Ingress on sre-agent — who may trigger incidents
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: sre-agent-ingress
+  namespace: {{ .Values.networkPolicies.sreNamespace }}
+  labels:
+    app.kubernetes.io/part-of: rivulet
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: autosre-agent
+  ingress:
+    # OpenObserve webhook alerts
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+            app.kubernetes.io/name: openobserve
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+    # Eval harness triggering incidents
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.evalNamespace }}
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+{{- end }}

@@ -1,0 +1,87 @@
+{{- if .Values.networkPolicies.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: sre-agent-egress
+  namespace: {{ .Values.networkPolicies.sreNamespace }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: autosre-agent
+  egress:
+    # Kubernetes API (for kr8s/kubectl operations)
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+
+    # Postgres (for terminate_backend and state DB)
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+            app.kubernetes.io/name: postgres
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+
+    # Valkey (for cache operations)
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+            app.kubernetes.io/name: valkey
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP
+
+    # OpenObserve (for log/metric queries)
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+            app.kubernetes.io/name: openobserve
+      toPorts:
+        - ports:
+            - port: "5080"
+              protocol: TCP
+
+    # OTel Gateway (for trace export)
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+            app.kubernetes.io/name: otel-gateway
+      toPorts:
+        - ports:
+            - port: "4318"
+              protocol: TCP
+
+    # Groq API (external LLM provider)
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+{{- end }}
+
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: openobserve-ingress
+  namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: openobserve
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.sreNamespace }}
+            app.kubernetes.io/name: autosre-agent
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.evalNamespace }}
+      toPorts:
+        - ports: [{port: "5080"}]

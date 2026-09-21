@@ -1,0 +1,35 @@
+{{- if .Values.networkPolicies.enabled }}
+{{- /*
+  Default-deny via Cilium endpoint isolation.
+
+  An endpoint selected by a CiliumNetworkPolicy that has NO rules that can
+  match any flow is considered "isolated" — all traffic is dropped unless a
+  later allow policy permits it.
+
+  Empty `ingress: []` / `egress: []` is accepted by some Cilium versions but
+  rejected (VALID: False) by others. The portable, universally-accepted idiom
+  is a rule that can never match anything, expressed via a match-label that no
+  endpoint carries:  cilium.io/no-such-entity: "true".
+*/ -}}
+{{- range $ns := list .Values.networkPolicies.rivuletNamespace .Values.networkPolicies.sreNamespace .Values.networkPolicies.evalNamespace }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: default-deny
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/part-of: rivulet
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            cilium.io/no-such-entity: "true"
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            cilium.io/no-such-entity: "true"
+---
+{{- end }}
+{{- end }}

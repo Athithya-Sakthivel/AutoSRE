@@ -1,0 +1,75 @@
+{{- if .Values.networkPolicies.enabled }}
+# =============================================================================
+# Ingress on api-gateway
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: api-gateway-ingress
+  namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+  labels:
+    app.kubernetes.io/part-of: rivulet
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: api-gateway
+  ingress:
+    # Frontend → api-gateway
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+            app.kubernetes.io/name: frontend
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # Eval harness → chaos plane on :8081
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.evalNamespace }}
+      toPorts:
+        - ports:
+            - port: "8081"
+              protocol: TCP
+    # kubelet probes
+    - fromEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+---
+# =============================================================================
+# Ingress on frontend
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: frontend-ingress
+  namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+  labels:
+    app.kubernetes.io/part-of: rivulet
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: frontend
+  ingress:
+    - fromEntities:
+        - host
+        - remote-node
+        - world
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+{{- end }}

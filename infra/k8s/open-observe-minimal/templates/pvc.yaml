@@ -1,3 +1,6 @@
+{{- if not .Values.persistence.storageClass }}
+{{- fail "persistence.storageClass is required" }}
+{{- end }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

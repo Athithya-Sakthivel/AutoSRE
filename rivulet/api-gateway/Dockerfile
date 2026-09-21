@@ -6,7 +6,7 @@
 # Uses Eclipse Temurin JDK 25 with Maven 3.9 for compilation.
 # BuildKit cache mounts persist ~/.m2 across builds for fast rebuilds.
 # ---------------------------------------------------------------------------
-FROM maven:3.9.16-eclipse-temurin-25-alpine AS build
+FROM docker.io/library/maven:3.9.16-eclipse-temurin-25-alpine@sha256:eedc40918742f8a64d876a47db1fea211aa66e5f8ecd3bbc7ec9228a62e431d6 AS build
 
 WORKDIR /build
 
@@ -37,7 +37,7 @@ RUN --mount=type=cache,target=/root/.m2 \
 # agent is required. This replaces the previous Azure Application Insights
 # agent approach with a standards-based, vendor-neutral observability stack.
 # ---------------------------------------------------------------------------
-FROM eclipse-temurin:25-jre-alpine
+FROM docker.io/library/eclipse-temurin:25-jre-alpine@sha256:2ca9adf44f5c29d28ecd26cf92d75cc0c66b7f32bfd839a4439e363a8b428af8
 
 WORKDIR /app
 
