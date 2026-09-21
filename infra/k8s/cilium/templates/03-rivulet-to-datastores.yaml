@@ -1,0 +1,122 @@
+{{- if .Values.networkPolicies.enabled }}
+# =============================================================================
+# Egress: clients → datastores
+#
+# Rules here are enforced at the CLIENT's egress hook. They permit the client
+# to send. They do NOT create an ingress rule on the destination.
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: clients-to-datastores-egress
+  namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+  labels:
+    app.kubernetes.io/part-of: rivulet
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - api-gateway
+          - ingestion-worker
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+            app.kubernetes.io/name: postgres
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+            app: valkey
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP
+---
+# =============================================================================
+# Ingress on postgres — WHO is allowed to talk TO postgres.
+#
+# This is the missing half. Without it, default-deny isolates postgres and
+# every SYN is dropped at postgres's ingress hook (bpf_lxc.c).
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: postgres-ingress
+  namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+  labels:
+    app.kubernetes.io/part-of: rivulet
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  ingress:
+    # Application clients
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+            app.kubernetes.io/name: api-gateway
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+            app.kubernetes.io/name: ingestion-worker
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.sreNamespace }}
+            app.kubernetes.io/name: autosre-agent
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # kubelet probes (postgres uses pg_isready via exec, but keep for safety)
+    - fromEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+---
+# =============================================================================
+# Ingress on valkey — WHO is allowed to talk TO valkey.
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: valkey-ingress
+  namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+  labels:
+    app.kubernetes.io/part-of: rivulet
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app: valkey
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+            app.kubernetes.io/name: api-gateway
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+            app.kubernetes.io/name: ingestion-worker
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.sreNamespace }}
+            app.kubernetes.io/name: autosre-agent
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP
+    - fromEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP
+{{- end }}

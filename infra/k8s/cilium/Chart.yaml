@@ -1,0 +1,7 @@
+apiVersion: v2
+name: autosre-cilium-policies
+description: Cilium NetworkPolicies for AutoSRE platform (Zero-Trust)
+type: application
+version: 0.1.0
+appVersion: "1.20.2"
+kubeVersion: ">=1.25.0-0"

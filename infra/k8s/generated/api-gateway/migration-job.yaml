@@ -1,0 +1,84 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: api-gateway-migrate
+  namespace: rivulet
+  labels:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/part-of: rivulet
+    app.kubernetes.io/component: migration
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api-gateway
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-datastores
+          image: docker.io/library/busybox:1.37-musl
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              wait_tcp() {
+                host="$1"; port="$2"; label="$3"; i=0
+                echo "waiting for ${label} ${host}:${port} ..."
+                until timeout -k 2 3 nc -z -w 2 "${host}" "${port}" 2>/dev/null; do
+                  i=$((i + 1))
+                  echo "  [${label}] attempt ${i} failed, retrying in 2s..."
+                  sleep 2
+                done
+                echo "${label} reachable"
+              }
+              wait_tcp "postgres.rivulet.svc.cluster.local" "5432" "postgres"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 100m, memory: 32Mi }
+      containers:
+        - name: migrate
+          image: ghcr.io/athithya-sakthivel/rivulet-api-gateway:latest
+          imagePullPolicy: Always
+          env:
+            - name: MIGRATE_ONLY
+              value: "true"
+            - name: PGHOST
+              value: "postgres.rivulet.svc.cluster.local"
+            - name: PGPORT
+              value: "5432"
+            - name: PGSSLMODE
+              value: "disable"
+            - name: PGDATABASE
+              valueFrom: { secretKeyRef: { name: postgres-rivulet-env, key: PGDATABASE } }
+            - name: PGUSER
+              valueFrom: { secretKeyRef: { name: postgres-rivulet-env, key: PGUSER } }
+            - name: PGPASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-rivulet-env, key: PGPASSWORD } }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 384Mi }
+      volumes:
+        - name: tmp
+          emptyDir: {}

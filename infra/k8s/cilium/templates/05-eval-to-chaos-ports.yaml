@@ -1,0 +1,47 @@
+{{- if .Values.networkPolicies.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: eval-egress
+  namespace: {{ .Values.networkPolicies.evalNamespace }}
+spec:
+  endpointSelector: {}
+  egress:
+    # Chaos injection ports (8081) on Rivulet pods ONLY
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+            app.kubernetes.io/part-of: rivulet
+      toPorts:
+        - ports:
+            - port: "8081"
+              protocol: TCP
+
+    # SRE Agent API for triggering incidents
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.sreNamespace }}
+            app.kubernetes.io/name: autosre-agent
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+
+    # OpenObserve for querying metrics/logs
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+            app.kubernetes.io/name: openobserve
+      toPorts:
+        - ports:
+            - port: "5080"
+              protocol: TCP
+
+    # Groq API for LLM-as-a-Judge evaluation
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+{{- end }}

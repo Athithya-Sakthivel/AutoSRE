@@ -4,9 +4,6 @@
 {{- if not .Values.secrets.auth }}
 {{- fail "secrets.auth is required" }}
 {{- end }}
-{{- if not .Values.secrets.storage }}
-{{- fail "secrets.storage is required" }}
-{{- end }}
 {{- if not .Values.persistence.storageClass }}
 {{- fail "persistence.storageClass is required" }}
 {{- end }}
@@ -74,16 +71,18 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.auth }}
                   key: ZO_ROOT_USER_PASSWORD
+            {{- with .Values.secrets.storage }}
             - name: AZURE_STORAGE_ACCOUNT_NAME
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.secrets.storage }}
+                  name: {{ . }}
                   key: account-name
             - name: AZURE_STORAGE_ACCOUNT_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.secrets.storage }}
+                  name: {{ . }}
                   key: account-key
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

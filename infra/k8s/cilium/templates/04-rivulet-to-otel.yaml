@@ -1,0 +1,18 @@
+{{- if .Values.networkPolicies.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: rivulet-to-otel
+  namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+            app.kubernetes.io/name: otel-gateway
+      toPorts:
+        - ports:
+            - port: "4318"
+              protocol: TCP
+{{- end }}

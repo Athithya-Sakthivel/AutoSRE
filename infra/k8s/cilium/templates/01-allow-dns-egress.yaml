@@ -1,0 +1,24 @@
+{{- if .Values.networkPolicies.enabled }}
+{{- range $ns := list .Values.networkPolicies.rivuletNamespace .Values.networkPolicies.sreNamespace .Values.networkPolicies.evalNamespace }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: {{ $ns }}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ $.Values.networkPolicies.dnsNamespace }}
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"
+---
+{{- end }}
+{{- end }}

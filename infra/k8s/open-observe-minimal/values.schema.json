@@ -50,7 +50,7 @@
     },
     "secrets": {
       "type": "object",
-      "required": ["auth", "storage"],
+      "required": ["auth"],
       "additionalProperties": false,
       "properties": {
         "auth":    { "type": "string", "minLength": 1 },
@@ -87,7 +87,7 @@
       "type": "object",
       "required": ["requests", "limits"]
     },
-    "podSecurityContext":     { "type": "object" },
+    "podSecurityContext":       { "type": "object" },
     "containerSecurityContext": { "type": "object" },
     "probes":       { "type": "object" },
     "lifecycle":    { "type": "object" },

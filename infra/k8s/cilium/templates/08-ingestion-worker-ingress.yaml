@@ -1,0 +1,31 @@
+{{- if .Values.networkPolicies.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ingestion-worker-ingress
+  namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+  labels:
+    app.kubernetes.io/part-of: rivulet
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: ingestion-worker
+  ingress:
+    # kubelet liveness/readiness/startup probes from the host network ns
+    - fromEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # Eval harness → chaos plane on :8081
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.evalNamespace }}
+      toPorts:
+        - ports:
+            - port: "8081"
+              protocol: TCP
+{{- end }}
