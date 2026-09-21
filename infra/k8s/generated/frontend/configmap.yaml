@@ -1,0 +1,106 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-nginx-config
+  namespace: rivulet
+  labels:
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/part-of: rivulet
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/managed-by: frontend-deploy
+data:
+  default.conf.template: |
+    server {
+        listen 8080;
+        server_name _;
+
+        root /usr/share/nginx/html;
+        index index.html;
+
+        # Resolve upstream hostnames at request time, not config-load time.
+        # 10s TTL balances DNS churn vs lookup overhead.
+        resolver 10.96.0.10 valid=10s ipv6=off;
+
+        # Security headers
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+        # Gzip compression
+        gzip on;
+        gzip_vary on;
+        gzip_comp_level 5;
+        gzip_min_length 1024;
+        gzip_proxied any;
+        gzip_types application/javascript application/json image/svg+xml text/css text/plain;
+
+        # Health check endpoint (does not hit backend)
+        location = /health {
+            access_log off;
+            default_type text/plain;
+            add_header Cache-Control "no-store" always;
+            return 200 "OK\n";
+        }
+
+        # -------------------------------------------------------------------------
+        # /orders/ — dynamic proxy to ${BACKEND_URL}/orders/
+        # The upstream is stored in a variable so nginx defers DNS resolution.
+        # $request_uri preserves the original path + query string exactly.
+        # -------------------------------------------------------------------------
+        location ^~ /orders/ {
+            set $upstream_orders "${BACKEND_URL}/orders/";
+            proxy_pass $upstream_orders;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Connection "";
+            proxy_connect_timeout 5s;
+            proxy_send_timeout 30s;
+            proxy_read_timeout 60s;
+            proxy_next_upstream error timeout http_502 http_503 http_504;
+        }
+
+        location ^~ /inventory/ {
+            set $upstream_inventory "${BACKEND_URL}/inventory/";
+            proxy_pass $upstream_inventory;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Connection "";
+            proxy_connect_timeout 5s;
+            proxy_send_timeout 30s;
+            proxy_read_timeout 60s;
+            proxy_next_upstream error timeout http_502 http_503 http_504;
+        }
+
+        location ^~ /healthz {
+            set $upstream_healthz "${BACKEND_URL}/healthz";
+            proxy_pass $upstream_healthz;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Connection "";
+        }
+
+        location ^~ /readyz {
+            set $upstream_readyz "${BACKEND_URL}/readyz";
+            proxy_pass $upstream_readyz;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Connection "";
+        }
+
+        # SPA fallback for React Router
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+    }
