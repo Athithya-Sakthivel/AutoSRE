@@ -70,7 +70,8 @@ temp.md
 .repos
 venv
 .venv
-
+__pycache__/
+__pycache__
 .ruff_cache
 .mypy_cache
 .pytest_cache
