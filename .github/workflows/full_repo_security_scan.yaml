@@ -28,6 +28,13 @@ env:
 
   REPO_ROOT: ${{ github.workspace }}
 
+  # Prevent cache downloads from hanging indefinitely.
+  SEGMENT_DOWNLOAD_TIMEOUT_MINS: "5"
+
+  # Trivy does not need the optional update/telemetry endpoint for CI.
+  TRIVY_SKIP_VERSION_CHECK: "true"
+  TRIVY_DISABLE_TELEMETRY: "true"
+
 jobs:
   scan_repository:
     name: Full Repository Security Scan
@@ -41,28 +48,37 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install Trivy
-        uses: aquasecurity/setup-trivy@e07451d2e059ed86c2870430ea286b3a9e0bf241 # v0.3.1
+      - name: Set up Java and restore Maven cache
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
-          version: ${{ env.TRIVY_VERSION }}
-          cache: true
+          distribution: temurin
+          java-version: "25"
+          cache: maven
 
-      - name: Prepare Trivy cache
-        id: trivy_cache
+      - name: Populate Maven dependency cache for Trivy
         run: |
           set -euo pipefail
 
-          install -d -m 0700 "$RUNNER_TEMP/trivy-cache"
+          cd "$REPO_ROOT"
 
-          echo "week=$(date -u +'%G-%V')" >> "$GITHUB_OUTPUT"
+          test -f rivulet/api-gateway/pom.xml
+          test -f rivulet/api-gateway/mvnw
 
-      - name: Cache Trivy databases
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/trivy-cache
-          key: trivy-db-${{ env.TRIVY_VERSION }}-${{ runner.os }}-${{ steps.trivy_cache.outputs.week }}
-          restore-keys: |
-            trivy-db-${{ env.TRIVY_VERSION }}-${{ runner.os }}-
+          echo "[INFO] Java version:"
+          java -version
+
+          echo "[INFO] Maven version:"
+          bash rivulet/api-gateway/mvnw --version
+
+          echo "[INFO] Resolving Maven dependencies into ~/.m2"
+          echo "[INFO] This prevents Trivy from querying Maven Central during the scan."
+
+          bash rivulet/api-gateway/mvnw \
+            --batch-mode \
+            --no-transfer-progress \
+            --file rivulet/api-gateway/pom.xml \
+            dependency:go-offline \
+            dependency:resolve-plugins
 
       - name: Install OpenGrep
         run: |
@@ -161,58 +177,57 @@ jobs:
 
           "$RUNNER_TEMP/security-tools/gitleaks" version
 
-      - name: Run security scanners
+      - name: Run OpenGrep SAST
+        id: opengrep
+        continue-on-error: true
         run: |
-          set -uo pipefail
+          set -euo pipefail
 
           cd "$REPO_ROOT"
 
-          scan_status=0
-
-          echo
           echo "============================================================"
           echo " OpenGrep SAST"
           echo "============================================================"
 
-          opengrep_args=(
-            scan
-            --config p/owasp-top-ten
-            --config p/dockerfile
-            --config p/secrets
-            --config p/kubernetes
-            --error
-            --max-target-bytes 2000000
-
-            --exclude .git
-            --exclude .repos
-            --exclude .venv
-            --exclude node_modules
-            --exclude target
-            --exclude dist
-            --exclude __pycache__
-            --exclude .pytest_cache
-            --exclude .mypy_cache
-            --exclude .ruff_cache
-            --exclude .terraform
-
+          opengrep scan \
+            --config p/owasp-top-ten \
+            --config p/dockerfile \
+            --config p/secrets \
+            --config p/kubernetes \
+            --error \
+            --max-target-bytes 2000000 \
+            --exclude .git \
+            --exclude .repos \
+            --exclude .venv \
+            --exclude node_modules \
+            --exclude target \
+            --exclude dist \
+            --exclude __pycache__ \
+            --exclude .pytest_cache \
+            --exclude .mypy_cache \
+            --exclude .ruff_cache \
+            --exclude .terraform \
+            --exclude .cache \
             .
-          )
 
-          if ! opengrep "${opengrep_args[@]}"; then
-            echo "[ERROR] OpenGrep reported findings or failed."
-            scan_status=1
-          fi
+      - name: Run Gitleaks full Git history scan
+        id: gitleaks
+        continue-on-error: true
+        run: |
+          set -euo pipefail
 
-          echo
+          cd "$REPO_ROOT"
+
           echo "============================================================"
           echo " Gitleaks - Full Git History"
           echo "============================================================"
 
           gitleaks_args=(
             git
-            --redact
-            --exit-code 1
             --log-opts="--all --full-history"
+            --redact
+            --no-banner
+            --exit-code 1
           )
 
           if [[ -f .gitleaks.toml ]]; then
@@ -222,48 +237,80 @@ jobs:
             echo "[INFO] No .gitleaks.toml found; using Gitleaks defaults."
           fi
 
-          if ! gitleaks "${gitleaks_args[@]}" .; then
-            echo "[ERROR] Gitleaks reported findings or failed."
-            scan_status=1
+          gitleaks "${gitleaks_args[@]}" .
+
+      - name: Run Trivy filesystem vulnerability and IaC scan
+        id: trivy
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          # Critical for the Maven 429 problem:
+          # Trivy must use the populated local ~/.m2 repository and must
+          # not query Maven Central to resolve missing Java dependencies.
+          TRIVY_OFFLINE_SCAN: "true"
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig
+          severity: ${{ env.TRIVY_SEVERITY }}
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: "1"
+          timeout: 15m
+          cache: true
+          skip-dirs: >-
+            .git,
+            **/.git,
+            **/.repos,
+            **/.venv,
+            **/node_modules,
+            **/target,
+            **/dist,
+            **/__pycache__,
+            **/.pytest_cache,
+            **/.mypy_cache,
+            **/.ruff_cache,
+            **/.terraform,
+            .cache
+
+      - name: Evaluate scanner results
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+
+          failed=0
+
+          echo "============================================================"
+          echo " Security Scan Summary"
+          echo "============================================================"
+
+          if [[ "${{ steps.opengrep.outcome }}" != "success" ]]; then
+            echo "[FAIL] OpenGrep reported findings or failed."
+            failed=1
+          else
+            echo "[PASS] OpenGrep"
           fi
 
-          echo
-          echo "============================================================"
-          echo " Trivy - Filesystem Vulnerability + IaC Scan"
-          echo "============================================================"
-
-          if ! trivy fs \
-            --cache-dir "$RUNNER_TEMP/trivy-cache" \
-            --ignorefile .trivyignore \
-            --scanners vuln,misconfig \
-            --severity "$TRIVY_SEVERITY" \
-            --ignore-unfixed \
-            --include-dev-deps \
-            --timeout 15m \
-            --skip-dirs '.git' \
-            --skip-dirs '**/.git' \
-            --skip-dirs '**/.repos' \
-            --skip-dirs '**/.venv' \
-            --skip-dirs '**/node_modules' \
-            --skip-dirs '**/target' \
-            --skip-dirs '**/dist' \
-            --skip-dirs '**/__pycache__' \
-            --skip-dirs '**/.pytest_cache' \
-            --skip-dirs '**/.mypy_cache' \
-            --skip-dirs '**/.ruff_cache' \
-            --skip-dirs '**/.terraform' \
-            --exit-code 1 \
-            .; then
-            echo "[ERROR] Trivy reported findings or failed."
-            scan_status=1
+          if [[ "${{ steps.gitleaks.outcome }}" != "success" ]]; then
+            echo "[FAIL] Gitleaks reported findings or failed."
+            failed=1
+          else
+            echo "[PASS] Gitleaks"
           fi
 
-          echo
+          if [[ "${{ steps.trivy.outcome }}" != "success" ]]; then
+            echo "[FAIL] Trivy reported findings or failed."
+            failed=1
+          else
+            echo "[PASS] Trivy"
+          fi
+
           echo "============================================================"
 
-          if [[ "$scan_status" -ne 0 ]]; then
+          if [[ "$failed" -ne 0 ]]; then
             echo "[ERROR] One or more security scanners reported findings or failed."
-            exit "$scan_status"
+            exit 1
           fi
 
           echo "[SUCCESS] All security scanners completed with no blocking findings."
