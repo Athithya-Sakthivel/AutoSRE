@@ -23,6 +23,10 @@
         <google-java-format.version>1.30.0</google-java-format.version>
         <java-uuid-generator.version>5.2.0</java-uuid-generator.version>
         <testcontainers.version>1.20.4</testcontainers.version>
+
+        <!-- Security Fix: Override embedded Tomcat to 11.0.25 to patch
+             CVE-2026-65182, CVE-2026-65905, and CVE-2026-68525 -->
+        <tomcat.version>11.0.25</tomcat.version>
     </properties>
 
     <dependencies>

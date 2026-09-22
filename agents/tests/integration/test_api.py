@@ -98,6 +98,11 @@ def app_healthy(
 
     test_app = FastAPI()
 
+    # Add a mock graph to the runner so get_incident_report works
+    mock_graph = AsyncMock()
+    mock_graph.aget_state = AsyncMock(return_value=None)
+    mock_runner.graph = mock_graph
+
     test_app.state.settings = mock_settings
     test_app.state.runner = mock_runner
     test_app.state.checkpointer = mock_checkpointer
@@ -319,53 +324,58 @@ async def test_approve_webhook_valid_signature(
 @pytest.mark.asyncio
 async def test_incident_report_not_found(
     client_healthy: AsyncClient,
-    mock_checkpointer: AsyncMock,
+    app_healthy: FastAPI,
 ):
     """Test incident report endpoint when incident not found."""
-    mock_checkpointer.aget_tuple = AsyncMock(return_value=None)
+    # graph.aget_state returns None → 404
+    app_healthy.state.runner.graph.aget_state = AsyncMock(return_value=None)
 
     response = await client_healthy.get("/incidents/nonexistent-id/report")
 
     assert response.status_code == 404
-    assert (
-        "not found" in response.json()["detail"].lower() or "Incident" in response.json()["detail"]
-    )
+    assert "not found" in response.json()["detail"].lower()
 
 
 @pytest.mark.asyncio
 async def test_incident_report_found(
     client_healthy: AsyncClient,
-    mock_checkpointer: AsyncMock,
+    app_healthy: FastAPI,
 ):
     """Test incident report endpoint when incident exists."""
-    mock_checkpoint = MagicMock()
-    mock_checkpoint.channel_values = {
+    mock_snapshot = MagicMock()
+    mock_snapshot.values = {
         "current_phase": "complete",
         "hypotheses": [
             {
                 "id": "H1",
                 "description": "Database connection pool exhausted",
                 "confidence": 0.9,
-                "evidence": ["High connection count", "Slow queries"],
+                "evidence": ["High connection count"],
                 "status": "confirmed",
             }
         ],
         "proposed_actions": [],
-        "executed_actions": [],
+        "executed_actions": [
+            {
+                "tool_name": "restart_deployment",
+                "success": True,
+                "verification_passed": True,
+            }
+        ],
         "tokens_used": 1500,
         "cost_usd": 0.05,
         "wall_clock_seconds": 45.2,
         "iteration_count": 3,
     }
 
-    mock_checkpointer.aget_tuple = AsyncMock(return_value=mock_checkpoint)
+    app_healthy.state.runner.graph.aget_state = AsyncMock(return_value=mock_snapshot)
 
     response = await client_healthy.get("/incidents/test-incident-123/report")
 
     assert response.status_code == 200
     data = response.json()
 
-    assert data["status"] == "complete"
+    assert data["status"] == "resolved"
     assert data["phase"] == "complete"
     assert len(data["hypotheses"]) == 1
     assert data["tokens_used"] == 1500
@@ -377,11 +387,11 @@ async def test_incident_report_found(
 @pytest.mark.asyncio
 async def test_incident_report_awaiting_approval(
     client_healthy: AsyncClient,
-    mock_checkpointer: AsyncMock,
+    app_healthy: FastAPI,
 ):
     """Test incident report when awaiting human approval."""
-    mock_checkpoint = MagicMock()
-    mock_checkpoint.channel_values = {
+    mock_snapshot = MagicMock()
+    mock_snapshot.values = {
         "current_phase": "propose",
         "hypotheses": [],
         "proposed_actions": [
@@ -402,7 +412,7 @@ async def test_incident_report_awaiting_approval(
         "iteration_count": 2,
     }
 
-    mock_checkpointer.aget_tuple = AsyncMock(return_value=mock_checkpoint)
+    app_healthy.state.runner.graph.aget_state = AsyncMock(return_value=mock_snapshot)
 
     response = await client_healthy.get("/incidents/test-incident-456/report")
 

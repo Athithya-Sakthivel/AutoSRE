@@ -61,13 +61,6 @@ class ApprovalResponse(BaseModel):
     status: str
 
 
-class ReadinessResponse(BaseModel):
-    """Response for readiness check."""
-
-    status: str
-    checks: dict[str, str]
-
-
 # --- Dependencies ---
 
 
@@ -101,7 +94,7 @@ def verify_webhook_signature(
     if not signature_header.startswith("sha256="):
         return False
 
-    expected_signature = signature_header[7:]  # Strip "sha256=" prefix
+    expected_signature = signature_header[7:]
 
     if len(expected_signature) != hashlib.sha256().digest_size * 2:
         return False
@@ -131,7 +124,6 @@ async def receive_alert(
     x_webhook_signature: Annotated[str | None, Header(alias="X-Webhook-Signature")] = None,
 ) -> AlertAcceptedResponse:
     """Receive alert webhook and start investigation."""
-    # Verify signature AFTER body validation
     webhook_secret = settings.alert.webhook_secret.get_secret_value()
     payload_bytes = await request.body()
 
@@ -179,7 +171,6 @@ async def approve_incident(
     x_webhook_signature: Annotated[str | None, Header(alias="X-Webhook-Signature")] = None,
 ) -> ApprovalResponse:
     """Receive HITL approval/rejection webhook."""
-    # Verify signature
     webhook_secret = settings.alert.webhook_secret.get_secret_value()
     payload_bytes = await request.body()
 
@@ -204,7 +195,6 @@ async def approve_incident(
         },
     )
 
-    # Call the runner to resume the incident
     found = await runner.approve_incident(
         incident_id,
         approval.approved,
@@ -234,7 +224,7 @@ async def healthz() -> dict[str, str]:
 async def readyz(
     pg_pool: Annotated[Any, Depends(get_pg_pool)],
 ) -> JSONResponse:
-    """Readiness probe - returns JSON with status key."""
+    """Readiness probe."""
     checks: dict[str, str] = {}
 
     try:
@@ -259,21 +249,49 @@ async def get_incident_report(
     incident_id: str,
     request: Request,
 ) -> dict[str, Any]:
-    """Return the final state of an investigation for evaluation."""
-    checkpointer = request.app.state.checkpointer
+    """Return the final state of an investigation for evaluation.
 
-    config = {"configurable": {"thread_id": incident_id}}
-    state_snapshot = await checkpointer.aget_tuple(config)
+    Uses graph.aget_state() which returns a StateSnapshot with .values
+    containing the current state dict. This is the recommended LangGraph API
+    and works across all versions.
+    """
+    runner = request.app.state.runner
+    if runner is None:
+        raise HTTPException(status_code=503, detail="Agent not initialized")
+
+    graph = getattr(runner, "graph", None)
+    if graph is None:
+        raise HTTPException(status_code=503, detail="Agent graph not compiled")
+
+    config: dict[str, Any] = {"configurable": {"thread_id": incident_id}}
+
+    try:
+        state_snapshot = await graph.aget_state(config)
+    except Exception as exc:
+        logger.error(
+            "Failed to retrieve state for incident %s: %s",
+            incident_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve state: {exc}",
+        ) from exc
 
     if state_snapshot is None:
         raise HTTPException(status_code=404, detail="Incident not found")
 
-    state = state_snapshot.channel_values
+    # StateSnapshot.values contains the current state dict directly.
+    # Cast to satisfy mypy since .values is typed as Any.
+    state = cast(dict[str, Any], state_snapshot.values)
+
     phase = state.get("current_phase", "unknown")
 
     status_str = "running"
     if phase == "complete":
-        status_str = "complete"
+        executed = state.get("executed_actions", [])
+        any_success = any(a.get("success") for a in executed)
+        status_str = "resolved" if any_success else "complete"
     elif phase == "failed":
         status_str = "failed"
     elif state.get("requires_human_approval") and state.get("approval_granted") is None:

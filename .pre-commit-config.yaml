@@ -61,19 +61,33 @@ repos:
         files: ^rivulet/api-gateway/src/.*\.java$
         pass_filenames: false
 
-  # --- Frontend (rivulet/frontend) ---
+  # --- Frontend (rivulet/frontend + agents/ui) ---
   - repo: local
     hooks:
-      - id: eslint
-        name: ESLint (frontend)
+      - id: eslint-frontend
+        name: ESLint (rivulet/frontend)
         entry: npm --prefix rivulet/frontend exec -- eslint --fix
         language: system
         files: ^rivulet/frontend/.*\.(js|jsx|ts|tsx)$
         pass_filenames: true
 
-      - id: prettier
-        name: Prettier (frontend)
+      - id: prettier-frontend
+        name: Prettier (rivulet/frontend)
         entry: npm --prefix rivulet/frontend exec -- prettier --write
         language: system
         files: ^rivulet/frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
+        pass_filenames: true
+
+      - id: eslint-agents-ui
+        name: ESLint (agents/ui)
+        entry: npm --prefix agents/ui exec -- eslint
+        language: system
+        files: ^agents/ui/src/.*\.(js|jsx|ts|tsx)$
+        pass_filenames: true
+
+      - id: prettier-agents-ui
+        name: Prettier (agents/ui)
+        entry: npm --prefix agents/ui exec -- prettier --check
+        language: system
+        files: ^agents/ui/.*\.(js|jsx|ts|tsx|json|css|scss|md|html|yaml|yml)$
         pass_filenames: true
