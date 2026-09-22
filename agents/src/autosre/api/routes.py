@@ -9,9 +9,10 @@ import uuid
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from autosre.api.runner import StubIncidentRunner
+from autosre.api.runner import LangGraphRunner
 from autosre.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,13 @@ class ApprovalResponse(BaseModel):
     status: str
 
 
+class ReadinessResponse(BaseModel):
+    """Response for readiness check."""
+
+    status: str
+    checks: dict[str, str]
+
+
 # --- Dependencies ---
 
 
@@ -68,9 +76,9 @@ def get_settings(request: Request) -> Settings:
     return cast(Settings, request.app.state.settings)
 
 
-def get_runner(request: Request) -> StubIncidentRunner:
+def get_runner(request: Request) -> LangGraphRunner:
     """Get incident runner from app state."""
-    return cast(StubIncidentRunner, request.app.state.runner)
+    return cast(LangGraphRunner, request.app.state.runner)
 
 
 def get_pg_pool(request: Request) -> Any:
@@ -119,7 +127,7 @@ async def receive_alert(
     request: Request,
     alert: AlertPayload,
     settings: Annotated[Settings, Depends(get_settings)],
-    runner: Annotated[StubIncidentRunner, Depends(get_runner)],
+    runner: Annotated[LangGraphRunner, Depends(get_runner)],
     x_webhook_signature: Annotated[str | None, Header(alias="X-Webhook-Signature")] = None,
 ) -> AlertAcceptedResponse:
     """Receive alert webhook and start investigation."""
@@ -167,7 +175,7 @@ async def approve_incident(
     incident_id: str,
     approval: ApprovalPayload,
     settings: Annotated[Settings, Depends(get_settings)],
-    runner: Annotated[StubIncidentRunner, Depends(get_runner)],
+    runner: Annotated[LangGraphRunner, Depends(get_runner)],
     x_webhook_signature: Annotated[str | None, Header(alias="X-Webhook-Signature")] = None,
 ) -> ApprovalResponse:
     """Receive HITL approval/rejection webhook."""
@@ -196,6 +204,7 @@ async def approve_incident(
         },
     )
 
+    # Call the runner to resume the incident
     found = await runner.approve_incident(
         incident_id,
         approval.approved,
@@ -224,19 +233,60 @@ async def healthz() -> dict[str, str]:
 @router.get("/readyz")
 async def readyz(
     pg_pool: Annotated[Any, Depends(get_pg_pool)],
-) -> dict[str, Any]:
-    """Readiness probe."""
+) -> JSONResponse:
+    """Readiness probe - returns JSON with status key."""
     checks: dict[str, str] = {}
 
     try:
         async with pg_pool.connection() as conn, conn.cursor() as cur:
             await cur.execute("SELECT 1")
         checks["postgres"] = "ok"
+        return JSONResponse(
+            status_code=200,
+            content={"status": "ready", "checks": checks},
+        )
     except Exception as e:
         logger.error("Postgres readiness check failed: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Postgres not ready",
-        ) from e
+        checks["postgres"] = "failed"
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "checks": checks},
+        )
 
-    return {"status": "ready", "checks": checks}
+
+@router.get("/incidents/{incident_id}/report")
+async def get_incident_report(
+    incident_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    """Return the final state of an investigation for evaluation."""
+    checkpointer = request.app.state.checkpointer
+
+    config = {"configurable": {"thread_id": incident_id}}
+    state_snapshot = await checkpointer.aget_tuple(config)
+
+    if state_snapshot is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    state = state_snapshot.channel_values
+    phase = state.get("current_phase", "unknown")
+
+    status_str = "running"
+    if phase == "complete":
+        status_str = "complete"
+    elif phase == "failed":
+        status_str = "failed"
+    elif state.get("requires_human_approval") and state.get("approval_granted") is None:
+        status_str = "awaiting_approval"
+
+    return {
+        "status": status_str,
+        "phase": phase,
+        "hypotheses": state.get("hypotheses", []),
+        "proposed_actions": state.get("proposed_actions", []),
+        "executed_actions": state.get("executed_actions", []),
+        "tokens_used": state.get("tokens_used", 0),
+        "cost_usd": state.get("cost_usd", 0.0),
+        "wall_clock_seconds": state.get("wall_clock_seconds", 0.0),
+        "iterations": state.get("iteration_count", 0),
+    }

@@ -8,8 +8,6 @@ metadata:
 data:
   config.yaml: |
     receivers:
-      # Application telemetry via OTLP. Node-local kubelet metrics are
-      # collected by the otel-daemonset chart, not by this gateway.
       otlp:
         protocols:
           grpc:
@@ -20,10 +18,6 @@ data:
 
     processors:
       # MUST be first in every pipeline. Protects the process from OOM.
-      # limit_mib is 75% of the 1Gi container limit. spike_limit_mib is 25%
-      # of limit_mib. The OTel SDK documentation states: "The memory limiter
-      # is used to prevent out of memory situations on the collector. It is
-      # a good practice to configure it before any other processor."
       memory_limiter:
         check_interval: 2s
         limit_mib: 768
@@ -31,8 +25,6 @@ data:
 
       # Enriches application telemetry with Kubernetes metadata so that
       # traces and logs can be correlated by pod, namespace, and deployment.
-      # Component renamed from k8sattributes to k8s_attributes in v0.146.0.
-      # The deprecated alias remains available until the next major release.
       k8s_attributes:
         auth_type: serviceAccount
         passthrough: false
@@ -71,34 +63,53 @@ data:
           - sources:
               - from: connection
 
-      # Drops server-side health-check spans before they reach OpenObserve.
-      # The condition requires all three: server span kind, health-check path,
-      # and kube-probe user agent. Real user requests to the same paths are
-      # preserved because they do not carry the kube-probe user agent.
-      #
-      # The trace_conditions field is the current schema (v0.146.0+). The
-      # legacy traces.span field was removed.
+      # Drops server-side health-check spans BEFORE they reach OpenObserve.
+      # Matches purely on endpoint path — regardless of user agent. This
+      # prevents trace table pollution from kubelet probes, agent self-checks,
+      # test script curl calls, and Prometheus scrapes.
       filter/drop_health_checks:
         error_mode: ignore
         trace_conditions:
           - >-
             span.kind == SPAN_KIND_SERVER and
-            (span.attributes["url.path"] == "/healthz" or
+            (span.name == "/healthz" or
+             span.name == "/readyz" or
+             span.name == "/livez" or
+             span.name == "/health" or
+             span.name == "/ready" or
+             span.name == "GET /healthz" or
+             span.name == "GET /readyz" or
+             span.name == "GET /livez" or
+             span.name == "GET /health" or
+             span.name == "GET /ready" or
+             span.attributes["url.path"] == "/healthz" or
              span.attributes["url.path"] == "/readyz" or
              span.attributes["url.path"] == "/livez" or
              span.attributes["url.path"] == "/health" or
              span.attributes["url.path"] == "/ready" or
              span.attributes["http.route"] == "/healthz" or
              span.attributes["http.route"] == "/readyz" or
+             span.attributes["http.route"] == "/livez" or
              span.attributes["http.target"] == "/healthz" or
-             span.attributes["http.target"] == "/readyz") and
-            (IsMatch(span.attributes["user_agent.original"], "^kube-probe/") or
-             IsMatch(span.attributes["http.user_agent"], "^kube-probe/"))
+             span.attributes["http.target"] == "/readyz" or
+             span.attributes["http.target"] == "/livez")
+
+      # Drops LangGraph checkpoint INSERT/UPDATE/SELECT spans. These are
+      # internal bookkeeping operations that clutter the trace view with
+      # dozens of identical DB spans per investigation.
+      filter/drop_checkpointer_noise:
+        error_mode: ignore
+        trace_conditions:
+          - >-
+            span.kind == SPAN_KIND_CLIENT and
+            span.attributes["db.system"] == "postgresql" and
+            span.attributes["db.statement"] != nil and
+            (IsMatch(span.attributes["db.statement"], ".*checkpoints.*") or
+             IsMatch(span.attributes["db.statement"], ".*checkpoint_writes.*") or
+             IsMatch(span.attributes["db.statement"], ".*checkpoint_blobs.*"))
 
       # Defensive filter for application-emitted metrics that collide with
-      # namespaces OpenObserve cannot serialize. The filter processor matches
-      # on the normalized underscore form of the metric name and supports
-      # match_type: regexp, which matches the current schema.
+      # namespaces OpenObserve cannot serialize to Parquet.
       filter/drop_openobserve_incompatible:
         error_mode: ignore
         metrics:
@@ -128,13 +139,6 @@ data:
         timeout: 5s
 
     exporters:
-      # Single egress point for all three signals.
-      #
-      # The component otlp_http exporter (renamed from otlphttp in v0.144.0)
-      # appends the signal-specific path (/v1/traces, /v1/metrics, /v1/logs)
-      # to the base URL. This differs from the internal telemetry exporter,
-      # which forwards any path present in the URL as-is. The base URL is
-      # therefore correct here without a signal path.
       otlp_http/openobserve:
         endpoint: "{{ .Values.openobserve.endpoint }}"
         headers:
@@ -164,21 +168,12 @@ data:
         metrics:
           readers:
             - periodic:
-                # interval is an integer in milliseconds, not a duration string.
                 interval: 60000
                 exporter:
                   otlp:
                     protocol: http/protobuf
-                    # The internal telemetry exporter uses the OTel Go SDK's
-                    # OTLP HTTP exporter. Per the official docs: "any path in
-                    # the URL is forwarded to the exporter; if no path is
-                    # specified, the default signal-specific path is used."
-                    # OpenObserve's endpoint contains /api/default, so the
-                    # signal path must be appended explicitly. Without it,
-                    # requests hit /api/default and return 404.
                     endpoint: "{{ .Values.openobserve.endpoint }}/v1/metrics"
                     headers:
-                      # Internal telemetry headers are a list of name/value pairs.
                       - name: "Authorization"
                         value: "Basic ${env:OPENOBSERVE_TOKEN}"
 
@@ -189,6 +184,7 @@ data:
             - memory_limiter
             - k8s_attributes
             - filter/drop_health_checks
+            - filter/drop_checkpointer_noise
             - resource/add_cluster
             - batch
           exporters: [otlp_http/openobserve]

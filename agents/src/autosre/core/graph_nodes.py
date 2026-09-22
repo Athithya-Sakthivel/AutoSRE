@@ -1,14 +1,10 @@
-"""Graph node functions and routing functions.
-
-Each node takes ``(state, config)`` per the LangGraph 1.2.11 contract.
-Dependencies are extracted from ``config["configurable"]`` via the
-``GraphContext`` dataclass defined in ``graph_helpers``.
-"""
+"""Graph node functions and routing functions."""
 
 from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
@@ -16,6 +12,7 @@ from uuid import uuid4
 
 from langchain_core.runnables import RunnableConfig
 
+from autosre.core.cost import calculate_cost
 from autosre.core.graph_helpers import (
     MAX_ITERATIONS,
     PHASE_APPROVE,
@@ -51,14 +48,15 @@ from autosre.safety.executor import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
+MAX_CONSECUTIVE_TOOL_FAILURES = 3
+MAX_REMEDIATION_ATTEMPTS = 3
+
 
 def _utc_now() -> str:
-    """Return the current UTC time as an ISO 8601 string."""
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _get_sre_context(config: RunnableConfig) -> SREContext:
-    """Extract SREContext from config, raising if missing."""
     sre_context = config.get("configurable", {}).get("sre_context")
     if sre_context is None:
         raise ValueError("SREContext must be provided in config['configurable']['sre_context']")
@@ -67,16 +65,10 @@ def _get_sre_context(config: RunnableConfig) -> SREContext:
     return sre_context
 
 
-# ---------------------------------------------------------------------------
-# Nodes
-# ---------------------------------------------------------------------------
-
-
 async def triage_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-    """Analyze the alert and initialize root-cause hypotheses."""
     ctx = get_graph_context(config)
+    sre_context = _get_sre_context(config)
     metadata = state["incident_metadata"]
-
     logger.info("Triage node: analyzing alert %s", metadata["alert_name"])
 
     prompt = f"""You are an SRE investigation coordinator.
@@ -88,23 +80,19 @@ Alert:
 - Severity: {metadata["severity"]}
 - Started: {metadata["started_at"]}
 
-Available investigation tools are supplied by the tool registry at runtime.
-
-Return JSON only with this exact structure:
+Return JSON only:
 {{
   "hypotheses": [
-    {{
-      "id": "H1",
-      "description": "...",
-      "confidence": 0.0,
-      "evidence": []
-    }}
+    {{"id": "H1", "description": "...", "confidence": 0.0, "evidence": []}}
   ]
 }}
 
-Provide 2-3 plausible root-cause hypotheses.
-Confidence must be between 0 and 1.
+Provide 2-3 plausible root-cause hypotheses. Confidence between 0.0 and 1.0.
+Start with low confidence (0.2-0.4) since no evidence has been gathered yet.
 """
+    call_cost = 0.0
+    total_tokens = 0
+    hypotheses: list[Hypothesis] = []
 
     try:
         response = await maybe_await(
@@ -114,18 +102,21 @@ Confidence must be between 0 and 1.
                 temperature=0.3,
             )
         )
+        actual_model = getattr(response, "model", "unknown")
+        prompt_tokens, completion_tokens, call_cost = calculate_cost(
+            getattr(response, "usage", None),
+            actual_model,
+            sre_context.llm_config,
+        )
+        total_tokens = prompt_tokens + completion_tokens
         payload = parse_json_response(response, stage="triage")
         hypotheses = normalize_hypotheses(payload.get("hypotheses"), default_status="proposed")
-    except (AttributeError, TypeError, ValueError) as exc:
-        logger.warning("Triage response could not be parsed: %s", exc)
+    except Exception as exc:
+        logger.warning("Triage LLM call failed, using fallback: %s", exc)
         hypotheses = [
             Hypothesis(
                 id="H1",
-                description=(
-                    f"Investigate the root cause of alert "
-                    f"{metadata['alert_name']} for service "
-                    f"{metadata['service']}"
-                ),
+                description=f"Investigate {metadata['alert_name']} on {metadata['service']}",
                 confidence=0.2,
                 evidence=[f"Alert: {metadata['alert_name']}"],
                 status="proposed",
@@ -136,28 +127,50 @@ Confidence must be between 0 and 1.
         "hypotheses": hypotheses,
         "current_phase": PHASE_INVESTIGATE,
         "iteration_count": state.get("iteration_count", 0),
+        "tokens_used": state.get("tokens_used", 0) + total_tokens,
+        "cost_usd": round(state.get("cost_usd", 0.0) + call_cost, 6),
+        "consecutive_tool_failures": state.get("consecutive_tool_failures", 0),
     }
 
 
 async def investigate_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-    """Choose and execute one read-only investigation tool."""
     ctx = get_graph_context(config)
+    sre_context = _get_sre_context(config)
     iteration = state.get("iteration_count", 0) + 1
+    consecutive_failures = state.get("consecutive_tool_failures", 0)
+    metadata = state["incident_metadata"]
 
-    logger.info("Investigate node: iteration %d", iteration)
+    logger.info("Investigate node: iteration %d, failures %d", iteration, consecutive_failures)
 
     if iteration > MAX_ITERATIONS:
         return {
             "current_phase": PHASE_HYPOTHESIZE,
             "iteration_count": iteration,
+            "consecutive_tool_failures": 0,
+            "hypotheses": state.get("hypotheses", []),
+            "tokens_used": state.get("tokens_used", 0),
+            "cost_usd": state.get("cost_usd", 0.0),
+        }
+
+    if consecutive_failures >= MAX_CONSECUTIVE_TOOL_FAILURES:
+        return {
+            "current_phase": PHASE_HYPOTHESIZE,
+            "iteration_count": iteration,
+            "consecutive_tool_failures": 0,
+            "hypotheses": state.get("hypotheses", []),
+            "tokens_used": state.get("tokens_used", 0),
+            "cost_usd": state.get("cost_usd", 0.0),
         }
 
     hypotheses = state.get("hypotheses", [])
     if not hypotheses:
-        logger.warning("No hypotheses are available for investigation")
         return {
             "current_phase": PHASE_COMPLETE,
             "iteration_count": iteration,
+            "consecutive_tool_failures": 0,
+            "hypotheses": [],
+            "tokens_used": state.get("tokens_used", 0),
+            "cost_usd": state.get("cost_usd", 0.0),
         }
 
     try:
@@ -167,54 +180,62 @@ async def investigate_node(state: AgentState, config: RunnableConfig) -> dict[st
         return {
             "current_phase": PHASE_HYPOTHESIZE,
             "iteration_count": iteration,
+            "consecutive_tool_failures": consecutive_failures + 1,
+            "hypotheses": hypotheses,
+            "tokens_used": state.get("tokens_used", 0),
+            "cost_usd": state.get("cost_usd", 0.0),
         }
 
     investigation_specs = [
         spec
         for spec in specs
-        if (
-            spec.get("risk_tier") == 0
-            or (spec.get("risk_tier") is None and spec.get("name") in READ_ONLY_TOOL_NAMES)
-        )
+        if spec.get("risk_tier") == 0
+        or (spec.get("risk_tier") is None and spec.get("name") in READ_ONLY_TOOL_NAMES)
     ]
 
     if not investigation_specs:
-        logger.warning("No read-only investigation tools are available")
         return {
             "current_phase": PHASE_HYPOTHESIZE,
             "iteration_count": iteration,
+            "consecutive_tool_failures": 0,
+            "hypotheses": hypotheses,
+            "tokens_used": state.get("tokens_used", 0),
+            "cost_usd": state.get("cost_usd", 0.0),
         }
 
     hypothesis_text = "\n".join(
         f"- {h['id']}: {h['description']} (confidence={h['confidence']})" for h in hypotheses
     )
-
-    tool_text = "\n".join(
-        f"- {spec['name']}: {spec['description']}" for spec in investigation_specs
+    tools_text = "\n\n".join(
+        f"Tool: {s['name']}\nDescription: {s.get('description', '')}\n"
+        f"Schema: {json.dumps(s.get('input_schema', {}), indent=2)}"
+        for s in investigation_specs
     )
 
-    prompt = f"""You are investigating an active SRE incident.
+    prompt = f"""You are investigating an SRE incident.
+Service: {metadata["service"]}, Namespace: {metadata["namespace"]}, Alert: {metadata["alert_name"]}
 
 Hypotheses:
 {hypothesis_text}
 
-Available read-only investigation tools:
-{tool_text}
+Available read-only tools:
 
-Select exactly one read-only tool call that gathers evidence.
-Do not propose remediation.
+{tools_text}
+
+Select ONE tool. Use the EXACT field names from the schema above.
 
 Return JSON only:
 {{
-  "tool_name": "...",
-  "tool_args": {{}},
-  "rationale": "..."
+  "tool_name": "<exact tool name>",
+  "tool_args": {{<exact fields from schema, all REQUIRED fields>}},
+  "rationale": "Why this tool helps"
 }}
 """
-
     selected_name: str | None = None
     tool_args: dict[str, Any] = {}
     rationale = "No rationale supplied"
+    call_cost = 0.0
+    total_tokens = 0
 
     try:
         response = await maybe_await(
@@ -224,36 +245,38 @@ Return JSON only:
                 temperature=0.2,
             )
         )
+        actual_model = getattr(response, "model", "unknown")
+        prompt_tokens, completion_tokens, call_cost = calculate_cost(
+            getattr(response, "usage", None),
+            actual_model,
+            sre_context.llm_config,
+        )
+        total_tokens = prompt_tokens + completion_tokens
         payload = parse_json_response(response, stage="investigation")
-
         raw_name = payload.get("tool_name")
         raw_args = payload.get("tool_args", {})
-
         if raw_name is not None:
             selected_name = str(raw_name).strip() or None
-
         if not isinstance(raw_args, Mapping):
             raise ValueError("tool_args must be an object")
-
         tool_args = dict(raw_args)
         rationale = str(payload.get("rationale", rationale)).strip() or rationale
-
-    except (AttributeError, TypeError, ValueError) as exc:
+    except Exception as exc:
         logger.warning("Investigation tool selection failed: %s", exc)
 
     selected_spec = find_tool(investigation_specs, selected_name) if selected_name else None
 
     if selected_spec is None:
-        logger.warning("No valid read-only investigation tool was selected")
         return {
             "current_phase": PHASE_HYPOTHESIZE,
             "iteration_count": iteration,
+            "consecutive_tool_failures": consecutive_failures + 1,
+            "hypotheses": hypotheses,
+            "tokens_used": state.get("tokens_used", 0) + total_tokens,
+            "cost_usd": round(state.get("cost_usd", 0.0) + call_cost, 6),
         }
 
-    # Narrow selected_name from str | None to str (guarded by find_tool above)
-    assert selected_name is not None, (
-        "selected_name must be non-None when selected_spec is not None"
-    )
+    assert selected_name is not None
 
     investigation_action: ProposedAction = ProposedAction(
         tool_name=selected_name,
@@ -263,31 +286,28 @@ Return JSON only:
         requires_approval=False,
     )
 
-    sre_context = _get_sre_context(config)
-
     evidence_line = ""
+    tool_succeeded = False
     try:
         exec_result: ExecutionResult = await ctx.executor.execute(investigation_action, sre_context)
         success = exec_result.executed and exec_result.error is None
         verified = exec_result.verified
         result_payload: dict[str, Any] = exec_result.output or {}
-
+        tool_succeeded = success
         evidence_line = (
-            f"Tool {selected_name} returned "
-            f"success={success}, verified={verified}: "
-            f"{safe_json(result_payload)}"
+            f"Tool {selected_name}({json.dumps(tool_args)}) returned "
+            f"success={success}, verified={verified}: {safe_json(result_payload)}"
         )
     except Exception as exc:
         logger.exception("Investigation tool execution failed")
-        evidence_line = f"Tool {selected_name} execution failed: {type(exc).__name__}: {exc}"
+        evidence_line = f"Tool {selected_name} failed: {type(exc).__name__}: {exc}"
+
+    new_consecutive_failures = 0 if tool_succeeded else consecutive_failures + 1
 
     updated_hypotheses: list[Hypothesis] = []
     for h in hypotheses:
         updated_h = dict(h)
-        evidence_list_raw = updated_h.get("evidence", [])
-        evidence_list: list[str] = (
-            list(cast(list[str], evidence_list_raw)) if isinstance(evidence_list_raw, list) else []
-        )
+        evidence_list = list(h.get("evidence", []))
         evidence_list.append(evidence_line)
         updated_h["evidence"] = evidence_list[-20:]
         updated_hypotheses.append(cast(Hypothesis, updated_h))
@@ -296,45 +316,53 @@ Return JSON only:
         "hypotheses": updated_hypotheses,
         "current_phase": PHASE_HYPOTHESIZE,
         "iteration_count": iteration,
+        "tokens_used": state.get("tokens_used", 0) + total_tokens,
+        "cost_usd": round(state.get("cost_usd", 0.0) + call_cost, 6),
+        "consecutive_tool_failures": new_consecutive_failures,
     }
 
 
 async def hypothesize_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-    """Refine hypotheses using evidence gathered during investigation."""
     ctx = get_graph_context(config)
+    sre_context = _get_sre_context(config)
     hypotheses = state.get("hypotheses", [])
+    iteration = state.get("iteration_count", 0) + 1
 
-    logger.info("Hypothesize node: %d hypothesis(es)", len(hypotheses))
+    logger.info("Hypothesize node: %d hypotheses, iteration %d", len(hypotheses), iteration)
 
     if not hypotheses:
-        return {"current_phase": PHASE_COMPLETE}
+        return {
+            "current_phase": PHASE_COMPLETE,
+            "iteration_count": iteration,
+            "consecutive_tool_failures": 0,
+        }
 
-    if is_high_confidence(hypotheses) or state.get("iteration_count", 0) >= MAX_ITERATIONS:
-        return {"current_phase": PHASE_PROPOSE}
+    if is_high_confidence(hypotheses) or iteration >= MAX_ITERATIONS:
+        return {
+            "current_phase": PHASE_PROPOSE,
+            "iteration_count": iteration,
+            "hypotheses": hypotheses,
+            "consecutive_tool_failures": state.get("consecutive_tool_failures", 0),
+            "tokens_used": state.get("tokens_used", 0),
+            "cost_usd": state.get("cost_usd", 0.0),
+        }
 
-    prompt = f"""You are refining an SRE root-cause analysis.
+    prompt = f"""Refine these SRE hypotheses using only collected evidence. Do not invent evidence.
 
-Current hypotheses:
 {json.dumps(hypotheses, default=str)}
-
-Update confidence using only the evidence already collected.
-Do not invent evidence.
 
 Return JSON only:
 {{
   "hypotheses": [
-    {{
-      "id": "H1",
-      "description": "...",
-      "confidence": 0.0,
-      "evidence": [],
-      "status": "proposed"
-    }}
+    {{"id": "H1", "description": "...", "confidence": 0.0, "evidence": [], "status": "proposed"}}
   ]
 }}
 
-A confidence of 0.8 or higher is sufficient to propose remediation.
+Confidence >= 0.8 is sufficient to propose remediation.
 """
+    call_cost = 0.0
+    total_tokens = 0
+    refined = hypotheses
 
     try:
         response = await maybe_await(
@@ -344,26 +372,39 @@ A confidence of 0.8 or higher is sufficient to propose remediation.
                 temperature=0.1,
             )
         )
+        actual_model = getattr(response, "model", "unknown")
+        prompt_tokens, completion_tokens, call_cost = calculate_cost(
+            getattr(response, "usage", None),
+            actual_model,
+            sre_context.llm_config,
+        )
+        total_tokens = prompt_tokens + completion_tokens
         payload = parse_json_response(response, stage="hypothesis refinement")
         refined = normalize_hypotheses(payload.get("hypotheses"), default_status="proposed")
-    except (AttributeError, TypeError, ValueError) as exc:
-        logger.warning("Hypothesis refinement failed; retaining current state: %s", exc)
+    except Exception as exc:
+        logger.warning("Hypothesis refinement failed: %s", exc)
         refined = [cast(Hypothesis, dict(h)) for h in hypotheses]
 
     return {
         "hypotheses": refined,
-        "current_phase": (PHASE_PROPOSE if is_high_confidence(refined) else PHASE_INVESTIGATE),
+        "current_phase": PHASE_PROPOSE if is_high_confidence(refined) else PHASE_INVESTIGATE,
+        "iteration_count": iteration,
+        "tokens_used": state.get("tokens_used", 0) + total_tokens,
+        "cost_usd": round(state.get("cost_usd", 0.0) + call_cost, 6),
+        "consecutive_tool_failures": state.get("consecutive_tool_failures", 0),
     }
 
 
 async def propose_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-    """Create a registry-validated remediation proposal."""
+    """Create a remediation proposal. Includes full tool schemas AND validation
+    error feedback from previous failed attempts so the LLM doesn't repeat mistakes."""
     ctx = get_graph_context(config)
+    sre_context = _get_sre_context(config)
     existing_actions = state.get("proposed_actions", [])
+    metadata = state["incident_metadata"]
 
     top = top_hypothesis(state.get("hypotheses", []))
     if top is None:
-        logger.error("Cannot propose remediation without a hypothesis")
         return {"current_phase": PHASE_COMPLETE}
 
     try:
@@ -372,39 +413,69 @@ async def propose_node(state: AgentState, config: RunnableConfig) -> dict[str, A
         logger.exception("Unable to enumerate remediation tools")
         return {"current_phase": PHASE_COMPLETE}
 
-    available_actions = [spec for spec in specs if spec.get("name") in REMEDIATION_RISK_TIERS]
-
+    available_actions = [s for s in specs if s.get("name") in REMEDIATION_RISK_TIERS]
     if not available_actions:
-        logger.error("No supported remediation tools are present in the registry")
         return {"current_phase": PHASE_COMPLETE}
 
-    action_text = "\n".join(
-        f"- {spec['name']}: registry_risk_tier={spec['risk_tier']}" for spec in available_actions
+    tools_text = "\n\n".join(
+        f"Tool: {s['name']}\nDescription: {s.get('description', '')}\n"
+        f"Schema: {json.dumps(s.get('input_schema', {}), indent=2)}"
+        for s in available_actions
     )
+
+    previous_tools = [a.get("tool_name") for a in existing_actions]
+    previous_note = ""
+    if previous_tools:
+        previous_note = f"\nPreviously attempted tools (DO NOT repeat identical calls): {', '.join(previous_tools)}"
+
+    # CRITICAL FIX: Feed back validation errors from failed executions
+    error_feedback = ""
+    executed = state.get("executed_actions", [])
+    failed_actions = [a for a in executed if not a.get("success")]
+    if failed_actions:
+        last_failed = failed_actions[-1]
+        result = last_failed.get("result", {})
+        error_msg = result.get("error", "") if isinstance(result, dict) else str(result)
+        if error_msg:
+            # Truncate to avoid massive prompts
+            error_msg_truncated = error_msg[:1000]
+            error_feedback = (
+                f"\n\n### PREVIOUS EXECUTION FAILED ###\n"
+                f"Tool: {last_failed.get('tool_name')}\n"
+                f"Args: {json.dumps(last_failed.get('tool_args', {}))}\n"
+                f"Error:\n{error_msg_truncated}\n"
+                f"### FIX THE tool_args TO MATCH THE SCHEMA EXACTLY. "
+                f"Do NOT repeat the same invalid field names. ###\n"
+            )
 
     prompt = f"""You are proposing SRE remediation.
 
-Root-cause hypothesis:
-{top["description"]}
+Incident context:
+- Service: {metadata["service"]}
+- Namespace: {metadata["namespace"]}
 
+Root cause: {top["description"]}
 Confidence: {top["confidence"]}
+Evidence: {json.dumps(top.get("evidence", []), default=str)}
+{previous_note}
+{error_feedback}
 
-Evidence:
-{json.dumps(top.get("evidence", []), default=str)}
+Available remediation tools:
 
-Supported remediation tools:
-{action_text}
+{tools_text}
 
 Return JSON only:
 {{
-  "tool_name": "...",
-  "tool_args": {{}},
-  "risk_tier": 1,
-  "rationale": "..."
+  "tool_name": "<exact tool name>",
+  "tool_args": {{<exact fields from tool schema, ALL REQUIRED fields included>}},
+  "risk_tier": <integer from schema>,
+  "rationale": "Why this fixes the root cause"
 }}
 
-Never claim a lower risk tier than the registry or policy baseline.
+CRITICAL: Use EXACT field names from the schema. The namespace is "{metadata["namespace"]}" and service is "{metadata["service"]}".
 """
+    call_cost = 0.0
+    total_tokens = 0
 
     try:
         response = await maybe_await(
@@ -414,41 +485,52 @@ Never claim a lower risk tier than the registry or policy baseline.
                 temperature=0.2,
             )
         )
+        actual_model = getattr(response, "model", "unknown")
+        prompt_tokens, completion_tokens, call_cost = calculate_cost(
+            getattr(response, "usage", None),
+            actual_model,
+            sre_context.llm_config,
+        )
+        total_tokens = prompt_tokens + completion_tokens
         payload = parse_json_response(response, stage="proposal")
-
         tool_name_raw = str(payload.get("tool_name", "")).strip()
         raw_args = payload.get("tool_args", {})
-
         if not tool_name_raw or not isinstance(raw_args, Mapping):
             raise ValueError("proposal must contain tool_name and object tool_args")
-
         spec = find_tool(available_actions, tool_name_raw)
         if spec is None:
             raise ValueError(f"unsupported remediation tool: {tool_name_raw}")
-
         model_tier_raw = payload.get("risk_tier", 1)
         if isinstance(model_tier_raw, bool):
             raise ValueError("risk_tier must be an integer")
         model_tier = int(model_tier_raw)
         if model_tier < 0:
             raise ValueError("risk_tier cannot be negative")
-
         baseline_tier = REMEDIATION_RISK_TIERS[tool_name_raw]
         registry_tier = spec.get("risk_tier")
-
         effective_tier = max(
             baseline_tier,
             model_tier,
             int(registry_tier) if registry_tier is not None else 0,
         )
-
         rationale = str(payload.get("rationale", "")).strip()
         if not rationale:
             raise ValueError("proposal rationale is required")
-
-    except (AttributeError, TypeError, ValueError) as exc:
-        logger.error("Invalid remediation proposal: %s", exc)
-        return {"current_phase": PHASE_COMPLETE}
+    except Exception as exc:
+        logger.error("Proposal generation failed: %s", exc)
+        if state.get("iteration_count", 0) >= MAX_ITERATIONS:
+            return {
+                "current_phase": PHASE_COMPLETE,
+                "tokens_used": state.get("tokens_used", 0) + total_tokens,
+                "cost_usd": round(state.get("cost_usd", 0.0) + call_cost, 6),
+            }
+        return {
+            "current_phase": PHASE_HYPOTHESIZE,
+            "iteration_count": state.get("iteration_count", 0) + 1,
+            "tokens_used": state.get("tokens_used", 0) + total_tokens,
+            "cost_usd": round(state.get("cost_usd", 0.0) + call_cost, 6),
+            "consecutive_tool_failures": state.get("consecutive_tool_failures", 0),
+        }
 
     proposed_action: ProposedAction = ProposedAction(
         tool_name=tool_name_raw,
@@ -457,67 +539,49 @@ Never claim a lower risk tier than the registry or policy baseline.
         rationale=rationale,
         requires_approval=effective_tier >= 2,
     )
-
     return {
         "proposed_actions": list(existing_actions) + [proposed_action],
-        "current_phase": (PHASE_APPROVE if effective_tier >= 2 else PHASE_EXECUTE),
+        "current_phase": PHASE_APPROVE if effective_tier >= 2 else PHASE_EXECUTE,
         "requires_human_approval": effective_tier >= 2,
         "approval_granted": None,
+        "tokens_used": state.get("tokens_used", 0) + total_tokens,
+        "cost_usd": round(state.get("cost_usd", 0.0) + call_cost, 6),
     }
 
 
 async def approve_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-    """Pause for human approval of a Tier-2+ action.
-
-    Uses langgraph.types.interrupt() to pause the graph. When resumed,
-    this node re-executes and interrupt() returns the resume value.
-    """
     from langgraph.types import interrupt
 
-    del config  # not used in this node
-
+    del config
     proposed_actions = state.get("proposed_actions", [])
-
     if not proposed_actions:
-        logger.error("Approval requested with no proposed action")
         return {
             "current_phase": PHASE_COMPLETE,
             "requires_human_approval": False,
             "approval_granted": False,
         }
-
     action = proposed_actions[-1]
     risk_tier = int(action.get("risk_tier", 1))
-
     if risk_tier < 2:
         return {
             "current_phase": PHASE_EXECUTE,
             "requires_human_approval": False,
             "approval_granted": True,
         }
-
     response = interrupt(
         {
             "type": "approval_request",
             "action": dict(action),
-            "message": (
-                "Human approval is required before executing this "
-                f"Tier-{risk_tier} action. "
-                f"Rationale: {action.get('rationale', '')}"
-            ),
+            "message": f"Human approval required for Tier-{risk_tier} action. Rationale: {action.get('rationale', '')}",
         }
     )
-
     approved = approval_value_to_bool(response)
-
     if not approved:
-        logger.info("Human rejected action %s", action.get("tool_name"))
         return {
             "current_phase": PHASE_COMPLETE,
             "requires_human_approval": False,
             "approval_granted": False,
         }
-
     return {
         "current_phase": PHASE_EXECUTE,
         "requires_human_approval": False,
@@ -526,26 +590,20 @@ async def approve_node(state: AgentState, config: RunnableConfig) -> dict[str, A
 
 
 async def execute_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-    """Execute the latest proposal through SafeExecutor."""
     ctx = get_graph_context(config)
     proposed_actions = state.get("proposed_actions", [])
-
     if not proposed_actions:
-        logger.error("Execute node entered without a proposed action")
         return {"current_phase": PHASE_COMPLETE}
-
     action = proposed_actions[-1]
-    logger.info("Executing action %s", action.get("tool_name"))
-
+    logger.info(
+        "Executing action %s(%s)", action.get("tool_name"), json.dumps(action.get("tool_args", {}))
+    )
     sre_context = _get_sre_context(config)
-
     try:
         exec_result: ExecutionResult = await ctx.executor.execute(action, sre_context)
-
         success = exec_result.executed and exec_result.error is None
         verified = exec_result.verified
         result_payload: dict[str, Any] = exec_result.output or {}
-
     except Exception as exc:
         logger.exception("SafeExecutor failed")
         success = False
@@ -555,7 +613,6 @@ async def execute_node(state: AgentState, config: RunnableConfig) -> dict[str, A
             "verified": False,
             "error": f"{type(exc).__name__}: {exc}",
         }
-
     executed_action: ExecutedAction = ExecutedAction(
         tool_name=action.get("tool_name", ""),
         tool_args=dict(action.get("tool_args", {})),
@@ -565,7 +622,6 @@ async def execute_node(state: AgentState, config: RunnableConfig) -> dict[str, A
         executed_at=_utc_now(),
         verification_passed=verified,
     )
-
     return {
         "executed_actions": list(state.get("executed_actions", [])) + [executed_action],
         "current_phase": PHASE_VERIFY,
@@ -573,36 +629,49 @@ async def execute_node(state: AgentState, config: RunnableConfig) -> dict[str, A
 
 
 async def verify_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-    """Verify the SafeExecutor result and choose completion or investigation."""
-    del config  # not used in this node
-
+    """Verify remediation result. Routes back to PROPOSE on failure for retry,
+    or COMPLETE if MAX_REMEDIATION_ATTEMPTS reached."""
+    del config
     executed_actions = state.get("executed_actions", [])
-
     if not executed_actions:
         return {"current_phase": PHASE_COMPLETE}
-
-    last_action = executed_actions[-1]
-    success = bool(last_action.get("success", False))
-    verification_passed = bool(last_action.get("verification_passed", False))
-
-    if success and verification_passed:
+    last = executed_actions[-1]
+    success = bool(last.get("success", False))
+    verified = bool(last.get("verification_passed", False))
+    if success and verified:
         logger.info("Action verified successfully")
         return {"current_phase": PHASE_COMPLETE}
-
-    logger.warning("Action was not verified; returning to investigation")
-    return {"current_phase": PHASE_INVESTIGATE}
+    if len(executed_actions) >= MAX_REMEDIATION_ATTEMPTS:
+        logger.warning(
+            "MAX_REMEDIATION_ATTEMPTS (%d) reached, completing without resolution",
+            MAX_REMEDIATION_ATTEMPTS,
+        )
+        return {"current_phase": PHASE_COMPLETE}
+    logger.warning(
+        "Action not verified (attempt %d/%d); re-proposing",
+        len(executed_actions),
+        MAX_REMEDIATION_ATTEMPTS,
+    )
+    return {
+        "current_phase": PHASE_PROPOSE,
+        "iteration_count": state.get("iteration_count", 0) + 1,
+        "consecutive_tool_failures": state.get("consecutive_tool_failures", 0),
+    }
 
 
 async def complete_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-    """Finalize the investigation state."""
-    del config  # not used in this node
-
+    del config
+    started_at = state.get("started_at")
+    wall_clock = time.monotonic() - started_at if started_at is not None else 0.0
     logger.info(
-        "Investigation complete: %d proposed, %d executed action(s)",
+        "Investigation complete: %d proposed, %d executed, %d tokens, $%.4f, %.2fs",
         len(state.get("proposed_actions", [])),
         len(state.get("executed_actions", [])),
+        state.get("tokens_used", 0),
+        state.get("cost_usd", 0.0),
+        wall_clock,
     )
-    return {"current_phase": PHASE_COMPLETE}
+    return {"current_phase": PHASE_COMPLETE, "wall_clock_seconds": round(wall_clock, 2)}
 
 
 # ---------------------------------------------------------------------------
@@ -610,29 +679,16 @@ async def complete_node(state: AgentState, config: RunnableConfig) -> dict[str, 
 # ---------------------------------------------------------------------------
 
 PhaseLiteral = Literal[
-    "triage",
-    "investigate",
-    "hypothesize",
-    "propose",
-    "approve",
-    "execute",
-    "verify",
-    "complete",
+    "triage", "investigate", "hypothesize", "propose", "approve", "execute", "verify", "complete"
 ]
 
 
 def route_initial_phase(state: AgentState) -> PhaseLiteral:
-    """Route a supplied state to its current phase."""
     phase = state.get("current_phase", PHASE_TRIAGE)
-    if phase in PHASES:
-        return cast(PhaseLiteral, phase)
-    return cast(PhaseLiteral, PHASE_TRIAGE)
+    return cast(PhaseLiteral, phase) if phase in PHASES else cast(PhaseLiteral, PHASE_TRIAGE)
 
 
-def route_after_hypothesize(
-    state: AgentState,
-) -> Literal["investigate", "propose", "complete"]:
-    """Route after hypothesis refinement."""
+def route_after_hypothesize(state: AgentState) -> Literal["investigate", "propose", "complete"]:
     hypotheses = state.get("hypotheses", [])
     if not hypotheses:
         return "complete"
@@ -641,28 +697,26 @@ def route_after_hypothesize(
     return "investigate"
 
 
-def route_after_propose(
-    state: AgentState,
-) -> Literal["approve", "execute", "complete"]:
-    """Route based on the effective action risk tier."""
+def route_after_propose(state: AgentState) -> Literal["approve", "execute", "complete"]:
     actions = state.get("proposed_actions", [])
     if not actions:
         return "complete"
     return "approve" if int(actions[-1].get("risk_tier", 1)) >= 2 else "execute"
 
 
-def route_after_approval(
-    state: AgentState,
-) -> Literal["execute", "complete"]:
-    """Route after the human approval decision."""
+def route_after_approval(state: AgentState) -> Literal["execute", "complete"]:
     return "execute" if state.get("approval_granted") is True else "complete"
 
 
-def route_after_verify(
-    state: AgentState,
-) -> Literal["complete", "investigate"]:
-    """Route after execution verification."""
+def route_after_verify(state: AgentState) -> Literal["complete", "propose"]:
+    """CRITICAL: Must respect MAX_REMEDIATION_ATTEMPTS to prevent infinite loops."""
     actions = state.get("executed_actions", [])
-    if actions and actions[-1].get("success") and actions[-1].get("verification_passed"):
+    if not actions:
         return "complete"
-    return "investigate"
+    last = actions[-1]
+    if last.get("success") and last.get("verification_passed"):
+        return "complete"
+    # Hard cap: stop retrying after MAX_REMEDIATION_ATTEMPTS failures
+    if len(actions) >= MAX_REMEDIATION_ATTEMPTS:
+        return "complete"
+    return "propose"

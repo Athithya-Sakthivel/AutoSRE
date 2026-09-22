@@ -309,7 +309,7 @@ def tool_declared_risk_tier(tool: Any) -> int | None:
 async def list_tool_specs(
     registry: ToolRegistry,
 ) -> list[dict[str, Any]]:
-    """Return normalized JSON-safe tool metadata."""
+    """Return normalized JSON-safe tool metadata including input schema."""
     raw_tools = await maybe_await(registry.list_tools())
     if raw_tools is None:
         return []
@@ -319,11 +319,24 @@ async def list_tool_specs(
         name = tool_name(t)
         if not name:
             continue
+
+        # Get the full input schema from the Pydantic model
+        input_schema: dict[str, Any] = {}
+        try:
+            if hasattr(t, "to_openai_schema"):
+                openai_schema = t.to_openai_schema()
+                input_schema = openai_schema.get("function", {}).get("parameters", {})
+            elif hasattr(t, "input_model") and hasattr(t.input_model, "model_json_schema"):
+                input_schema = t.input_model.model_json_schema()
+        except Exception:
+            pass
+
         specs.append(
             {
                 "name": name,
                 "description": tool_description(t),
                 "risk_tier": tool_declared_risk_tier(t),
+                "input_schema": input_schema,
             }
         )
     return specs
