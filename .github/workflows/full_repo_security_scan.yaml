@@ -19,7 +19,6 @@ defaults:
 env:
   TRIVY_VERSION: v0.74.0
   TRIVY_SEVERITY: CRITICAL
-  TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
 
   GITLEAKS_VERSION: v8.30.1
   GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
@@ -43,24 +42,25 @@ jobs:
           persist-credentials: false
 
       - name: Install Trivy
-        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        uses: aquasecurity/setup-trivy@e07451d2e059ed86c2870430ea286b3a9e0bf241 # v0.3.1
         with:
           version: ${{ env.TRIVY_VERSION }}
           cache: true
 
       - name: Prepare Trivy cache
-        id: trivy_cache_date
+        id: trivy_cache
         run: |
           set -euo pipefail
 
-          install -d -m 0700 "$TRIVY_CACHE_DIR"
-          echo "date=$(date -u +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+          install -d -m 0700 "$RUNNER_TEMP/trivy-cache"
+
+          echo "week=$(date -u +'%G-%V')" >> "$GITHUB_OUTPUT"
 
       - name: Cache Trivy databases
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ env.TRIVY_CACHE_DIR }}
-          key: trivy-db-${{ env.TRIVY_VERSION }}-${{ runner.os }}-${{ steps.trivy_cache_date.outputs.date }}
+          path: ${{ runner.temp }}/trivy-cache
+          key: trivy-db-${{ env.TRIVY_VERSION }}-${{ runner.os }}-${{ steps.trivy_cache.outputs.week }}
           restore-keys: |
             trivy-db-${{ env.TRIVY_VERSION }}-${{ runner.os }}-
 
@@ -91,10 +91,17 @@ jobs:
             "$url"
 
           echo "[INFO] Verifying OpenGrep SHA-256"
-          printf '%s  %s\n' "$OPENGREP_SHA256" "$binary" | sha256sum --check --status
+
+          printf '%s  %s\n' \
+            "$OPENGREP_SHA256" \
+            "$binary" \
+            | sha256sum --check --status
 
           install -d -m 0755 "$RUNNER_TEMP/security-tools"
-          install -m 0755 "$binary" "$RUNNER_TEMP/security-tools/opengrep"
+
+          install -m 0755 \
+            "$binary" \
+            "$RUNNER_TEMP/security-tools/opengrep"
 
           echo "$RUNNER_TEMP/security-tools" >> "$GITHUB_PATH"
 
@@ -105,6 +112,7 @@ jobs:
           set -euo pipefail
 
           version="${GITLEAKS_VERSION#v}"
+
           tmp_dir="$(mktemp -d)"
           trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -128,7 +136,11 @@ jobs:
             "$url"
 
           echo "[INFO] Verifying Gitleaks SHA-256"
-          printf '%s  %s\n' "$GITLEAKS_SHA256" "$archive" | sha256sum --check --status
+
+          printf '%s  %s\n' \
+            "$GITLEAKS_SHA256" \
+            "$archive" \
+            | sha256sum --check --status
 
           install -d -m 0755 "$RUNNER_TEMP/security-tools"
 
@@ -169,9 +181,8 @@ jobs:
             --config p/secrets
             --config p/kubernetes
             --error
+            --max-target-bytes 2000000
 
-            # Ignore repository-local generated/dependency/build material.
-            # Do not exclude infra/, source/, or application directories.
             --exclude .git
             --exclude .repos
             --exclude .venv
@@ -222,7 +233,7 @@ jobs:
           echo "============================================================"
 
           if ! trivy fs \
-            --cache-dir "$TRIVY_CACHE_DIR" \
+            --cache-dir "$RUNNER_TEMP/trivy-cache" \
             --ignorefile .trivyignore \
             --scanners vuln,misconfig \
             --severity "$TRIVY_SEVERITY" \
