@@ -1,6 +1,6 @@
 # Rivulet Platform
 
-Rivulet is a distributed order processing platform built to serve as the System Under Test (SUT) for the AutoSRE AI evaluation harness. It is not a demo application. Every architectural decision — from shared database connections to hidden chaos injection ports — exists to create realistic failure domains that test whether an autonomous SRE agent can diagnose and remediate production incidents without pattern-matching on telemetry labels.
+Rivulet is a distributed order processing platform built to serve as the `System Under Test (SUT) for the AutoSRE AI evaluation harness`. It is not a demo application. Every architectural decision — from shared database connections to hidden chaos injection ports — exists to create realistic failure domains that test whether an autonomous SRE agent can diagnose and remediate production incidents without pattern-matching on telemetry labels.
 
 The platform consists of three application services (Frontend, Java API Gateway, Go Ingestion Worker) and two shared infrastructure dependencies (PostgreSQL, Valkey). All five components run in a Kind cluster for local development and evaluation, and deploy to Azure AKS with zero application code changes.
 

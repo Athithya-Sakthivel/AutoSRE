@@ -9,7 +9,6 @@ data:
   config.yaml: |
     receivers:
       # Node-local kubelet metrics. Each DaemonSet pod scrapes its own node.
-      #
       # Receiver renamed from kubeletstats to kubelet_stats in v0.152.0.
       # The deprecated alias kubeletstats remains available but is not used.
       #
@@ -124,8 +123,6 @@ data:
         spike_limit_mib: 51
 
       # Drops metric families that OpenObserve cannot serialize to Parquet.
-      # The filter matches on the normalized underscore metric name and
-      # supports match_type: regexp per the current filter processor schema.
       filter/drop_openobserve_incompatible:
         error_mode: ignore
         metrics:

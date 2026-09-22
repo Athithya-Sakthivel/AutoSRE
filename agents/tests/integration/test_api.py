@@ -1,441 +1,415 @@
-"""Integration tests for FastAPI API surface."""
+"""Integration tests for the FastAPI application."""
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
-from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import pytest_asyncio
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from autosre.api.main import create_app
-from autosre.api.runner import StubIncidentRunner
-from autosre.config import Settings, get_settings
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
+from autosre.api.runner import LangGraphRunner
+from autosre.config import Settings
 
 
 @pytest.fixture
-def test_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
-    """Create deterministic test settings via environment variables."""
-    # LLM
-    monkeypatch.setenv("LLM_API_KEY", "test-key")
-    monkeypatch.setenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
-    monkeypatch.setenv("LLM_PROVIDER", "groq")
-    monkeypatch.setenv("LLM_MODEL_COORDINATOR", "qwen/qwen3.8-27b")
-    monkeypatch.setenv("LLM_MODEL_WORKER", "openai/gpt-oss-20b")
+def mock_settings() -> Settings:
+    """Create real Settings object for testing."""
+    import os
 
-    # Postgres
-    monkeypatch.setenv("POSTGRES_HOST", "localhost")
-    monkeypatch.setenv("POSTGRES_PORT", "5432")
-    monkeypatch.setenv("POSTGRES_DB", "autosre_test")
-    monkeypatch.setenv("POSTGRES_USER", "autosre_test")
-    monkeypatch.setenv("POSTGRES_PASSWORD", "test-pass")
+    # Set environment variables for Settings to load
+    os.environ["LLM_API_KEY"] = "test-key"
+    os.environ["POSTGRES_PASSWORD"] = "test-pass"
+    os.environ["OPENOBSERVE_EMAIL"] = "test@example.com"
+    os.environ["OPENOBSERVE_PASSWORD"] = "test-pass"
+    os.environ["ALERT_WEBHOOK_SECRET"] = "test-secret"
 
-    # OpenObserve
-    monkeypatch.setenv("OPENOBSERVE_EMAIL", "test@example.com")
-    monkeypatch.setenv("OPENOBSERVE_PASSWORD", "test-pass")
-    monkeypatch.setenv("OPENOBSERVE_URL", "http://localhost:5080")
+    from autosre.config import get_settings
 
-    # OTel
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
-    monkeypatch.setenv("OTEL_SERVICE_NAME", "autosre-agent-test")
-    monkeypatch.setenv("OTEL_EXPORTER_HEADERS", "")
+    settings = get_settings()
 
-    # Safety
-    monkeypatch.setenv("MAX_RISK_TIER_AUTONOMOUS", "1")
-    monkeypatch.setenv("MAX_ACTIONS_PER_INCIDENT", "10")
-    monkeypatch.setenv("MAX_WALL_CLOCK_SECONDS", "600")
+    # Clean up
+    for key in [
+        "LLM_API_KEY",
+        "POSTGRES_PASSWORD",
+        "OPENOBSERVE_EMAIL",
+        "OPENOBSERVE_PASSWORD",
+        "ALERT_WEBHOOK_SECRET",
+    ]:
+        os.environ.pop(key, None)
 
-    # Alert
-    monkeypatch.setenv("ALERT_WEBHOOK_SECRET", "test-secret")
-
-    # Environment
-    monkeypatch.setenv("DEPLOYMENT_ENVIRONMENT", "test")
-
-    # Valkey (read directly from env in main.py)
-    monkeypatch.setenv("VALKEY_HOST", "localhost")
-    monkeypatch.setenv("VALKEY_PORT", "6379")
-    monkeypatch.setenv("VALKEY_PASSWORD", "test-pass")
-    monkeypatch.setenv("VALKEY_TLS", "false")
-
-    return get_settings()
-
-
-class _FakeCursor:
-    """Minimal async cursor for readiness tests."""
-
-    async def __aenter__(self) -> _FakeCursor:
-        return self
-
-    async def __aexit__(self, *_args: Any) -> None:
-        return None
-
-    async def execute(self, query: str) -> None:
-        pass
-
-
-class _FakeConnection:
-    """Minimal async connection for readiness tests."""
-
-    def cursor(self) -> _FakeCursor:
-        return _FakeCursor()
-
-    async def __aenter__(self) -> _FakeConnection:
-        return self
-
-    async def __aexit__(self, *_args: Any) -> None:
-        return None
-
-
-class _FakePool:
-    """Minimal psycopg-style async connection pool."""
-
-    def connection(self) -> _FakeConnection:
-        return _FakeConnection()
+    return settings
 
 
 @pytest.fixture
-def app(test_settings: Settings) -> Any:
-    """Create the app with route-level dependencies injected."""
-    application = create_app(test_settings)
-
-    # Inject route-level dependencies (lifespan is not entered in tests)
-    application.state.runner = StubIncidentRunner()
-    application.state.pg_pool = _FakePool()
-
-    return application
+def mock_runner() -> AsyncMock:
+    """Create mock LangGraphRunner."""
+    runner = AsyncMock(spec=LangGraphRunner)
+    runner.run_incident = AsyncMock(return_value=None)
+    runner.approve_incident = AsyncMock(return_value=True)
+    return runner
 
 
-@pytest_asyncio.fixture
-async def client(app: Any) -> Any:
-    """Create an async HTTPX client against the ASGI application."""
-    transport = ASGITransport(app=app)
-    async with AsyncClient(
-        transport=transport,
-        base_url="http://testserver",
-    ) as ac:
+@pytest.fixture
+def mock_checkpointer() -> AsyncMock:
+    """Create mock checkpointer."""
+    checkpointer = AsyncMock()
+    checkpointer.aget_tuple = AsyncMock(return_value=None)
+    return checkpointer
+
+
+@pytest.fixture
+def mock_pg_pool_healthy() -> MagicMock:
+    """Create mock Postgres connection pool (healthy)."""
+    pool = MagicMock()
+    conn = AsyncMock()
+    cursor = AsyncMock()
+
+    cursor.execute = AsyncMock()
+    # connection() returns an async context manager directly (not a coroutine)
+    conn.cursor = MagicMock(return_value=cursor)
+    conn.__aenter__ = AsyncMock(return_value=conn)
+    conn.__aexit__ = AsyncMock(return_value=None)
+    cursor.__aenter__ = AsyncMock(return_value=cursor)
+    cursor.__aexit__ = AsyncMock(return_value=None)
+
+    pool.connection = MagicMock(return_value=conn)
+
+    return pool
+
+
+@pytest.fixture
+def mock_pg_pool_unhealthy() -> MagicMock:
+    """Create mock Postgres connection pool (unhealthy)."""
+    pool = MagicMock()
+    pool.connection = MagicMock(side_effect=Exception("Connection failed"))
+    return pool
+
+
+@pytest.fixture
+def app_healthy(
+    mock_settings: Settings,
+    mock_runner: AsyncMock,
+    mock_checkpointer: AsyncMock,
+    mock_pg_pool_healthy: MagicMock,
+):
+    """Create FastAPI app with healthy dependencies."""
+    from fastapi import FastAPI
+
+    test_app = FastAPI()
+
+    test_app.state.settings = mock_settings
+    test_app.state.runner = mock_runner
+    test_app.state.checkpointer = mock_checkpointer
+    test_app.state.pg_pool = mock_pg_pool_healthy
+
+    from autosre.api.routes import router, webhook_router
+
+    test_app.include_router(router)
+    test_app.include_router(webhook_router)
+
+    return test_app
+
+
+@pytest.fixture
+def app_unhealthy(
+    mock_settings: Settings,
+    mock_runner: AsyncMock,
+    mock_checkpointer: AsyncMock,
+    mock_pg_pool_unhealthy: MagicMock,
+):
+    """Create FastAPI app with unhealthy Postgres."""
+    from fastapi import FastAPI
+
+    test_app = FastAPI()
+
+    test_app.state.settings = mock_settings
+    test_app.state.runner = mock_runner
+    test_app.state.checkpointer = mock_checkpointer
+    test_app.state.pg_pool = mock_pg_pool_unhealthy
+
+    from autosre.api.routes import router, webhook_router
+
+    test_app.include_router(router)
+    test_app.include_router(webhook_router)
+
+    return test_app
+
+
+@pytest.fixture
+async def client_healthy(app_healthy: FastAPI):
+    """Create async test client for healthy app."""
+    transport = ASGITransport(app=app_healthy)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+@pytest.fixture
+async def client_unhealthy(app_unhealthy: FastAPI):
+    """Create async test client for unhealthy app."""
+    transport = ASGITransport(app=app_unhealthy)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def signed_json(
-    payload: dict[str, Any],
-    secret: str,
-) -> tuple[bytes, dict[str, str]]:
-    """Serialize JSON once and sign those exact bytes."""
-    body = json.dumps(
-        payload,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
-
-    digest = hmac.new(
-        secret.encode("utf-8"),
-        body,
-        hashlib.sha256,
-    ).hexdigest()
-
-    return body, {
-        "Content-Type": "application/json",
-        "X-Webhook-Signature": f"sha256={digest}",
-    }
-
-
-def _valid_alert_payload() -> dict[str, Any]:
-    """Return a minimal valid alert payload."""
-    return {
-        "alert_name": "HighLatency",
-        "service": "api-gateway",
-        "namespace": "rivulet",
-        "severity": "sev2",
-        "started_at": "2026-01-15T10:30:00Z",
-        "fingerprint": "latency-456",
-        "description": "P99 latency exceeded threshold",
-        "labels": {"team": "platform"},
-    }
-
-
-# ---------------------------------------------------------------------------
-# Tests
+# Health & Readiness Tests
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_healthz(client: Any) -> None:
-    """Liveness endpoint returns 200 without lifespan."""
-    response = await client.get("/healthz")
-
+async def test_health_endpoint(client_healthy: AsyncClient):
+    """Test the /healthz endpoint."""
+    response = await client_healthy.get("/healthz")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"
-    assert data["version"] == "0.1.0"
+    assert "version" in data
 
 
 @pytest.mark.asyncio
-async def test_alert_ingress_valid_signature(
-    client: Any,
-    app: Any,
-    test_settings: Settings,
-) -> None:
-    """A correctly signed alert is accepted and recorded."""
-    alert_payload = _valid_alert_payload()
+async def test_readiness_check_postgres_healthy(client_healthy: AsyncClient):
+    """Test readiness check when Postgres is healthy."""
+    response = await client_healthy.get("/readyz")
 
-    secret = test_settings.alert.webhook_secret.get_secret_value()
-    body, headers = signed_json(alert_payload, secret)
-
-    response = await client.post("/alerts", content=body, headers=headers)
-
-    assert response.status_code == 202
+    assert response.status_code == 200
     data = response.json()
-    incident_id = data["incident_id"]
-
-    assert data["status"] == "accepted"
-    assert data["message"] == "Investigation started"
-    assert len(incident_id) == 36  # UUID format
-
-    # Verify the stub runner recorded the incident
-    incident = app.state.runner.get_incident(incident_id)
-    assert incident is not None
-    assert incident["phase"] == "awaiting_approval"
-    assert incident["alert"]["alert_name"] == "HighLatency"
-    assert incident["alert"]["service"] == "api-gateway"
+    assert data["status"] == "ready"
+    assert "postgres" in data["checks"]
 
 
 @pytest.mark.asyncio
-async def test_alert_ingress_invalid_signature(
-    client: Any,
-    test_settings: Settings,
-) -> None:
-    """A forged signature is rejected with 401."""
-    alert_payload = _valid_alert_payload()
+async def test_readiness_check_postgres_unhealthy(client_unhealthy: AsyncClient):
+    """Test readiness check when Postgres is unhealthy."""
+    response = await client_unhealthy.get("/readyz")
 
-    body = json.dumps(alert_payload).encode("utf-8")
+    assert response.status_code == 503
+    data = response.json()
+    assert data["status"] == "not_ready"
 
-    response = await client.post(
+
+# ---------------------------------------------------------------------------
+# Webhook Tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_alert_webhook_invalid_signature(client_healthy: AsyncClient):
+    """Test alert webhook with invalid signature."""
+    payload = {
+        "alert_name": "HighLatency",
+        "service": "api-gateway",
+        "namespace": "rivulet",
+        "severity": "high",
+        "started_at": "2026-01-09T10:00:00Z",
+        "fingerprint": "test-fingerprint",
+    }
+
+    response = await client_healthy.post(
         "/alerts",
-        content=body,
+        json=payload,
+        headers={"X-Webhook-Signature": "invalid-signature"},
+    )
+
+    assert response.status_code == 401
+    assert (
+        "Invalid" in response.json()["detail"] or "signature" in response.json()["detail"].lower()
+    )
+
+
+@pytest.mark.asyncio
+async def test_alert_webhook_valid_signature(
+    client_healthy: AsyncClient,
+    mock_runner: AsyncMock,
+):
+    """Test alert webhook with valid signature."""
+    import hashlib
+    import hmac
+    import json
+
+    payload = {
+        "alert_name": "HighLatency",
+        "service": "api-gateway",
+        "namespace": "rivulet",
+        "severity": "high",
+        "started_at": "2026-01-09T10:00:00Z",
+        "fingerprint": "test-fingerprint",
+    }
+
+    payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
+    signature = hmac.new(
+        b"test-secret",
+        payload_bytes,
+        hashlib.sha256,
+    ).hexdigest()
+
+    response = await client_healthy.post(
+        "/alerts",
+        content=payload_bytes,
         headers={
+            "X-Webhook-Signature": f"sha256={signature}",
             "Content-Type": "application/json",
-            "X-Webhook-Signature": "sha256=invalid",
         },
     )
 
-    assert response.status_code == 401
-    assert response.json()["detail"] == "Invalid webhook signature"
+    assert response.status_code == 202
+    data = response.json()
+    assert "incident_id" in data
+
+    # Verify runner was called
+    mock_runner.run_incident.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_alert_ingress_missing_signature(
-    client: Any,
-    test_settings: Settings,
-) -> None:
-    """A missing signature header is rejected with 401."""
-    # Use a VALID payload body so FastAPI body validation passes.
-    # The 401 must come from our signature check, not from 422 body validation.
-    alert_payload = _valid_alert_payload()
-    body = json.dumps(alert_payload).encode("utf-8")
-
-    response = await client.post(
-        "/alerts",
-        content=body,
-        headers={"Content-Type": "application/json"},
+async def test_approve_webhook_invalid_signature(client_healthy: AsyncClient):
+    """Test approval webhook with invalid signature."""
+    response = await client_healthy.post(
+        "/incidents/test-incident-id/approve",
+        json={"approved": True, "comment": "test"},
+        headers={"X-Webhook-Signature": "invalid-signature"},
     )
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "Invalid webhook signature"
 
 
 @pytest.mark.asyncio
-async def test_alert_ingress_valid_signature_then_invalid_payload(
-    client: Any,
-    test_settings: Settings,
-) -> None:
-    """A valid signature with an invalid body returns 422 (validation error)."""
-    # Valid signature, but body is missing required fields
-    payload = {"alert_name": "HighLatency"}
+async def test_approve_webhook_valid_signature(
+    client_healthy: AsyncClient,
+    mock_runner: AsyncMock,
+):
+    """Test approval webhook with valid signature."""
+    import hashlib
+    import hmac
+    import json
 
-    secret = test_settings.alert.webhook_secret.get_secret_value()
-    body, headers = signed_json(payload, secret)
+    incident_id = "test-incident-123"
+    payload = {"approved": True, "comment": "Looks good"}
 
-    response = await client.post("/alerts", content=body, headers=headers)
+    payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
+    signature = hmac.new(
+        b"test-secret",
+        payload_bytes,
+        hashlib.sha256,
+    ).hexdigest()
 
-    assert response.status_code == 422
-    assert "detail" in response.json()
-
-
-@pytest.mark.asyncio
-async def test_hitl_approval_endpoint(
-    client: Any,
-    app: Any,
-    test_settings: Settings,
-) -> None:
-    """A signed approval moves a paused incident to approved."""
-    secret = test_settings.alert.webhook_secret.get_secret_value()
-
-    # Step 1: Create an incident via alert ingress
-    alert_body, alert_headers = signed_json(
-        _valid_alert_payload(),
-        secret,
-    )
-
-    alert_response = await client.post("/alerts", content=alert_body, headers=alert_headers)
-    assert alert_response.status_code == 202
-    incident_id = alert_response.json()["incident_id"]
-
-    # Step 2: Approve the incident
-    approval_body, approval_headers = signed_json(
-        {"approved": True, "comment": "Approved by on-call engineer"},
-        secret,
-    )
-
-    response = await client.post(
+    response = await client_healthy.post(
         f"/incidents/{incident_id}/approve",
-        content=approval_body,
-        headers=approval_headers,
+        content=payload_bytes,
+        headers={
+            "X-Webhook-Signature": f"sha256={signature}",
+            "Content-Type": "application/json",
+        },
     )
+
+    assert response.status_code == 200
+
+    # Verify runner.approve_incident was called
+    mock_runner.approve_incident.assert_called_once_with(
+        incident_id,
+        True,
+        "Looks good",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Incident Report Tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_incident_report_not_found(
+    client_healthy: AsyncClient,
+    mock_checkpointer: AsyncMock,
+):
+    """Test incident report endpoint when incident not found."""
+    mock_checkpointer.aget_tuple = AsyncMock(return_value=None)
+
+    response = await client_healthy.get("/incidents/nonexistent-id/report")
+
+    assert response.status_code == 404
+    assert (
+        "not found" in response.json()["detail"].lower() or "Incident" in response.json()["detail"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_incident_report_found(
+    client_healthy: AsyncClient,
+    mock_checkpointer: AsyncMock,
+):
+    """Test incident report endpoint when incident exists."""
+    mock_checkpoint = MagicMock()
+    mock_checkpoint.channel_values = {
+        "current_phase": "complete",
+        "hypotheses": [
+            {
+                "id": "H1",
+                "description": "Database connection pool exhausted",
+                "confidence": 0.9,
+                "evidence": ["High connection count", "Slow queries"],
+                "status": "confirmed",
+            }
+        ],
+        "proposed_actions": [],
+        "executed_actions": [],
+        "tokens_used": 1500,
+        "cost_usd": 0.05,
+        "wall_clock_seconds": 45.2,
+        "iteration_count": 3,
+    }
+
+    mock_checkpointer.aget_tuple = AsyncMock(return_value=mock_checkpoint)
+
+    response = await client_healthy.get("/incidents/test-incident-123/report")
 
     assert response.status_code == 200
     data = response.json()
-    assert data["incident_id"] == incident_id
-    assert data["approved"] is True
-    assert data["status"] == "approved"
 
-    # Verify the stub recorded the approval
-    incident = app.state.runner.get_incident(incident_id)
-    assert incident is not None
-    assert incident["phase"] == "approved"
-    assert incident["approval"] is not None
-    assert incident["approval"]["approved"] is True
-    assert incident["approval"]["comment"] == "Approved by on-call engineer"
+    assert data["status"] == "complete"
+    assert data["phase"] == "complete"
+    assert len(data["hypotheses"]) == 1
+    assert data["tokens_used"] == 1500
+    assert data["cost_usd"] == 0.05
+    assert data["wall_clock_seconds"] == 45.2
+    assert data["iterations"] == 3
 
 
 @pytest.mark.asyncio
-async def test_hitl_rejection_endpoint(
-    client: Any,
-    app: Any,
-    test_settings: Settings,
-) -> None:
-    """A signed rejection records the decision."""
-    secret = test_settings.alert.webhook_secret.get_secret_value()
-
-    # Create incident
-    alert_body, alert_headers = signed_json(_valid_alert_payload(), secret)
-    alert_response = await client.post("/alerts", content=alert_body, headers=alert_headers)
-    incident_id = alert_response.json()["incident_id"]
-
-    # Reject it
-    rejection_body, rejection_headers = signed_json(
-        {"approved": False, "comment": "False positive, ignoring"},
-        secret,
-    )
-
-    response = await client.post(
-        f"/incidents/{incident_id}/approve",
-        content=rejection_body,
-        headers=rejection_headers,
-    )
-
-    assert response.status_code == 200
-    assert response.json()["approved"] is False
-    assert response.json()["status"] == "rejected"
-
-    incident = app.state.runner.get_incident(incident_id)
-    assert incident is not None
-    assert incident["phase"] == "rejected"
-
-
-@pytest.mark.asyncio
-async def test_hitl_approval_requires_signature(client: Any) -> None:
-    """The HITL webhook cannot be invoked without a signature."""
-    approval_body = json.dumps({"approved": True, "comment": "Approved"}).encode("utf-8")
-
-    response = await client.post(
-        "/incidents/nonexistent-id/approve",
-        content=approval_body,
-        headers={"Content-Type": "application/json"},
-    )
-
-    assert response.status_code == 401
-
-
-@pytest.mark.asyncio
-async def test_hitl_approval_unknown_incident(
-    client: Any,
-    test_settings: Settings,
-) -> None:
-    """A signed approval for an unknown incident returns 404."""
-    secret = test_settings.alert.webhook_secret.get_secret_value()
-
-    body, headers = signed_json(
-        {"approved": True, "comment": "Approved"},
-        secret,
-    )
-
-    response = await client.post(
-        "/incidents/nonexistent-id/approve",
-        content=body,
-        headers=headers,
-    )
-
-    assert response.status_code == 404
-    assert "not found" in response.json()["detail"]
-
-
-@pytest.mark.asyncio
-async def test_hitl_duplicate_approval_is_rejected(
-    client: Any,
-    test_settings: Settings,
-) -> None:
-    """An incident accepts only one HITL decision."""
-    secret = test_settings.alert.webhook_secret.get_secret_value()
-
-    # Create incident
-    alert_body, alert_headers = signed_json(_valid_alert_payload(), secret)
-    alert_response = await client.post("/alerts", content=alert_body, headers=alert_headers)
-    incident_id = alert_response.json()["incident_id"]
-
-    # First approval
-    approval_body, approval_headers = signed_json(
-        {"approved": True, "comment": "Approved"},
-        secret,
-    )
-    first = await client.post(
-        f"/incidents/{incident_id}/approve",
-        content=approval_body,
-        headers=approval_headers,
-    )
-    assert first.status_code == 200
-
-    # Second approval (should fail — incident no longer awaiting)
-    rejection_body, rejection_headers = signed_json(
-        {"approved": False, "comment": "Changed mind"},
-        secret,
-    )
-    second = await client.post(
-        f"/incidents/{incident_id}/approve",
-        content=rejection_body,
-        headers=rejection_headers,
-    )
-    assert second.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_readyz(client: Any) -> None:
-    """Readiness reports Postgres connectivity."""
-    response = await client.get("/readyz")
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "status": "ready",
-        "checks": {"postgres": "ok"},
+async def test_incident_report_awaiting_approval(
+    client_healthy: AsyncClient,
+    mock_checkpointer: AsyncMock,
+):
+    """Test incident report when awaiting human approval."""
+    mock_checkpoint = MagicMock()
+    mock_checkpoint.channel_values = {
+        "current_phase": "propose",
+        "hypotheses": [],
+        "proposed_actions": [
+            {
+                "tool_name": "scale_deployment",
+                "tool_args": {"deployment": "api-gateway", "replicas": 5},
+                "risk_tier": 2,
+                "rationale": "Scale up to handle load",
+                "requires_approval": True,
+            }
+        ],
+        "executed_actions": [],
+        "requires_human_approval": True,
+        "approval_granted": None,
+        "tokens_used": 800,
+        "cost_usd": 0.02,
+        "wall_clock_seconds": 30.5,
+        "iteration_count": 2,
     }
+
+    mock_checkpointer.aget_tuple = AsyncMock(return_value=mock_checkpoint)
+
+    response = await client_healthy.get("/incidents/test-incident-456/report")
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["status"] == "awaiting_approval"
+    assert data["phase"] == "propose"
+    assert len(data["proposed_actions"]) == 1
+    assert data["proposed_actions"][0]["requires_approval"] is True

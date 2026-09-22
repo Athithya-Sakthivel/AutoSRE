@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import START, StateGraph
 
 from autosre.core.graph_helpers import (
     PHASE_APPROVE,
@@ -106,10 +106,9 @@ def build_investigation_graph() -> StateGraph[AgentState]:
         {
             "complete": PHASE_COMPLETE,
             "investigate": PHASE_INVESTIGATE,
+            "propose": PHASE_PROPOSE,
         },
     )
-
-    graph.add_edge(PHASE_COMPLETE, END)
 
     return graph
 
