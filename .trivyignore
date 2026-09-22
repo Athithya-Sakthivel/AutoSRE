@@ -1,7 +1,0 @@
-# network_acls are disabled for one shot automation. kv is still protected by RBAC.
-AZU-0013
-
-# AKS API server authorized IP ranges configured via Azure CLI using AzureCloud service tag
-# AzureRM provider does not support service tags in authorized_ip_ranges
-# Preview feature: EnableServiceTagAuthorizedIPPreview
-AVD-AZU-0041

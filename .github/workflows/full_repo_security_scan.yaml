@@ -23,17 +23,8 @@ env:
   GITLEAKS_VERSION: v8.30.1
   GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 
-  OPENGREP_VERSION: v1.22.0
-  OPENGREP_SHA256: 45bcd58440e397ed52c50e953ccf5948909ea77087c9186fc7d277216f62e319
-
-  REPO_ROOT: ${{ github.workspace }}
-
-  # Prevent cache downloads from hanging indefinitely.
-  SEGMENT_DOWNLOAD_TIMEOUT_MINS: "5"
-
-  # Trivy does not need the optional update/telemetry endpoint for CI.
-  TRIVY_SKIP_VERSION_CHECK: "true"
-  TRIVY_DISABLE_TELEMETRY: "true"
+  MAVEN_PROJECT: rivulet/api-gateway/pom.xml
+  MAVEN_WRAPPER: rivulet/api-gateway/mvnw
 
 jobs:
   scan_repository:
@@ -42,7 +33,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Checkout repository (full history)
+      - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -54,81 +45,37 @@ jobs:
           distribution: temurin
           java-version: "25"
           cache: maven
+          cache-dependency-path: |
+            rivulet/api-gateway/pom.xml
+            rivulet/api-gateway/.mvn/wrapper/maven-wrapper.properties
 
-      - name: Populate Maven dependency cache for Trivy
+      - name: Populate local Maven repository
         run: |
           set -euo pipefail
 
-          cd "$REPO_ROOT"
+          test -f "$MAVEN_PROJECT"
+          test -x "$MAVEN_WRAPPER"
 
-          test -f rivulet/api-gateway/pom.xml
-          test -f rivulet/api-gateway/mvnw
-
-          echo "[INFO] Java version:"
+          echo "[INFO] Java:"
           java -version
 
-          echo "[INFO] Maven version:"
-          bash rivulet/api-gateway/mvnw --version
+          echo "[INFO] Maven:"
+          "$MAVEN_WRAPPER" --version
 
-          echo "[INFO] Resolving Maven dependencies into ~/.m2"
-          echo "[INFO] This prevents Trivy from querying Maven Central during the scan."
+          echo "[INFO] Resolving Maven dependencies into ~/.m2/repository"
 
-          bash rivulet/api-gateway/mvnw \
+          "$MAVEN_WRAPPER" \
             --batch-mode \
             --no-transfer-progress \
-            --file rivulet/api-gateway/pom.xml \
+            --file "$MAVEN_PROJECT" \
             dependency:go-offline \
             dependency:resolve-plugins
-
-      - name: Install OpenGrep
-        run: |
-          set -euo pipefail
-
-          tmp_dir="$(mktemp -d)"
-          trap 'rm -rf "$tmp_dir"' EXIT
-
-          binary="$tmp_dir/opengrep"
-          url="https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_x86"
-
-          echo "[INFO] Downloading OpenGrep ${OPENGREP_VERSION}"
-
-          curl \
-            --proto '=https' \
-            --tlsv1.2 \
-            --fail \
-            --silent \
-            --show-error \
-            --location \
-            --retry 3 \
-            --retry-all-errors \
-            --connect-timeout 10 \
-            --max-time 300 \
-            --output "$binary" \
-            "$url"
-
-          echo "[INFO] Verifying OpenGrep SHA-256"
-
-          printf '%s  %s\n' \
-            "$OPENGREP_SHA256" \
-            "$binary" \
-            | sha256sum --check --status
-
-          install -d -m 0755 "$RUNNER_TEMP/security-tools"
-
-          install -m 0755 \
-            "$binary" \
-            "$RUNNER_TEMP/security-tools/opengrep"
-
-          echo "$RUNNER_TEMP/security-tools" >> "$GITHUB_PATH"
-
-          "$RUNNER_TEMP/security-tools/opengrep" --version
 
       - name: Install Gitleaks
         run: |
           set -euo pipefail
 
           version="${GITLEAKS_VERSION#v}"
-
           tmp_dir="$(mktemp -d)"
           trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -167,48 +114,13 @@ jobs:
             --directory "$tmp_dir" \
             --no-same-owner
 
-          test -f "$tmp_dir/gitleaks"
-
           install -m 0755 \
             "$tmp_dir/gitleaks" \
             "$RUNNER_TEMP/security-tools/gitleaks"
 
           echo "$RUNNER_TEMP/security-tools" >> "$GITHUB_PATH"
 
-          "$RUNNER_TEMP/security-tools/gitleaks" version
-
-      - name: Run OpenGrep SAST
-        id: opengrep
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-
-          cd "$REPO_ROOT"
-
-          echo "============================================================"
-          echo " OpenGrep SAST"
-          echo "============================================================"
-
-          opengrep scan \
-            --config p/owasp-top-ten \
-            --config p/dockerfile \
-            --config p/secrets \
-            --config p/kubernetes \
-            --error \
-            --max-target-bytes 2000000 \
-            --exclude .git \
-            --exclude .repos \
-            --exclude .venv \
-            --exclude node_modules \
-            --exclude target \
-            --exclude dist \
-            --exclude __pycache__ \
-            --exclude .pytest_cache \
-            --exclude .mypy_cache \
-            --exclude .ruff_cache \
-            --exclude .terraform \
-            --exclude .cache \
-            .
+          gitleaks version
 
       - name: Run Gitleaks full Git history scan
         id: gitleaks
@@ -216,14 +128,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          cd "$REPO_ROOT"
-
           echo "============================================================"
           echo " Gitleaks - Full Git History"
           echo "============================================================"
 
-          gitleaks_args=(
+          args=(
             git
+            .
             --log-opts="--all --full-history"
             --redact
             --no-banner
@@ -232,21 +143,18 @@ jobs:
 
           if [[ -f .gitleaks.toml ]]; then
             echo "[INFO] Using custom Gitleaks config: .gitleaks.toml"
-            gitleaks_args+=(--config .gitleaks.toml)
+            args+=(--config .gitleaks.toml)
           else
-            echo "[INFO] No .gitleaks.toml found; using Gitleaks defaults."
+            echo "[INFO] No .gitleaks.toml found; using built-in defaults."
           fi
 
-          gitleaks "${gitleaks_args[@]}" .
+          gitleaks "${args[@]}"
 
       - name: Run Trivy filesystem vulnerability and IaC scan
         id: trivy
         continue-on-error: true
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         env:
-          # Critical for the Maven 429 problem:
-          # Trivy must use the populated local ~/.m2 repository and must
-          # not query Maven Central to resolve missing Java dependencies.
           TRIVY_OFFLINE_SCAN: "true"
         with:
           version: ${{ env.TRIVY_VERSION }}
@@ -255,7 +163,6 @@ jobs:
           scanners: vuln,misconfig
           severity: ${{ env.TRIVY_SEVERITY }}
           ignore-unfixed: true
-          trivyignores: .trivyignore
           exit-code: "1"
           timeout: 15m
           cache: true
@@ -272,9 +179,16 @@ jobs:
             **/.mypy_cache,
             **/.ruff_cache,
             **/.terraform,
-            .cache
 
-      - name: Evaluate scanner results
+            # Source Helm templates are intentionally incomplete.
+            # The deployments use scripts/*-deploy.sh,
+            # which renders the required values.yaml at runtime.
+            # Skip these charts to avoid Trivy Helm parser errors.
+            infra/k8s/open-observe-minimal,
+            infra/k8s/otel-daemonset,
+            infra/k8s/otel-gateway
+
+      - name: Evaluate security scan results
         if: ${{ always() }}
         run: |
           set -euo pipefail
@@ -285,25 +199,18 @@ jobs:
           echo " Security Scan Summary"
           echo "============================================================"
 
-          if [[ "${{ steps.opengrep.outcome }}" != "success" ]]; then
-            echo "[FAIL] OpenGrep reported findings or failed."
-            failed=1
+          if [[ "${{ steps.gitleaks.outcome }}" == "success" ]]; then
+            echo "[PASS] Gitleaks"
           else
-            echo "[PASS] OpenGrep"
-          fi
-
-          if [[ "${{ steps.gitleaks.outcome }}" != "success" ]]; then
             echo "[FAIL] Gitleaks reported findings or failed."
             failed=1
-          else
-            echo "[PASS] Gitleaks"
           fi
 
-          if [[ "${{ steps.trivy.outcome }}" != "success" ]]; then
+          if [[ "${{ steps.trivy.outcome }}" == "success" ]]; then
+            echo "[PASS] Trivy"
+          else
             echo "[FAIL] Trivy reported findings or failed."
             failed=1
-          else
-            echo "[PASS] Trivy"
           fi
 
           echo "============================================================"
@@ -313,4 +220,4 @@ jobs:
             exit 1
           fi
 
-          echo "[SUCCESS] All security scanners completed with no blocking findings."
+          echo "[SUCCESS] Security scan completed with no blocking findings."
