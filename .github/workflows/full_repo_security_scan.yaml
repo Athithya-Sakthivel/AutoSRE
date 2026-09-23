@@ -187,7 +187,7 @@ jobs:
           # application source and do not provide useful security coverage.
           #
           # The following three Helm directories are intentionally excluded
-          # because they are source templates deployed by scripts/common/*-deploy.sh.
+          # because they are source templates deployed by scripts/*-deploy.sh.
           # They do not contain the complete runtime values.yaml that exists
           # during deployment, so Trivy's Helm parser currently produces
           # schema/nil-pointer errors instead of actionable security findings.

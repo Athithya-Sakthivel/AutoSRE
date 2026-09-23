@@ -1,9 +1,14 @@
-// ============================================================
-// Canonical domain types for AutoSRE UI
-// All API methods and hooks import from this file.
-// ============================================================
+/**
+ * Canonical domain types for the AutoSRE frontend.
+ *
+ * These types intentionally stay framework-agnostic and mirror the API/domain
+ * contract used by the frontend. Keep endpoint-specific transport logic out
+ * of this module.
+ */
 
-// ----- Incident Status & Phase -----
+// ---------------------------------------------------------------------------
+// Incident lifecycle
+// ---------------------------------------------------------------------------
 
 export type IncidentStatus =
   | "running"
@@ -26,9 +31,11 @@ export type IncidentPhase =
   | "verify"
   | "complete";
 
-// ----- Hypothesis -----
-
 export type HypothesisStatus = "proposed" | "confirmed" | "rejected";
+
+// ---------------------------------------------------------------------------
+// Incident artifacts
+// ---------------------------------------------------------------------------
 
 export interface Hypothesis {
   id: string;
@@ -37,8 +44,6 @@ export interface Hypothesis {
   evidence: string[];
   status: HypothesisStatus;
 }
-
-// ----- Actions -----
 
 export interface ProposedAction {
   tool_name: string;
@@ -54,21 +59,22 @@ export interface ExecutedAction {
   tool_call_id: string;
   result: unknown;
   success: boolean;
-  verification_passed: boolean | null;
   executed_at: string;
-  error?: string;
+  verification_passed: boolean | null;
 }
 
-// ----- Incident -----
+// ---------------------------------------------------------------------------
+// Incident
+// ---------------------------------------------------------------------------
 
 export interface Incident {
   incident_id: string;
+  status: IncidentStatus;
+  phase: IncidentPhase;
   alert_name: string;
   service: string;
   namespace: string;
   severity: IncidentSeverity;
-  status: IncidentStatus;
-  phase: IncidentPhase;
   started_at: string;
   hypotheses: Hypothesis[];
   proposed_actions: ProposedAction[];
@@ -86,11 +92,13 @@ export interface IncidentListResponse {
   total: number;
 }
 
-// ----- Approval -----
+// ---------------------------------------------------------------------------
+// Approval
+// ---------------------------------------------------------------------------
 
 export interface ApprovalRequest {
   approved: boolean;
-  comment?: string;
+  comment: string;
 }
 
 export interface ApprovalResponse {
@@ -99,7 +107,9 @@ export interface ApprovalResponse {
   status: string;
 }
 
-// ----- Metrics -----
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
 
 export type MetricTimeRange = "1h" | "24h" | "7d" | "30d";
 
@@ -129,11 +139,6 @@ export interface MetricsSummary {
   incidents_by_category: Record<string, number>;
 }
 
-export interface CategoryCount {
-  category: string;
-  count: number;
-}
-
 export interface ExpensiveIncident {
   incident_id: string;
   alert_name: string;
@@ -143,7 +148,9 @@ export interface ExpensiveIncident {
   status: IncidentStatus;
 }
 
-// ----- Health -----
+// ---------------------------------------------------------------------------
+// Health
+// ---------------------------------------------------------------------------
 
 export interface HealthResponse {
   status: "ok" | "degraded" | "error";

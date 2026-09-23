@@ -1,3 +1,12 @@
+/**
+ * Pure SVG chart components with no charting-library dependency.
+ *
+ * Components:
+ *   LineChart          - time-series line with area fill
+ *   BarChart           - time-series vertical bars
+ *   HorizontalBarChart - category breakdown horizontal bars
+ */
+
 import type { ReactElement, ReactNode } from "react";
 
 interface ChartMargins {
@@ -14,35 +23,6 @@ const DEFAULT_MARGINS: ChartMargins = {
   left: 48,
 };
 
-interface ChartContainerProps {
-  children: ReactNode;
-  height?: number;
-  label?: string;
-}
-
-function ChartContainer({
-  children,
-  height = 180,
-  label,
-}: ChartContainerProps): ReactElement {
-  return (
-    <div
-      className="rounded-lg border border-surface-border bg-surface-1 p-4"
-      role="img"
-      aria-label={label}
-    >
-      <svg
-        viewBox={`0 0 400 ${height}`}
-        className="h-auto w-full"
-        preserveAspectRatio="xMidYMid meet"
-        aria-hidden="true"
-      >
-        {children}
-      </svg>
-    </div>
-  );
-}
-
 const CHART_COLORS: Record<string, string> = {
   "status-running": "#5b9bd5",
   "status-awaiting": "#d4a843",
@@ -55,30 +35,106 @@ const CHART_COLORS: Record<string, string> = {
   "severity-4": "#5b9bd5",
 };
 
+const CHART_WIDTH = 400;
+const DEFAULT_HEIGHT = 180;
+
 function colorToHex(color: string): string {
   return CHART_COLORS[color] ?? "#5b9bd5";
 }
 
+function normalizeChartHeight(height: number): number {
+  if (!Number.isFinite(height)) {
+    return DEFAULT_HEIGHT;
+  }
+
+  return Math.max(120, Math.trunc(height));
+}
+
+function normalizeNumericValue(value: number): number {
+  return Number.isFinite(value) ? value : 0;
+}
+
 function formatAxisNumber(value: number): string {
-  if (!Number.isFinite(value)) return "0";
-  if (value === 0) return "0";
+  if (!Number.isFinite(value) || value === 0) {
+    return "0";
+  }
+
   if (Math.abs(value) >= 1000) {
     return `${(value / 1000).toFixed(1)}k`;
   }
+
   if (Math.abs(value) < 1) {
     return value.toFixed(2);
   }
+
   if (Math.abs(value) < 10) {
     return value.toFixed(1);
   }
+
   return Math.round(value).toString();
 }
 
-function sanitizeNumericData<T extends { value: number }>(data: T[]): T[] {
-  return data.map((item) => ({
-    ...item,
-    value: Number.isFinite(item.value) ? item.value : 0,
-  }));
+function formatShortTime(iso: string): string {
+  const date = new Date(iso);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const hour = date.getHours();
+  const minute = date.getMinutes();
+
+  if (hour === 0 && minute === 0) {
+    return date.getDate().toString();
+  }
+
+  return `${hour.toString().padStart(2, "0")}:${minute
+    .toString()
+    .padStart(2, "0")}`;
+}
+
+function getLabelIndexes(length: number): number[] {
+  if (length <= 0) {
+    return [];
+  }
+
+  if (length === 1) {
+    return [0];
+  }
+
+  return [0, Math.floor((length - 1) / 2), length - 1].filter(
+    (value, index, values) => values.indexOf(value) === index,
+  );
+}
+
+function ChartContainer({
+  children,
+  height = DEFAULT_HEIGHT,
+  label,
+}: {
+  children: ReactNode;
+  height?: number;
+  label?: string | undefined;
+}): ReactElement {
+  const accessibleLabel = label?.trim() || "Metric chart";
+  const chartHeight = normalizeChartHeight(height);
+
+  return (
+    <div
+      className="rounded-lg border border-surface-border bg-surface-1 p-4"
+      role="img"
+      aria-label={accessibleLabel}
+    >
+      <svg
+        viewBox={`0 0 ${CHART_WIDTH} ${chartHeight}`}
+        className="h-auto w-full"
+        preserveAspectRatio="xMidYMid meet"
+        aria-hidden="true"
+      >
+        {children}
+      </svg>
+    </div>
+  );
 }
 
 function ChartEmpty({ message }: { message: string }): ReactElement {
@@ -94,7 +150,10 @@ function ChartEmpty({ message }: { message: string }): ReactElement {
 // ---------------------------------------------------------------------------
 
 export interface LineChartProps {
-  data: Array<{ timestamp: string; value: number }>;
+  data: Array<{
+    timestamp: string;
+    value: number;
+  }>;
   label?: string;
   color?: string;
   yFormat?: (value: number) => string;
@@ -106,37 +165,54 @@ export function LineChart({
   label,
   color = "status-running",
   yFormat = formatAxisNumber,
-  height = 180,
+  height = DEFAULT_HEIGHT,
 }: LineChartProps): ReactElement {
   if (data.length === 0) {
     return <ChartEmpty message="No data for selected range" />;
   }
 
-  const chartData = sanitizeNumericData(data);
+  const chartHeight = normalizeChartHeight(height);
   const m = DEFAULT_MARGINS;
-  const w = 400;
-  const plotW = w - m.left - m.right;
-  const plotH = Math.max(1, height - m.top - m.bottom);
+  const plotW = CHART_WIDTH - m.left - m.right;
+  const plotH = Math.max(1, chartHeight - m.top - m.bottom);
 
-  const values = chartData.map((item) => item.value);
-  const maxVal = Math.max(...values, 1);
+  const series = data.map((item) => ({
+    ...item,
+    value: normalizeNumericValue(item.value),
+  }));
+
+  const values = series.map((item) => item.value);
+  const maxVal = Math.max(...values, 0);
   const minVal = Math.min(...values, 0);
   const valueRange = maxVal - minVal || 1;
 
-  const points = chartData.map((item, index) => {
-    const x = m.left + (index / Math.max(chartData.length - 1, 1)) * plotW;
+  const points = series.map((item, index) => {
+    const x = m.left + (index / Math.max(series.length - 1, 1)) * plotW;
+
     const y = m.top + plotH - ((item.value - minVal) / valueRange) * plotH;
-    return { x, y, ...item };
+
+    return {
+      x,
+      y,
+      ...item,
+    };
   });
 
-  const firstPoint = points[0]!;
-  const lastPoint = points[points.length - 1]!;
+  const firstPoint = points[0];
+  const lastPoint = points[points.length - 1];
+
+  if (!firstPoint || !lastPoint) {
+    return <ChartEmpty message="No data for selected range" />;
+  }
 
   const pathD = points
     .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
     .join(" ");
 
-  const areaD = `${pathD} L ${lastPoint.x} ${m.top + plotH} L ${firstPoint.x} ${m.top + plotH} Z`;
+  const areaD = `${pathD} L ${lastPoint.x} ${
+    m.top + plotH
+  } L ${firstPoint.x} ${m.top + plotH} Z`;
+
   const hex = colorToHex(color);
 
   const yTicks = [0, 0.33, 0.66, 1].map((ratio) => ({
@@ -144,22 +220,15 @@ export function LineChart({
     y: m.top + plotH - ratio * plotH,
   }));
 
-  // Use Set to deduplicate X-axis label indexes
-  const xLabelIndexes = [
-    ...new Set([
-      0,
-      Math.floor((chartData.length - 1) / 2),
-      chartData.length - 1,
-    ]),
-  ];
+  const xLabelIndexes = getLabelIndexes(series.length);
 
   return (
-    <ChartContainer height={height} label={label}>
-      {yTicks.map((tick, index) => (
+    <ChartContainer height={chartHeight} label={label}>
+      {yTicks.map((tick) => (
         <line
-          key={`grid-${index}`}
+          key={`grid-${tick.y}`}
           x1={m.left}
-          x2={w - m.right}
+          x2={CHART_WIDTH - m.right}
           y1={tick.y}
           y2={tick.y}
           stroke="oklch(0.28 0.01 260)"
@@ -169,11 +238,12 @@ export function LineChart({
       ))}
 
       <path d={areaD} fill={hex} fillOpacity={0.1} />
+
       <path d={pathD} fill="none" stroke={hex} strokeWidth={2} />
 
-      {points.map((point, index) => (
+      {points.map((point) => (
         <circle
-          key={`point-${index}`}
+          key={`point-${point.timestamp}-${point.x}`}
           cx={point.x}
           cy={point.y}
           r={2.5}
@@ -181,9 +251,9 @@ export function LineChart({
         />
       ))}
 
-      {yTicks.map((tick, index) => (
+      {yTicks.map((tick) => (
         <text
-          key={`y-label-${index}`}
+          key={`y-label-${tick.val}`}
           x={m.left - 6}
           y={tick.y + 3}
           textAnchor="end"
@@ -195,13 +265,19 @@ export function LineChart({
       ))}
 
       {xLabelIndexes.map((index) => {
-        const item = chartData[index]!;
-        const x = m.left + (index / Math.max(chartData.length - 1, 1)) * plotW;
+        const item = series[index];
+
+        if (!item) {
+          return null;
+        }
+
+        const x = m.left + (index / Math.max(series.length - 1, 1)) * plotW;
+
         return (
           <text
-            key={`x-label-${index}`}
+            key={`x-label-${item.timestamp}-${x}`}
             x={x}
-            y={height - 6}
+            y={chartHeight - 6}
             textAnchor="middle"
             className="fill-slate-500"
             style={{ fontSize: "9px" }}
@@ -219,7 +295,10 @@ export function LineChart({
 // ---------------------------------------------------------------------------
 
 export interface BarChartProps {
-  data: Array<{ timestamp: string; value: number }>;
+  data: Array<{
+    timestamp: string;
+    value: number;
+  }>;
   label?: string;
   color?: string;
   height?: number;
@@ -229,23 +308,27 @@ export function BarChart({
   data,
   label,
   color = "status-running",
-  height = 180,
+  height = DEFAULT_HEIGHT,
 }: BarChartProps): ReactElement {
   if (data.length === 0) {
     return <ChartEmpty message="No data for selected range" />;
   }
 
-  const chartData = sanitizeNumericData(data);
+  const chartHeight = normalizeChartHeight(height);
   const m = DEFAULT_MARGINS;
-  const w = 400;
-  const plotW = w - m.left - m.right;
-  const plotH = Math.max(1, height - m.top - m.bottom);
+  const plotW = CHART_WIDTH - m.left - m.right;
+  const plotH = Math.max(1, chartHeight - m.top - m.bottom);
 
-  const values = chartData.map((item) => item.value);
-  const maxVal = Math.max(...values, 1);
-  const slotWidth = plotW / chartData.length;
+  const series = data.map((item) => ({
+    ...item,
+    value: Math.max(0, normalizeNumericValue(item.value)),
+  }));
+
+  const maxVal = Math.max(...series.map((item) => item.value), 1);
+
+  const slotWidth = plotW / series.length;
   const barWidth = Math.max(2, slotWidth * 0.7);
-  const gap = slotWidth * 0.3;
+  const gap = slotWidth - barWidth;
   const hex = colorToHex(color);
 
   const yTicks = [0, 0.5, 1].map((ratio) => ({
@@ -253,21 +336,15 @@ export function BarChart({
     y: m.top + plotH - ratio * plotH,
   }));
 
-  const xLabelIndexes = [
-    ...new Set([
-      0,
-      Math.floor((chartData.length - 1) / 2),
-      chartData.length - 1,
-    ]),
-  ];
+  const xLabelIndexes = getLabelIndexes(series.length);
 
   return (
-    <ChartContainer height={height} label={label}>
-      {yTicks.map((tick, index) => (
+    <ChartContainer height={chartHeight} label={label}>
+      {yTicks.map((tick) => (
         <line
-          key={`grid-${index}`}
+          key={`grid-${tick.y}`}
           x1={m.left}
-          x2={w - m.right}
+          x2={CHART_WIDTH - m.right}
           y1={tick.y}
           y2={tick.y}
           stroke="oklch(0.28 0.01 260)"
@@ -276,13 +353,16 @@ export function BarChart({
         />
       ))}
 
-      {chartData.map((item, index) => {
-        const barH = Math.max(0, (item.value / maxVal) * plotH);
+      {series.map((item, index) => {
+        const barH = (item.value / maxVal) * plotH;
+
         const x = m.left + index * slotWidth + gap / 2;
+
         const y = m.top + plotH - barH;
+
         return (
           <rect
-            key={`bar-${index}`}
+            key={`bar-${x}`}
             x={x}
             y={y}
             width={barWidth}
@@ -293,9 +373,9 @@ export function BarChart({
         );
       })}
 
-      {yTicks.map((tick, index) => (
+      {yTicks.map((tick) => (
         <text
-          key={`y-label-${index}`}
+          key={`y-label-${tick.val}`}
           x={m.left - 6}
           y={tick.y + 3}
           textAnchor="end"
@@ -307,13 +387,19 @@ export function BarChart({
       ))}
 
       {xLabelIndexes.map((index) => {
-        const item = chartData[index]!;
+        const item = series[index];
+
+        if (!item) {
+          return null;
+        }
+
         const x = m.left + index * slotWidth + gap / 2 + barWidth / 2;
+
         return (
           <text
-            key={`x-label-${index}`}
+            key={`x-label-${item.timestamp}-${x}`}
             x={x}
-            y={height - 6}
+            y={chartHeight - 6}
             textAnchor="middle"
             className="fill-slate-500"
             style={{ fontSize: "9px" }}
@@ -331,7 +417,10 @@ export function BarChart({
 // ---------------------------------------------------------------------------
 
 export interface HorizontalBarProps {
-  data: Array<{ category: string; count: number }>;
+  data: Array<{
+    category: string;
+    count: number;
+  }>;
   label?: string;
   color?: string;
   maxItems?: number;
@@ -343,11 +432,13 @@ export function HorizontalBarChart({
   color = "status-running",
   maxItems = 8,
 }: HorizontalBarProps): ReactElement {
-  const safeMaxItems = Math.max(1, Math.trunc(maxItems));
+  const safeMaxItems = Number.isFinite(maxItems)
+    ? Math.max(1, Math.trunc(maxItems))
+    : 8;
 
   const sorted = data
     .map((item) => ({
-      ...item,
+      category: item.category,
       count: Number.isFinite(item.count) ? Math.max(0, item.count) : 0,
     }))
     .sort((a, b) => b.count - a.count)
@@ -358,24 +449,26 @@ export function HorizontalBarChart({
   }
 
   const maxCount = Math.max(...sorted.map((item) => item.count), 1);
+
   const hex = colorToHex(color);
   const rowH = 28;
-  const h = sorted.length * rowH + 16;
+  const chartHeight = sorted.length * rowH + 16;
   const labelW = 120;
-  const barAreaW = 400 - labelW - 16;
+  const barAreaW = Math.max(1, CHART_WIDTH - labelW - 16);
 
   return (
-    <ChartContainer height={h} label={label}>
+    <ChartContainer height={chartHeight} label={label}>
       {sorted.map((item, index) => {
         const y = index * rowH + 8;
         const barW = (item.count / maxCount) * barAreaW;
+
         const displayCategory =
           item.category.length > 16
             ? `${item.category.slice(0, 15)}…`
             : item.category;
 
         return (
-          <g key={`${item.category}-${index}`}>
+          <g key={`${item.category}-${item.count}-${barW}`}>
             <text
               x={labelW - 8}
               y={y + rowH / 2 + 3}
@@ -385,6 +478,7 @@ export function HorizontalBarChart({
             >
               {displayCategory}
             </text>
+
             <rect
               x={labelW}
               y={y + 4}
@@ -393,11 +487,15 @@ export function HorizontalBarChart({
               fill={hex}
               rx={2}
             />
+
             <text
               x={labelW + barW + 6}
               y={y + rowH / 2 + 3}
               className="fill-slate-300"
-              style={{ fontSize: "10px", fontWeight: 600 }}
+              style={{
+                fontSize: "10px",
+                fontWeight: 600,
+              }}
             >
               {item.count}
             </text>
@@ -406,21 +504,4 @@ export function HorizontalBarChart({
       })}
     </ChartContainer>
   );
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function formatShortTime(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) {
-    return "";
-  }
-  const hour = date.getHours();
-  const minute = date.getMinutes();
-  if (hour === 0 && minute === 0) {
-    return date.getDate().toString();
-  }
-  return `${hour.toString().padStart(2, "0")}:${minute.toString().padStart(2, "0")}`;
 }

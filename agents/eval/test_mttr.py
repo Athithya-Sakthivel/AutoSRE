@@ -6,61 +6,84 @@ import os
 
 import pytest
 
-from eval.conftest import AgentClient, incident_by_id, incident_ids
+from eval.conftest import (
+    AgentClient,
+    incident_by_id,
+    incident_ids,
+    required_nonnegative_int,
+    required_nonnegative_number,
+    run_incident,
+)
 
 MAX_MTTR_SECONDS = float(os.getenv("EVAL_MAX_MTTR_SECONDS", "120.0"))
 
-
-@pytest.mark.parametrize("incident_id", incident_ids())
-@pytest.mark.asyncio
-async def test_mttr_slo(incident_id: str, agent_client: AgentClient) -> None:
-    """Verify incident resolution meets MTTR SLO."""
-    incident = incident_by_id(incident_id)
-
-    # Trigger incident
-    incident_id_result = await agent_client.trigger_incident(incident)
-
-    # Wait for completion
-    result = await agent_client.wait_for_completion(incident_id_result)
-
-    # Check MTTR
-    wall_clock = result.get("wall_clock_seconds", 0.0)
-    assert wall_clock <= MAX_MTTR_SECONDS, f"MTTR {wall_clock:.2f}s exceeds SLO {MAX_MTTR_SECONDS}s"
+# Must remain synchronized with the agent's MAX_ITERATIONS in graph_helpers.py.
+MAX_ITERATIONS = 10
 
 
 @pytest.mark.parametrize("incident_id", incident_ids())
 @pytest.mark.asyncio
-async def test_mttr_is_positive(incident_id: str, agent_client: AgentClient) -> None:
-    """Verify MTTR measurement is positive."""
+async def test_mttr_slo(
+    incident_id: str,
+    agent_client: AgentClient,
+) -> None:
+    """Verify incident resolution meets the configured MTTR SLO."""
     incident = incident_by_id(incident_id)
+    result = await run_incident(
+        agent_client,
+        incident,
+    )
 
-    # Trigger incident
-    incident_id_result = await agent_client.trigger_incident(incident)
+    wall_clock = required_nonnegative_number(
+        result,
+        "wall_clock_seconds",
+    )
 
-    # Wait for completion
-    result = await agent_client.wait_for_completion(incident_id_result)
-
-    # Check MTTR
-    wall_clock = result.get("wall_clock_seconds", 0.0)
-    assert wall_clock > 0, "Wall clock time should be positive"
+    assert wall_clock <= MAX_MTTR_SECONDS, (
+        f"Incident {incident_id}: MTTR {wall_clock:.2f}s exceeds SLO {MAX_MTTR_SECONDS:.2f}s"
+    )
 
 
 @pytest.mark.parametrize("incident_id", incident_ids())
 @pytest.mark.asyncio
-async def test_iterations_are_bounded(incident_id: str, agent_client: AgentClient) -> None:
-    """Verify agent doesn't exceed iteration limit."""
+async def test_mttr_is_positive(
+    incident_id: str,
+    agent_client: AgentClient,
+) -> None:
+    """Verify MTTR is measured rather than omitted/defaulted to zero."""
     incident = incident_by_id(incident_id)
+    result = await run_incident(
+        agent_client,
+        incident,
+    )
 
-    # Trigger incident
-    incident_id_result = await agent_client.trigger_incident(incident)
+    wall_clock = required_nonnegative_number(
+        result,
+        "wall_clock_seconds",
+    )
 
-    # Wait for completion
-    result = await agent_client.wait_for_completion(incident_id_result)
+    assert wall_clock > 0, f"Incident {incident_id}: wall clock time should be positive"
 
-    # Check iterations
-    iterations = result.get("iterations", 0)
-    max_iterations = 10  # From graph_helpers.py
 
-    assert iterations <= max_iterations, (
-        f"Agent used {iterations} iterations, exceeding limit of {max_iterations}"
+@pytest.mark.parametrize("incident_id", incident_ids())
+@pytest.mark.asyncio
+async def test_iterations_are_bounded(
+    incident_id: str,
+    agent_client: AgentClient,
+) -> None:
+    """Verify the agent does not exceed its configured iteration limit."""
+    incident = incident_by_id(incident_id)
+    result = await run_incident(
+        agent_client,
+        incident,
+    )
+
+    iterations = required_nonnegative_int(
+        result,
+        "iterations",
+    )
+
+    assert iterations <= MAX_ITERATIONS, (
+        f"Incident {incident_id}: agent used {iterations} iterations, "
+        f"exceeding limit of {MAX_ITERATIONS}"
     )

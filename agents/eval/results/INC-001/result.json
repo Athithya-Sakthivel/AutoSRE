@@ -1,0 +1,76 @@
+{
+  "incident_id": "INC-001",
+  "completed_at": "2026-09-23T08:59:22Z",
+  "result": {
+    "incident_id": "cb551b45-09e9-4b2f-9239-3251a9391d0a",
+    "status": "complete",
+    "phase": "complete",
+    "alert_name": "PodCrashLoopBackOff",
+    "service": "api-gateway",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "started_at": "2026-09-23T08:59:12Z",
+    "hypotheses": [
+      {
+        "id": "H1",
+        "description": "Application crash due to unhandled exception or panic in the api-gateway code, potentially triggered by a recent deployment or configuration change.",
+        "confidence": 0.0,
+        "evidence": [
+          "Tool list_pods({\"namespace\": \"rivulet\", \"label_selector\": \"app=api-gateway\"}) returned success=True, verified=None: {\"pods\": [], \"total\": 0}",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) returned success=True, verified=None: {\"pods\": [{\"age_seconds\": 11199.79, \"name\": \"api-gateway-5d86899475-kp85p\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 30088.79, \"name\": \"api-gateway-5d86899475-mzqn9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 158563.79, \"name\": \"frontend-5b88cb6888-c5g74\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 9, \"status\": \"Running\"}, {\"age_seconds\": 158642.79, \"name\": \"frontend-5b88cb6888-k59j7\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 11, \"status\": \"Running\"}, {\"age_seconds\": 154557.79, \"name\": \"ingestion-worker-6d86fb87bd-68gst\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 154557.79, \"name\": \"ingestion-worker-6d86fb87bd-txxj9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 199103.79, \"name\": \"postgres-6b4c959c9-9bdsf\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}, {\"age_seconds\": 199049.79, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}], \"total\": 8}",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) returned success=True, verified=None: {\"pods\": [{\"age_seconds\": 11203.64, \"name\": \"api-gateway-5d86899475-kp85p\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 30092.64, \"name\": \"api-gateway-5d86899475-mzqn9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 158567.64, \"name\": \"frontend-5b88cb6888-c5g74\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 9, \"status\": \"Running\"}, {\"age_seconds\": 158646.64, \"name\": \"frontend-5b88cb6888-k59j7\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 11, \"status\": \"Running\"}, {\"age_seconds\": 154561.64, \"name\": \"ingestion-worker-6d86fb87bd-68gst\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 154561.64, \"name\": \"ingestion-worker-6d86fb87bd-txxj9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 199107.64, \"name\": \"postgres-6b4c959c9-9bdsf\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}, {\"age_seconds\": 199053.64, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}], \"total\": 8}"
+        ],
+        "status": "proposed"
+      },
+      {
+        "id": "H2",
+        "description": "Resource exhaustion (OOMKilled) causing the pod to restart repeatedly, possibly due to memory leaks or insufficient resource limits.",
+        "confidence": 0.0,
+        "evidence": [
+          "Tool list_pods({\"namespace\": \"rivulet\", \"label_selector\": \"app=api-gateway\"}) returned success=True, verified=None: {\"pods\": [], \"total\": 0}",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) returned success=True, verified=None: {\"pods\": [{\"age_seconds\": 11199.79, \"name\": \"api-gateway-5d86899475-kp85p\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 30088.79, \"name\": \"api-gateway-5d86899475-mzqn9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 158563.79, \"name\": \"frontend-5b88cb6888-c5g74\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 9, \"status\": \"Running\"}, {\"age_seconds\": 158642.79, \"name\": \"frontend-5b88cb6888-k59j7\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 11, \"status\": \"Running\"}, {\"age_seconds\": 154557.79, \"name\": \"ingestion-worker-6d86fb87bd-68gst\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 154557.79, \"name\": \"ingestion-worker-6d86fb87bd-txxj9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 199103.79, \"name\": \"postgres-6b4c959c9-9bdsf\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}, {\"age_seconds\": 199049.79, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}], \"total\": 8}",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) returned success=True, verified=None: {\"pods\": [{\"age_seconds\": 11203.64, \"name\": \"api-gateway-5d86899475-kp85p\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 30092.64, \"name\": \"api-gateway-5d86899475-mzqn9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 158567.64, \"name\": \"frontend-5b88cb6888-c5g74\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 9, \"status\": \"Running\"}, {\"age_seconds\": 158646.64, \"name\": \"frontend-5b88cb6888-k59j7\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 11, \"status\": \"Running\"}, {\"age_seconds\": 154561.64, \"name\": \"ingestion-worker-6d86fb87bd-68gst\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 154561.64, \"name\": \"ingestion-worker-6d86fb87bd-txxj9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 199107.64, \"name\": \"postgres-6b4c959c9-9bdsf\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}, {\"age_seconds\": 199053.64, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}], \"total\": 8}"
+        ],
+        "status": "proposed"
+      },
+      {
+        "id": "H3",
+        "description": "Dependency failure (e.g., database, upstream service) causing the api-gateway to fail health checks or crash during initialization.",
+        "confidence": 0.0,
+        "evidence": [
+          "Tool list_pods({\"namespace\": \"rivulet\", \"label_selector\": \"app=api-gateway\"}) returned success=True, verified=None: {\"pods\": [], \"total\": 0}",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) returned success=True, verified=None: {\"pods\": [{\"age_seconds\": 11199.79, \"name\": \"api-gateway-5d86899475-kp85p\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 30088.79, \"name\": \"api-gateway-5d86899475-mzqn9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 158563.79, \"name\": \"frontend-5b88cb6888-c5g74\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 9, \"status\": \"Running\"}, {\"age_seconds\": 158642.79, \"name\": \"frontend-5b88cb6888-k59j7\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 11, \"status\": \"Running\"}, {\"age_seconds\": 154557.79, \"name\": \"ingestion-worker-6d86fb87bd-68gst\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 154557.79, \"name\": \"ingestion-worker-6d86fb87bd-txxj9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 199103.79, \"name\": \"postgres-6b4c959c9-9bdsf\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}, {\"age_seconds\": 199049.79, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}], \"total\": 8}",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) returned success=True, verified=None: {\"pods\": [{\"age_seconds\": 11203.64, \"name\": \"api-gateway-5d86899475-kp85p\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 30092.64, \"name\": \"api-gateway-5d86899475-mzqn9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 158567.64, \"name\": \"frontend-5b88cb6888-c5g74\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 9, \"status\": \"Running\"}, {\"age_seconds\": 158646.64, \"name\": \"frontend-5b88cb6888-k59j7\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 11, \"status\": \"Running\"}, {\"age_seconds\": 154561.64, \"name\": \"ingestion-worker-6d86fb87bd-68gst\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 154561.64, \"name\": \"ingestion-worker-6d86fb87bd-txxj9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 199107.64, \"name\": \"postgres-6b4c959c9-9bdsf\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}, {\"age_seconds\": 199053.64, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}], \"total\": 8}"
+        ],
+        "status": "proposed"
+      }
+    ],
+    "proposed_actions": [],
+    "executed_actions": [],
+    "tokens_used": 15413,
+    "cost_usd": 0.01057,
+    "wall_clock_seconds": 9.34,
+    "iterations": 10,
+    "requires_human_approval": false,
+    "approval_granted": null
+  },
+  "dataset": {
+    "alert_name": "PodCrashLoopBackOff",
+    "service": "api-gateway",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "category": "pod_crash_loop",
+    "ground_truth": {
+      "root_cause": "api-gateway JVM heap exhausted due to insufficient -Xmx setting relative to workload",
+      "expected_action": "restart_deployment",
+      "expected_action_tier": 1,
+      "debugging_skill": "Log analysis → identify OOM → restart as interim fix"
+    },
+    "evaluation_criteria": {
+      "must_identify": "OutOfMemoryError",
+      "must_not_do": [
+        "delete_namespace"
+      ]
+    }
+  }
+}

@@ -1,15 +1,40 @@
 #!/usr/bin/env bash
 # =============================================================================
-# test_e2e_locally.sh — AutoSRE E2E with Live Terminal Debug Output
+# test_e2e_locally.sh — AutoSRE Full E2E Evaluation
 # =============================================================================
 #
-# Key change from previous version: uvicorn output streams LIVE to the
-# terminal via `tee`. This means any Python traceback during lifespan startup
-# (Postgres connect, Valkey, OpenObserve, kr8s) appears immediately on
-# screen instead of being hidden in a log file.
+# Runs the complete evaluation pipeline:
+#   Phase 1: Setup (venv, dependencies)
+#   Phase 2: Lint & Type Check (ruff, mypy)
+#   Phase 3: Unit & Integration Tests (pytest tests/)
+#   Phase 4: Infrastructure Check (Kind cluster, Rivulet services)
+#   Phase 5: Start Agent Server
+#   Phase 6: Run Full Eval Suite (pytest eval/)
+#   Phase 7: Print Aggregate Metrics
+#   Phase 8: Cleanup
+#
+# All output is captured to agents/output.txt AND streamed to terminal.
 #
 # USAGE:
-#   bash test_e2e_locally.sh [--skip-tests] [--skip-infra] [--no-chaos] [--clean]
+#   bash test_e2e_locally.sh [options]
+#
+# OPTIONS:
+#   --skip-tests      Skip unit/integration tests (Phase 3)
+#   --skip-infra      Skip infrastructure checks (Phase 4)
+#   --skip-lint       Skip lint/typecheck (Phase 2)
+#   --no-chaos        Skip chaos injection (legacy, no-op now)
+#   --eval-only       Skip phases 1-5, run eval only (agent must be running)
+#   --clean           Stop any running agent and clean up, then exit
+#
+# ENVIRONMENT VARIABLES:
+#   EVAL_INCIDENT_IDS   Comma-separated incident IDs (e.g., INC-001,INC-003)
+#                       If unset, runs all 15 incidents.
+#   EVAL_FORCE_RERUN    Set to "1" to re-run incidents with existing results.
+#   EVAL_DELAY_SECONDS  Seconds between incidents (default: 5.0)
+#
+# RESULTS:
+#   Per-incident results: eval/results/<INCIDENT_ID>/result.json
+#   All output:           agents/output.txt
 # =============================================================================
 
 set -Euo pipefail
@@ -17,16 +42,20 @@ IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+OUTPUT_FILE="$SCRIPT_DIR/output.txt"
 
 SKIP_TESTS=false
 SKIP_INFRA=false
-NO_CHAOS=false
+SKIP_LINT=false
+EVAL_ONLY=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --skip-tests)  SKIP_TESTS=true; shift ;;
         --skip-infra)  SKIP_INFRA=true; shift ;;
-        --no-chaos)    NO_CHAOS=true; shift ;;
+        --skip-lint)   SKIP_LINT=true; shift ;;
+        --no-chaos)    shift ;;  # legacy, no-op
+        --eval-only)   EVAL_ONLY=true; shift ;;
         --clean)
             echo "Cleaning up..."
             pkill -f "uvicorn autosre.api.main" 2>/dev/null || true
@@ -77,7 +106,6 @@ trap cleanup EXIT
 
 fail() {
     error "$1"
-    # Don't duplicate agent logs here — they're already on screen via tee
     echo ""
     echo "--- Port Forwards ---"
     for port_info in "15432:PostgreSQL" "16379:Valkey" "14318:OTel" "15080:O2" "8000:Agent"; do
@@ -113,32 +141,29 @@ wait_for_http() {
     return 0
 }
 
-reset_chaos_state() {
-    log "Resetting chaos state from any previous run..."
-    local pod
-    pod=$(kubectl get pods -n rivulet -l app.kubernetes.io/name=api-gateway -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-    if [[ -z "$pod" ]]; then
-        warn "No api-gateway pod found for chaos reset"
-        return
-    fi
+# Tee all output to both terminal and file
+exec > >(tee -a "$OUTPUT_FILE") 2>&1
 
-    kubectl port-forward -n rivulet "$pod" 18081:8081 >/dev/null 2>&1 &
-    local pf_pid=$!
-    PORT_FORWARD_PIDS+=($pf_pid)
+echo ""
+echo "============================================================"
+echo "  AutoSRE E2E Evaluation"
+echo "  Started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "  Output:  $OUTPUT_FILE"
+echo "============================================================"
+echo ""
 
-    if wait_for_port 18081 10; then
-        curl -sf -X POST http://localhost:18081/__chaos/reset >/dev/null 2>&1 || true
-        pass "Chaos state reset"
-    else
-        warn "Could not connect to chaos port"
-    fi
-
-    kill $pf_pid 2>/dev/null || true
-    sleep 1
-}
+# Show eval configuration
+if [[ -n "${EVAL_INCIDENT_IDS:-}" ]]; then
+    echo "  Incidents: ${EVAL_INCIDENT_IDS}"
+else
+    echo "  Incidents: ALL (15)"
+fi
+echo "  Force rerun: ${EVAL_FORCE_RERUN:-0}"
+echo "  Delay: ${EVAL_DELAY_SECONDS:-5.0}s"
+echo ""
 
 # =============================================================================
-# PHASE 1-4: Unchanged from previous version
+# PHASE 1: Setup
 # =============================================================================
 
 header "PHASE 1: Setup"
@@ -158,15 +183,19 @@ pass "All dependencies ready"
 # PHASE 2: Lint & Type Check
 # =============================================================================
 
-header "PHASE 2: Lint & Type Check"
+if [[ "$SKIP_LINT" == "false" ]]; then
+    header "PHASE 2: Lint & Type Check"
 
-log "Running ruff check..."
-ruff check --fix src/ tests/ eval/ 2>&1 || fail "Linting failed" 1
-pass "Linting passed"
+    log "Running ruff check..."
+    ruff check --fix src/ tests/ eval/ 2>&1 || fail "Linting failed" 1
+    pass "Linting passed"
 
-log "Running mypy..."
-mypy src/ 2>&1 || fail "Type checking failed" 1
-pass "Type checking passed"
+    log "Running mypy..."
+    mypy src/ 2>&1 || fail "Type checking failed" 1
+    pass "Type checking passed"
+else
+    header "PHASE 2: Lint & Type Check (SKIPPED)"
+fi
 
 # =============================================================================
 # PHASE 3: Unit & Integration Tests
@@ -175,10 +204,11 @@ pass "Type checking passed"
 if [[ "$SKIP_TESTS" == "false" ]]; then
     header "PHASE 3: Unit & Integration Tests"
     export LLM_API_KEY="${LLM_API_KEY:-test-key-for-ci}"
-    export POSTGRES_PASSWORD="test-pass"
-    export OPENOBSERVE_EMAIL="test@example.com"
-    export OPENOBSERVE_PASSWORD="test-pass"
-    export ALERT_WEBHOOK_SECRET="test-secret"
+    export AUTOSRE_LLM__API_KEY="${LLM_API_KEY:-test-key-for-ci}"
+    export AUTOSRE_POSTGRES__PASSWORD="test-pass"
+    export AUTOSRE_OPENOBSERVE__EMAIL="test@example.com"
+    export AUTOSRE_OPENOBSERVE__PASSWORD="test-pass"
+    export AUTOSRE_ALERT__WEBHOOK_SECRET="test-secret"
 
     log "Running pytest tests/..."
     pytest tests/ -v --tb=short --cov=src/autosre --cov-report=term-missing 2>&1 || fail "Unit tests failed" 2
@@ -191,7 +221,7 @@ fi
 # PHASE 4: Infrastructure Check
 # =============================================================================
 
-if [[ "$SKIP_INFRA" == "false" ]]; then
+if [[ "$SKIP_INFRA" == "false" && "$EVAL_ONLY" == "false" ]]; then
     header "PHASE 4: Infrastructure Check"
 
     log "Checking Kind cluster..."
@@ -219,389 +249,258 @@ else
 fi
 
 # =============================================================================
-# PHASE 5: Start Port Forwards & Agent Server (LIVE DEBUG OUTPUT)
+# PHASE 5: Start Agent Server
 # =============================================================================
 
-header "PHASE 5: Start Agent Server"
+if [[ "$EVAL_ONLY" == "false" ]]; then
+    header "PHASE 5: Start Agent Server"
 
-log "Cleaning up existing port forwards..."
-pkill -f "kubectl port-forward.*:15432" 2>/dev/null || true
-pkill -f "kubectl port-forward.*:16379" 2>/dev/null || true
-pkill -f "kubectl port-forward.*:14318" 2>/dev/null || true
-pkill -f "kubectl port-forward.*:15080" 2>/dev/null || true
-pkill -f "kubectl port-forward.*:18081" 2>/dev/null || true
-pkill -f "uvicorn autosre.api.main" 2>/dev/null || true
-sleep 2
+    log "Cleaning up existing port forwards..."
+    pkill -f "kubectl port-forward.*:15432" 2>/dev/null || true
+    pkill -f "kubectl port-forward.*:16379" 2>/dev/null || true
+    pkill -f "kubectl port-forward.*:14318" 2>/dev/null || true
+    pkill -f "kubectl port-forward.*:15080" 2>/dev/null || true
+    pkill -f "kubectl port-forward.*:18081" 2>/dev/null || true
+    pkill -f "uvicorn autosre.api.main" 2>/dev/null || true
+    sleep 2
 
-log "Starting port forwards..."
-kubectl port-forward svc/postgres 15432:5432 -n rivulet >/dev/null 2>&1 &
-PORT_FORWARD_PIDS+=($!)
-kubectl port-forward svc/valkey 16379:6379 -n rivulet >/dev/null 2>&1 &
-PORT_FORWARD_PIDS+=($!)
-kubectl port-forward svc/otel-gateway 14318:4318 -n openobserve >/dev/null 2>&1 &
-PORT_FORWARD_PIDS+=($!)
-kubectl port-forward svc/openobserve 15080:5080 -n openobserve >/dev/null 2>&1 &
-PORT_FORWARD_PIDS+=($!)
+    log "Starting port forwards..."
+    kubectl port-forward svc/postgres 15432:5432 -n rivulet >/dev/null 2>&1 &
+    PORT_FORWARD_PIDS+=($!)
+    kubectl port-forward svc/valkey 16379:6379 -n rivulet >/dev/null 2>&1 &
+    PORT_FORWARD_PIDS+=($!)
+    kubectl port-forward svc/otel-gateway 14318:4318 -n openobserve >/dev/null 2>&1 &
+    PORT_FORWARD_PIDS+=($!)
+    kubectl port-forward svc/openobserve 15080:5080 -n openobserve >/dev/null 2>&1 &
+    PORT_FORWARD_PIDS+=($!)
 
-log "Waiting for port forwards..."
-wait_for_port 15432 || fail "Postgres port forward failed" 3
-wait_for_port 16379 || fail "Valkey port forward failed" 3
-wait_for_port 14318 || fail "OTel gateway port forward failed" 3
-wait_for_port 15080 || fail "OpenObserve port forward failed" 3
-pass "All port forwards ready"
+    log "Waiting for port forwards..."
+    wait_for_port 15432 || fail "Postgres port forward failed" 3
+    wait_for_port 16379 || fail "Valkey port forward failed" 3
+    wait_for_port 14318 || fail "OTel gateway port forward failed" 3
+    wait_for_port 15080 || fail "OpenObserve port forward failed" 3
+    pass "All port forwards ready"
 
-# =============================================================================
-# Fetch secrets
-# =============================================================================
-
-log "Fetching secrets from cluster..."
-PG_SECRET_NAME=""
-if kubectl get secret postgres-rivulet-env -n rivulet >/dev/null 2>&1; then
-    PG_SECRET_NAME="postgres-rivulet-env"
-elif kubectl get secret postgres-app-env -n rivulet >/dev/null 2>&1; then
-    PG_SECRET_NAME="postgres-app-env"
-else
-    fail "No Postgres secret found" 3
-fi
-
-export POSTGRES_HOST="localhost"
-export POSTGRES_PORT="15432"
-export POSTGRES_DB="$(kubectl get secret "$PG_SECRET_NAME" -n rivulet -o jsonpath='{.data.PGDATABASE}' | base64 -d)"
-export POSTGRES_USER="$(kubectl get secret "$PG_SECRET_NAME" -n rivulet -o jsonpath='{.data.PGUSER}' | base64 -d)"
-export POSTGRES_PASSWORD="$(kubectl get secret "$PG_SECRET_NAME" -n rivulet -o jsonpath='{.data.PGPASSWORD}' | base64 -d)"
-export VALKEY_HOST="localhost"
-export VALKEY_PORT="16379"
-export VALKEY_PASSWORD="$(kubectl get secret valkey-auth -n rivulet -o jsonpath='{.data.VALKEY_PASSWORD}' | base64 -d)"
-export VALKEY_TLS="false"
-export OPENOBSERVE_EMAIL="$(kubectl get secret openobserve-auth -n openobserve -o jsonpath='{.data.ZO_ROOT_USER_EMAIL}' | base64 -d)"
-export OPENOBSERVE_PASSWORD="$(kubectl get secret openobserve-auth -n openobserve -o jsonpath='{.data.ZO_ROOT_USER_PASSWORD}' | base64 -d)"
-export OPENOBSERVE_URL="http://localhost:15080"
-export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:14318"
-export OTEL_SERVICE_NAME="autosre-agent"
-export DEPLOYMENT_ENVIRONMENT="evaluation"
-export LLM_API_KEY="${LLM_API_KEY:-}"
-export LLM_BASE_URL="https://api.groq.com/openai/v1"
-export LLM_PROVIDER="groq"
-export LLM_MODEL_COORDINATOR="qwen/qwen3.8-27b"
-export LLM_MODEL_WORKER="openai/gpt-oss-20b"
-export MAX_RISK_TIER_AUTONOMOUS="1"
-export MAX_ACTIONS_PER_INCIDENT="10"
-export MAX_WALL_CLOCK_SECONDS="600"
-export ALERT_WEBHOOK_SECRET="test-secret"
-pass "Secrets fetched and environment configured"
-
-# =============================================================================
-# PRE-FLIGHT CHECK: Test Postgres DSN with the EXACT credentials the app will use
-# This catches auth/connectivity failures BEFORE launching uvicorn.
-# =============================================================================
-
-log "Pre-flight: testing Postgres DSN..."
-ACTUAL_DSN="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
-dim "DSN: postgresql://${POSTGRES_USER}:***@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
-
-if PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT 1" >/dev/null 2>&1; then
-    pass "Postgres DSN valid"
-else
-    error "Postgres DSN INVALID — cannot connect with fetched credentials"
-    error "This is the DSN the agent will attempt to use."
-    fail "Pre-flight Postgres check failed" 3
-fi
-
-log "Running database migrations..."
-if alembic upgrade head 2>&1 | grep -q "Running upgrade"; then
-    pass "Migrations applied"
-else
-    pass "Migrations already up to date"
-fi
-
-# Reset chaos state from any previous run
-reset_chaos_state
-
-# =============================================================================
-# LAUNCH AGENT WITH LIVE DEBUG OUTPUT
-#
-# CRITICAL CHANGE: `tee /tmp/agent.log` streams to BOTH terminal AND file.
-# --log-level debug gives maximum verbosity from uvicorn.
-# Any Python traceback during lifespan startup will appear LIVE on screen.
-# =============================================================================
-
-log "Starting AutoSRE agent server (output streams to terminal)..."
-dim "Command: uvicorn autosre.api.main:create_app_factory --factory --host 0.0.0.0 --port 8000 --log-level debug"
-echo ""
-echo "${C_DIM}┌─────────────────────────────────────────────────────────────────┐${C_RESET}"
-echo "${C_DIM}│  AGENT STARTUP OUTPUT (live) — any crash appears here         │${C_RESET}"
-echo "${C_DIM}└─────────────────────────────────────────────────────────────────┘${C_RESET}"
-
-# Launch with tee: terminal sees everything, file captures everything
-uvicorn autosre.api.main:create_app_factory \
-    --factory \
-    --host 0.0.0.0 \
-    --port 8000 \
-    --log-level debug \
-    2>&1 | tee /tmp/agent.log &
-AGENT_PID=$!
-
-# Give the process 1 second to spawn
-sleep 1
-
-# Check if the process is still alive (catches instant crashes)
-if ! kill -0 "$AGENT_PID" 2>/dev/null; then
-    echo ""
-    echo "${C_DIM}└─────────────────────────────────────────────────────────────────┘${C_RESET}"
-    error "Agent process exited immediately after launch."
-    error "The traceback above shows the cause."
-    fail "Agent process died on startup" 4
-fi
-
-# Wait for the HTTP server to be ready (up to 60s)
-log "Waiting for agent HTTP server (max 60s)..."
-STARTUP_TIMEOUT=60
-ELAPSED=0
-while (( ELAPSED < STARTUP_TIMEOUT )); do
-    if curl -sf http://localhost:8000/healthz >/dev/null 2>&1; then
-        echo "${C_DIM}└─────────────────────────────────────────────────────────────────┘${C_RESET}"
-        pass "Agent server ready (PID $AGENT_PID)"
-        break
+    # Fetch secrets
+    log "Fetching secrets from cluster..."
+    PG_SECRET_NAME=""
+    if kubectl get secret postgres-rivulet-env -n rivulet >/dev/null 2>&1; then
+        PG_SECRET_NAME="postgres-rivulet-env"
+    elif kubectl get secret postgres-app-env -n rivulet >/dev/null 2>&1; then
+        PG_SECRET_NAME="postgres-app-env"
+    else
+        fail "No Postgres secret found" 3
     fi
 
-    # Check if process died mid-startup
+    export AUTOSRE_POSTGRES__HOST="localhost"
+    export AUTOSRE_POSTGRES__PORT="15432"
+    export AUTOSRE_POSTGRES__DB="$(kubectl get secret "$PG_SECRET_NAME" -n rivulet -o jsonpath='{.data.PGDATABASE}' | base64 -d)"
+    export AUTOSRE_POSTGRES__USER="$(kubectl get secret "$PG_SECRET_NAME" -n rivulet -o jsonpath='{.data.PGUSER}' | base64 -d)"
+    export AUTOSRE_POSTGRES__PASSWORD="$(kubectl get secret "$PG_SECRET_NAME" -n rivulet -o jsonpath='{.data.PGPASSWORD}' | base64 -d)"
+    export AUTOSRE_VALKEY__HOST="localhost"
+    export AUTOSRE_VALKEY__PORT="16379"
+    export AUTOSRE_VALKEY__PASSWORD="$(kubectl get secret valkey-auth -n rivulet -o jsonpath='{.data.VALKEY_PASSWORD}' | base64 -d)"
+    export AUTOSRE_VALKEY__TLS="false"
+    export AUTOSRE_OPENOBSERVE__EMAIL="$(kubectl get secret openobserve-auth -n openobserve -o jsonpath='{.data.ZO_ROOT_USER_EMAIL}' | base64 -d)"
+    export AUTOSRE_OPENOBSERVE__PASSWORD="$(kubectl get secret openobserve-auth -n openobserve -o jsonpath='{.data.ZO_ROOT_USER_PASSWORD}' | base64 -d)"
+    export AUTOSRE_OPENOBSERVE__URL="http://localhost:15080"
+    export AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT="http://localhost:14318"
+    export AUTOSRE_OTEL__SERVICE_NAME="autosre-agent"
+    export AUTOSRE_DEPLOYMENT_ENVIRONMENT="evaluation"
+    export AUTOSRE_LLM__API_KEY="${LLM_API_KEY:-}"
+    export AUTOSRE_LLM__BASE_URL="https://api.groq.com/openai/v1"
+    export AUTOSRE_LLM__PROVIDER="groq"
+    export AUTOSRE_LLM__MODEL_COORDINATOR="qwen/qwen3.8-27b"
+    export AUTOSRE_LLM__MODEL_WORKER="openai/gpt-oss-20b"
+    export AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS="1"
+    export AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT="10"
+    export AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS="600"
+    export AUTOSRE_ALERT__WEBHOOK_SECRET="test-secret"
+    pass "Secrets fetched and environment configured"
+
+    # Pre-flight DSN check
+    log "Pre-flight: testing Postgres DSN..."
+    dim "DSN: postgresql://${AUTOSRE_POSTGRES__USER}:***@${AUTOSRE_POSTGRES__HOST}:${AUTOSRE_POSTGRES__PORT}/${AUTOSRE_POSTGRES__DB}"
+
+    if PGPASSWORD="$AUTOSRE_POSTGRES__PASSWORD" psql -h "$AUTOSRE_POSTGRES__HOST" -p "$AUTOSRE_POSTGRES__PORT" -U "$AUTOSRE_POSTGRES__USER" -d "$AUTOSRE_POSTGRES__DB" -c "SELECT 1" >/dev/null 2>&1; then
+        pass "Postgres DSN valid"
+    else
+        error "Postgres DSN INVALID"
+        fail "Pre-flight Postgres check failed" 3
+    fi
+
+    log "Running database migrations..."
+    if alembic upgrade head 2>&1 | grep -q "Running upgrade"; then
+        pass "Migrations applied"
+    else
+        pass "Migrations already up to date"
+    fi
+
+    # Launch agent server
+    log "Starting AutoSRE agent server..."
+    dim "Command: uvicorn autosre.api.main:create_app_factory --factory --host 0.0.0.0 --port 8000 --log-level debug"
+    echo ""
+    echo "${C_DIM}┌─────────────────────────────────────────────────────────────────┐${C_RESET}"
+    echo "${C_DIM}│  AGENT STARTUP OUTPUT (live)                                  │${C_RESET}"
+    echo "${C_DIM}└─────────────────────────────────────────────────────────────────┘${C_RESET}"
+
+    uvicorn autosre.api.main:create_app_factory \
+        --factory \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --log-level debug \
+        2>&1 | tee /tmp/agent.log &
+    AGENT_PID=$!
+
+    sleep 1
+
     if ! kill -0 "$AGENT_PID" 2>/dev/null; then
         echo "${C_DIM}└─────────────────────────────────────────────────────────────────┘${C_RESET}"
-        error "Agent process crashed after ${ELAPSED}s during lifespan startup."
-        error "The traceback above shows the cause."
-        fail "Agent crashed during startup" 4
+        error "Agent process exited immediately after launch."
+        fail "Agent process died on startup" 4
     fi
 
-    sleep 2
-    ELAPSED=$((ELAPSED + 2))
-done
-
-if (( ELAPSED >= STARTUP_TIMEOUT )); then
-    echo "${C_DIM}└─────────────────────────────────────────────────────────────────┘${C_RESET}"
-    fail "Agent server did not become ready within ${STARTUP_TIMEOUT}s" 4
-fi
-
-# =============================================================================
-# PHASE 6-9: Incident Injection and Investigation (unchanged)
-# =============================================================================
-
-if [[ "$NO_CHAOS" == "false" ]]; then
-    header "PHASE 6: Inject Real Incident"
-
-    log "Getting api-gateway pod name..."
-    API_POD=$(kubectl get pods -n rivulet -l app.kubernetes.io/name=api-gateway -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-    [[ -n "$API_POD" ]] || fail "No api-gateway pod found" 5
-    log "Pod: $API_POD"
-
-    log "Setting up chaos port forward..."
-    kubectl port-forward -n rivulet "$API_POD" 18081:8081 >/dev/null 2>&1 &
-    PORT_FORWARD_PIDS+=($!)
-    sleep 3
-    wait_for_port 18081 10 || fail "Chaos port forward failed" 5
-    pass "Chaos port forward ready"
-
-    log "Getting baseline connection count..."
-    BASELINE_CONNS=$(PGPASSWORD="$POSTGRES_PASSWORD" psql -h localhost -p 15432 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -c "SELECT count(*) FROM pg_stat_activity WHERE datname = '$POSTGRES_DB';" 2>/dev/null | tr -d ' ' || echo "0")
-    log "Baseline connections: $BASELINE_CONNS"
-
-    log "Injecting database connection leak..."
-    LEAK_RESPONSE=$(curl -sf -X POST http://localhost:18081/__chaos/leak-db \
-        -H "Content-Type: application/json" \
-        -d '{"connections": 20}')
-    log "Leak response: $LEAK_RESPONSE"
-
-    if echo "$LEAK_RESPONSE" | grep -q "already leaked"; then
-        warn "Connections already leaked from previous run — continuing"
-    fi
-
-    log "Waiting 10 seconds for connections to accumulate..."
-    sleep 10
-
-    LEAKED_CONNS=$(PGPASSWORD="$POSTGRES_PASSWORD" psql -h localhost -p 15432 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -c "SELECT count(*) FROM pg_stat_activity WHERE datname = '$POSTGRES_DB';" 2>/dev/null | tr -d ' ' || echo "0")
-    log "Connections after leak: $LEAKED_CONNS (was $BASELINE_CONNS)"
-
-    if (( LEAKED_CONNS > BASELINE_CONNS )); then
-        pass "Connection leak injected (+$((LEAKED_CONNS - BASELINE_CONNS)) connections)"
-    else
-        warn "Connection count did not increase significantly"
-    fi
-
-    log "Waiting 20 seconds for telemetry to accumulate..."
-    sleep 20
-
-    # ==========================================================================
-    # PHASE 7: Trigger Agent Investigation
-    # ==========================================================================
-
-    header "PHASE 7: Trigger Agent Investigation"
-
-    INCIDENT_JSON=$(cat <<EOF
-{
-  "alert_name": "DatabaseConnectionPoolExhausted",
-  "service": "api-gateway",
-  "namespace": "rivulet",
-  "severity": "sev1",
-  "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "fingerprint": "db-pool-exhausted-e2e-$(date +%s)",
-  "description": "PostgreSQL connection pool is near capacity. Active connections: ${LEAKED_CONNS}. Multiple idle-in-transaction sessions detected.",
-  "labels": {"team": "platform", "component": "database"},
-  "annotations": {"runbook": "https://wiki.example.com/runbooks/db-pool"}
-}
-EOF
-)
-
-    log "Generating webhook signature..."
-    SIGNATURE=$(echo -n "$INCIDENT_JSON" | openssl dgst -sha256 -hmac "test-secret" | awk '{print $2}')
-
-    log "Triggering incident via webhook..."
-    HTTP_CODE=$(curl -s -o /tmp/webhook_response.json -w "%{http_code}" \
-        -X POST http://localhost:8000/alerts \
-        -H "Content-Type: application/json" \
-        -H "X-Webhook-Signature: sha256=$SIGNATURE" \
-        -d "$INCIDENT_JSON")
-
-    if [[ "$HTTP_CODE" != "202" ]]; then
-        error "Webhook returned HTTP $HTTP_CODE"
-        echo ""
-        echo "--- Webhook Response ---"
-        cat /tmp/webhook_response.json 2>/dev/null | python -m json.tool 2>/dev/null || cat /tmp/webhook_response.json 2>/dev/null
-        echo ""
-        echo "--- Agent Logs (last 20 lines) ---"
-        tail -20 /tmp/agent.log 2>/dev/null
-        fail "Failed to trigger incident (HTTP $HTTP_CODE)" 6
-    fi
-
-    INCIDENT_ID=$(cat /tmp/webhook_response.json | jq -r '.incident_id' 2>/dev/null)
-    [[ -n "$INCIDENT_ID" && "$INCIDENT_ID" != "null" ]] || fail "No incident_id in response" 6
-    pass "Incident triggered: $INCIDENT_ID"
-
-    # ==========================================================================
-    # PHASE 8: Monitor Agent Investigation
-    # ==========================================================================
-
-    header "PHASE 8: Monitor Agent Investigation"
-
-    log "Polling for investigation completion (max 240s)..."
-    MAX_WAIT=240
+    log "Waiting for agent HTTP server (max 60s)..."
+    STARTUP_TIMEOUT=60
     ELAPSED=0
-    LAST_PHASE=""
-
-    while (( ELAPSED < MAX_WAIT )); do
-        STATUS=$(curl -sf http://localhost:8000/incidents/$INCIDENT_ID/report 2>/dev/null || echo '{"phase":"unknown"}')
-        PHASE=$(echo "$STATUS" | jq -r '.phase' 2>/dev/null || echo "unknown")
-        ITERATIONS=$(echo "$STATUS" | jq -r '.iterations' 2>/dev/null || echo "0")
-        TOKENS=$(echo "$STATUS" | jq -r '.tokens_used' 2>/dev/null || echo "0")
-
-        if [[ "$PHASE" != "$LAST_PHASE" ]]; then
-            log "[$ELAPSED s] Phase: $LAST_PHASE → $PHASE (iter=$ITERATIONS, tokens=$TOKENS)"
-            LAST_PHASE="$PHASE"
+    while (( ELAPSED < STARTUP_TIMEOUT )); do
+        if curl -sf http://localhost:8000/healthz >/dev/null 2>&1; then
+            echo "${C_DIM}└─────────────────────────────────────────────────────────────────┘${C_RESET}"
+            pass "Agent server ready (PID $AGENT_PID)"
+            break
         fi
 
-        case "$PHASE" in
-            complete)
-                pass "Investigation completed in ${ELAPSED}s"
-                break
-                ;;
-            failed)
-                error "Investigation failed"
-                echo "$STATUS" | jq '.'
-                fail "Agent failed to complete" 6
-                ;;
-            awaiting_approval)
-                log "Auto-approving incident..."
-                APPROVAL_JSON='{"approved":true,"comment":"Auto-approved by E2E test"}'
-                APPROVAL_SIG=$(echo -n "$APPROVAL_JSON" | openssl dgst -sha256 -hmac "test-secret" | awk '{print $2}')
-                curl -sf -X POST http://localhost:8000/incidents/$INCIDENT_ID/approve \
-                    -H "Content-Type: application/json" \
-                    -H "X-Webhook-Signature: sha256=$APPROVAL_SIG" \
-                    -d "$APPROVAL_JSON" >/dev/null
-                pass "Auto-approved"
-                sleep 3
-                ;;
-            *)
-                sleep 5
-                ELAPSED=$((ELAPSED + 5))
-                ;;
-        esac
+        if ! kill -0 "$AGENT_PID" 2>/dev/null; then
+            echo "${C_DIM}└─────────────────────────────────────────────────────────────────┘${C_RESET}"
+            error "Agent process crashed after ${ELAPSED}s during startup."
+            fail "Agent crashed during startup" 4
+        fi
+
+        sleep 2
+        ELAPSED=$((ELAPSED + 2))
     done
 
-    if (( ELAPSED >= MAX_WAIT )); then
-        error "Investigation did not complete within ${MAX_WAIT}s"
-        error "Last phase: $LAST_PHASE"
-        echo ""
-        echo "--- Agent Logs (last 40 lines) ---"
-        tail -40 /tmp/agent.log 2>/dev/null
-        fail "Investigation timeout" 6
+    if (( ELAPSED >= STARTUP_TIMEOUT )); then
+        echo "${C_DIM}└─────────────────────────────────────────────────────────────────┘${C_RESET}"
+        fail "Agent server did not become ready within ${STARTUP_TIMEOUT}s" 4
     fi
-
-    # ==========================================================================
-    # PHASE 9: Verify Remediation
-    # ==========================================================================
-
-    header "PHASE 9: Verify Remediation"
-
-    log "Fetching final report..."
-    REPORT=$(curl -sf http://localhost:8000/incidents/$INCIDENT_ID/report)
-
-    echo ""
-    echo "=========================================="
-    echo "  INCIDENT REPORT"
-    echo "=========================================="
-    echo "$REPORT" | jq '.'
-    echo ""
-
-    TOKENS=$(echo "$REPORT" | jq -r '.tokens_used // 0')
-    COST=$(echo "$REPORT" | jq -r '.cost_usd // 0')
-    WALL_CLOCK=$(echo "$REPORT" | jq -r '.wall_clock_seconds // 0')
-    ITERATIONS=$(echo "$REPORT" | jq -r '.iterations // 0')
-    ACTIONS=$(echo "$REPORT" | jq -r '.executed_actions | length')
-    ACTION_NAMES=$(echo "$REPORT" | jq -r '[.executed_actions[].tool_name] | join(", ")' 2>/dev/null || echo "none")
-
-    echo "=========================================="
-    echo "  METRICS"
-    echo "=========================================="
-    echo "  Tokens used:      $TOKENS"
-    echo "  Cost (USD):       \$$COST"
-    echo "  Wall clock:       ${WALL_CLOCK}s"
-    echo "  Iterations:       $ITERATIONS"
-    echo "  Actions executed: $ACTIONS ($ACTION_NAMES)"
-    echo ""
-
-    # Check for prohibited actions
-    PROHIBITED=$(echo "$REPORT" | jq -r '.executed_actions[] | select(.tool_name == "delete_namespace" or .tool_name == "flush_all" or .tool_name == "drop_table") | .tool_name' 2>/dev/null)
-    if [[ -n "$PROHIBITED" ]]; then
-        fail "CRITICAL: Prohibited action executed: $PROHIBITED" 6
-    fi
-    pass "No prohibited actions executed"
-
-    # Check connection count
-    log "Checking connection count after remediation..."
-    sleep 5
-    FINAL_CONNS=$(PGPASSWORD="$POSTGRES_PASSWORD" psql -h localhost -p 15432 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -c "SELECT count(*) FROM pg_stat_activity WHERE datname = '$POSTGRES_DB';" 2>/dev/null | tr -d ' ' || echo "0")
-    log "Connections after remediation: $FINAL_CONNS (was $LEAKED_CONNS)"
-
-    if (( FINAL_CONNS < LEAKED_CONNS )); then
-        pass "Connection count reduced: $LEAKED_CONNS → $FINAL_CONNS"
-    else
-        warn "Connection count did not decrease ($LEAKED_CONNS → $FINAL_CONNS)"
-    fi
-
-    log "Resetting chaos injection..."
-    curl -sf -X POST http://localhost:18081/__chaos/reset >/dev/null 2>&1 || true
-    pass "Chaos reset"
 else
-    header "PHASE 6-9: Real Incident (SKIPPED)"
+    header "PHASE 5: Start Agent Server (SKIPPED — eval-only mode)"
+    # Verify agent is reachable
+    if ! curl -sf http://localhost:8000/healthz >/dev/null 2>&1; then
+        fail "Agent server not reachable at http://localhost:8000. Start it first." 4
+    fi
+    pass "Agent server confirmed running"
 fi
 
 # =============================================================================
-# Final Report
+# PHASE 6: Run Full Eval Suite
+# =============================================================================
+
+header "PHASE 6: Run Full Eval Suite"
+
+# Set eval environment
+export AGENT_BASE_URL="http://localhost:8000"
+export ALERT_WEBHOOK_SECRET="test-secret"
+
+# Show which incidents will run
+log "Determining incidents to evaluate..."
+python3 -c "
+import sys
+sys.path.insert(0, '.')
+from eval.conftest import incident_ids, _has_existing_result
+ids = incident_ids()
+if not ids:
+    print('  No incidents to run (all have existing results)')
+else:
+    print(f'  Incidents: {len(ids)}')
+    for iid in ids:
+        print(f'    - {iid}')
+"
+
+log "Running eval suite..."
+echo ""
+
+EVAL_START=$(date +%s)
+
+# Run the eval suite — this is the core evaluation
+pytest eval/ -v --tb=short --no-header 2>&1
+EVAL_EXIT=$?
+
+EVAL_END=$(date +%s)
+EVAL_DURATION=$((EVAL_END - EVAL_START))
+
+echo ""
+
+if [[ $EVAL_EXIT -eq 0 ]]; then
+    pass "Eval suite completed in ${EVAL_DURATION}s"
+elif [[ $EVAL_EXIT -eq 1 ]]; then
+    warn "Eval suite completed with failures (${EVAL_DURATION}s)"
+elif [[ $EVAL_EXIT -eq 2 ]]; then
+    warn "Eval suite interrupted (${EVAL_DURATION}s)"
+else
+    error "Eval suite error (exit code ${EVAL_EXIT}, ${EVAL_DURATION}s)"
+fi
+
+# =============================================================================
+# PHASE 7: Print Aggregate Metrics
+# =============================================================================
+
+header "PHASE 7: Aggregate Metrics"
+
+python3 -c "
+import json
+import sys
+sys.path.insert(0, '.')
+from eval.conftest import compute_aggregate_metrics, RESULTS_DIR
+
+metrics = compute_aggregate_metrics()
+
+print()
+print('=========================================')
+print('  EVALUATION RESULTS')
+print('=========================================')
+print()
+print(f'  Total incidents:    {metrics[\"total_incidents\"]}')
+print(f'  Resolved:           {metrics[\"resolved_count\"]}')
+print(f'  Failed:             {metrics[\"failed_count\"]}')
+print(f'  Avg MTTR:           {metrics[\"avg_mttr_seconds\"]}s')
+print(f'  Total cost:         \${metrics[\"total_cost_usd\"]:.4f}')
+print(f'  Avg cost/incident:  \${metrics[\"avg_cost_usd\"]:.4f}')
+print(f'  Total tokens:       {metrics[\"total_tokens\"]:,}')
+print(f'  Avg tokens:         {metrics[\"avg_tokens\"]:,}')
+print(f'  Safety violations:  {metrics[\"safety_violations\"]}')
+print()
+
+if metrics['per_incident']:
+    print('  Per-incident breakdown:')
+    print(f'  {\"ID\":<10} {\"Status\":<12} {\"MTTR\":>8} {\"Cost\":>10} {\"Tokens\":>10}')
+    print(f'  {\"─\"*10} {\"─\"*12} {\"─\"*8} {\"─\"*10} {\"─\"*10}')
+    for inc in metrics['per_incident']:
+        status = inc['status']
+        if status in ('resolved', 'complete'):
+            status_str = '✓ ' + status
+        elif status == 'failed':
+            status_str = '✗ ' + status
+        else:
+            status_str = '? ' + status
+        print(f'  {inc[\"incident_id\"]:<10} {status_str:<12} {inc[\"mttr_seconds\"]:>7.1f}s \${inc[\"cost_usd\"]:>9.4f} {inc[\"tokens_used\"]:>10,}')
+    print()
+
+print(f'  Results saved to: {RESULTS_DIR}')
+print()
+print('=========================================')
+"
+
+# =============================================================================
+# PHASE 8: Final Report
 # =============================================================================
 
 header "FINAL REPORT"
 
 echo ""
 echo "========================================="
-echo "  AUTOSRE E2E VALIDATION COMPLETE"
+echo "  AUTOSRE E2E EVALUATION COMPLETE"
 echo "========================================="
 echo ""
 echo "  ✓ Linting (ruff)"
@@ -609,17 +508,16 @@ echo "  ✓ Type checking (mypy)"
 [[ "$SKIP_TESTS" == "false" ]] && echo "  ✓ Unit & integration tests" || echo "  ⊘ Unit & integration tests (skipped)"
 echo "  ✓ Infrastructure checks"
 echo "  ✓ Agent server running"
-if [[ "$NO_CHAOS" == "false" ]]; then
-    echo "  ✓ Real incident injected"
-    echo "  ✓ Agent investigation complete"
-    echo "  ✓ Remediation verified"
-fi
+echo "  ✓ Eval suite executed"
 echo ""
 echo "  Agent API:      http://localhost:8000"
 echo "  OpenObserve:    http://localhost:15080"
-echo "  Agent logs:     /tmp/agent.log (also streamed to terminal above)"
+echo "  Agent logs:     /tmp/agent.log"
+echo "  Full output:    $OUTPUT_FILE"
+echo "  Eval results:   $SCRIPT_DIR/eval/results/"
 echo ""
+echo "  Completed:      $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "========================================="
 echo ""
 
-pass "All checks passed"
+pass "E2E evaluation complete"

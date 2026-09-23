@@ -1,8 +1,11 @@
 """Graph constants, context dataclass, and helper utilities.
 
-This module contains everything the graph nodes and routing functions need
-that is not a node or edge itself: constants, the GraphContext dataclass,
-JSON parsing helpers, and tool-spec normalization.
+This module contains graph-wide constants, the run-scoped GraphContext, LLM
+response parsing, hypothesis normalization, and deterministic tool metadata
+normalization.
+
+Phase B tool names are represented in the read-only/risk classifications here;
+registration remains delegated to the corresponding tool modules.
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ import inspect
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, Literal, cast
 
 from langchain_core.runnables import RunnableConfig
 
@@ -21,10 +24,6 @@ from autosre.core.state import Hypothesis
 from autosre.safety.executor import SafeExecutor
 from autosre.safety.policy import PolicyEngine
 from autosre.tools.registry import ToolRegistry
-
-# ---------------------------------------------------------------------------
-# Phase constants
-# ---------------------------------------------------------------------------
 
 PHASE_TRIAGE = "triage"
 PHASE_INVESTIGATE = "investigate"
@@ -48,6 +47,7 @@ PHASES: tuple[str, ...] = (
 
 MAX_ITERATIONS = 10
 
+
 READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "get_pod_events",
@@ -60,20 +60,20 @@ READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
         "get_active_queries",
         "get_lock_waits",
         "get_connection_stats",
+        "get_pod_metrics",
+        "get_valkey_stream_info",
     }
 )
+
 
 REMEDIATION_RISK_TIERS: dict[str, int] = {
     "restart_deployment": 1,
     "terminate_backend": 1,
     "delete_valkey_key": 1,
     "scale_deployment": 2,
+    "delete_pod": 1,
+    "set_feature_flag": 2,
 }
-
-
-# ---------------------------------------------------------------------------
-# Graph context
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,22 +87,18 @@ class GraphContext:
     context_eviction: ContextEviction
 
 
-def get_graph_context(config: RunnableConfig) -> GraphContext:
-    """Extract GraphContext from RunnableConfig's configurable dict."""
-    configurable = config.get("configurable", {})
+def get_graph_context(
+    config: RunnableConfig,
+) -> GraphContext:
+    """Extract and validate GraphContext from RunnableConfig."""
+    configurable = config.get("configurable") or {}
+
     ctx = configurable.get("graph_context")
-    if ctx is None or not isinstance(ctx, GraphContext):
+
+    if not isinstance(ctx, GraphContext):
         raise ValueError("GraphContext must be provided in config['configurable']['graph_context']")
-    # ctx is already validated as GraphContext by isinstance above,
-    # so no cast is needed — mypy narrows the type through the guard.
+
     return ctx
-
-
-# ---------------------------------------------------------------------------
-# Await helper
-# ---------------------------------------------------------------------------
-
-ContextT = TypeVar("ContextT")
 
 
 async def maybe_await(value: Any) -> Any:
@@ -112,9 +108,16 @@ async def maybe_await(value: Any) -> Any:
     return value
 
 
-# ---------------------------------------------------------------------------
-# LLM response parsing
-# ---------------------------------------------------------------------------
+def _mapping_value(
+    value: Any,
+    key: str,
+    default: Any = None,
+) -> Any:
+    """Read one field from mapping-like or object-style values."""
+    if isinstance(value, Mapping):
+        return value.get(key, default)
+
+    return getattr(value, key, default)
 
 
 def response_content(response: Any) -> Any:
@@ -122,28 +125,58 @@ def response_content(response: Any) -> Any:
     if isinstance(response, Mapping):
         if "choices" in response:
             choices = response["choices"]
+
+            if not isinstance(choices, Sequence) or isinstance(
+                choices,
+                (str, bytes, bytearray),
+            ):
+                raise ValueError("LLM response choices must be an array")
+
             if not choices:
                 raise ValueError("LLM response contained no choices")
+
             return response_content(choices[0])
+
         if "message" in response:
             return response_content(response["message"])
+
         if "content" in response:
             return response["content"]
+
         return response
 
-    choices = getattr(response, "choices", None)
+    choices = getattr(
+        response,
+        "choices",
+        None,
+    )
+
     if choices is not None:
+        if not isinstance(choices, Sequence) or isinstance(
+            choices,
+            (str, bytes, bytearray),
+        ):
+            raise ValueError("LLM response choices must be an array")
+
         if not choices:
             raise ValueError("LLM response contained no choices")
+
         return response_content(choices[0])
 
-    message = getattr(response, "message", None)
+    message = getattr(
+        response,
+        "message",
+        None,
+    )
+
     if message is not None:
         return response_content(message)
 
-    content = getattr(response, "content", None)
-    if content is not None:
-        return content
+    if hasattr(response, "content"):
+        content = response.content
+
+        if content is not None:
+            return content
 
     raise ValueError(f"Unsupported LLM response type: {type(response)!r}")
 
@@ -153,52 +186,84 @@ def content_to_text(content: Any) -> str:
     if isinstance(content, str):
         return content
 
-    if isinstance(content, Mapping):
-        return json.dumps(content, default=str)
+    if isinstance(content, bytes):
+        return content.decode(
+            "utf-8",
+            errors="replace",
+        )
 
-    if isinstance(content, Sequence) and not isinstance(content, (str, bytes, bytearray)):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, Mapping):
-                text = item.get("text")
-                if text is not None:
-                    parts.append(str(text))
-                    continue
-                nested_content = item.get("content")
-                if nested_content is not None:
-                    parts.append(str(nested_content))
-                    continue
-            else:
-                parts.append(str(item))
-        return "".join(parts)
+    if isinstance(content, Mapping):
+        text = content.get("text")
+
+        if text is not None:
+            return str(text)
+
+        nested = content.get("content")
+
+        if nested is not None:
+            return content_to_text(nested)
+
+        return json.dumps(
+            content,
+            ensure_ascii=False,
+            default=str,
+        )
+
+    if isinstance(content, Sequence) and not isinstance(
+        content,
+        (str, bytes, bytearray),
+    ):
+        return "".join(content_to_text(item) for item in content)
 
     return str(content)
 
 
-def parse_json_response(response: Any, *, stage: str) -> dict[str, Any]:
+def _strip_code_fence(text: str) -> str:
+    """Remove one Markdown fenced block around a JSON response."""
+    stripped = text.strip()
+
+    if not stripped.startswith("```"):
+        return stripped
+
+    lines = stripped.splitlines()
+
+    if len(lines) < 3:
+        return stripped
+
+    body = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
+
+    return "\n".join(body).strip()
+
+
+def parse_json_response(
+    response: Any,
+    *,
+    stage: str,
+) -> dict[str, Any]:
     """Parse a JSON object returned by the coordinator."""
     content = response_content(response)
 
     if isinstance(content, Mapping):
         return dict(content)
 
-    text = content_to_text(content).strip()
+    text = _strip_code_fence(content_to_text(content))
 
-    if text.startswith("```"):
-        first_newline = text.find("\n")
-        last_fence = text.rfind("```")
-        if first_newline != -1 and last_fence > first_newline:
-            text = text[first_newline + 1 : last_fence].strip()
+    if not text:
+        raise ValueError(f"{stage} response was empty")
 
     try:
         payload = json.loads(text)
+
     except json.JSONDecodeError:
         start = text.find("{")
         end = text.rfind("}")
+
         if start == -1 or end <= start:
             raise ValueError(f"{stage} response was not valid JSON") from None
+
         try:
             payload = json.loads(text[start : end + 1])
+
         except json.JSONDecodeError as exc:
             raise ValueError(f"{stage} response was not valid JSON") from exc
 
@@ -208,19 +273,28 @@ def parse_json_response(response: Any, *, stage: str) -> dict[str, Any]:
     return payload
 
 
-# ---------------------------------------------------------------------------
-# Hypothesis normalization
-# ---------------------------------------------------------------------------
-
-
 def as_confidence(value: Any) -> float:
-    """Validate a hypothesis confidence score."""
+    """Validate a hypothesis confidence score in [0, 1]."""
     if isinstance(value, bool):
         raise ValueError("confidence must be numeric")
-    confidence = float(value)
+
+    try:
+        confidence = float(value)
+
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("confidence must be numeric") from exc
+
     if not 0.0 <= confidence <= 1.0:
         raise ValueError("confidence must be between 0 and 1")
+
     return confidence
+
+
+HypothesisStatus = Literal[
+    "proposed",
+    "confirmed",
+    "rejected",
+]
 
 
 def normalize_hypotheses(
@@ -229,134 +303,300 @@ def normalize_hypotheses(
     default_status: str,
 ) -> list[Hypothesis]:
     """Validate model hypotheses and convert them to the project state shape."""
-    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
+    if not isinstance(raw, Sequence) or isinstance(
+        raw,
+        (str, bytes, bytearray),
+    ):
         raise ValueError("hypotheses must be a JSON array")
 
+    fallback_status: HypothesisStatus = (
+        cast(
+            HypothesisStatus,
+            default_status,
+        )
+        if default_status
+        in {
+            "proposed",
+            "confirmed",
+            "rejected",
+        }
+        else "proposed"
+    )
+
     hypotheses: list[Hypothesis] = []
-    for index, item in enumerate(raw, start=1):
+
+    for index, item in enumerate(
+        raw,
+        start=1,
+    ):
         if not isinstance(item, Mapping):
             raise ValueError(f"hypothesis {index} must be an object")
 
-        hypothesis_id = str(item.get("id", f"H{index}")).strip()
-        description = str(item.get("description", "")).strip()
+        raw_id = item.get("id")
+
+        hypothesis_id = f"H{index}" if raw_id is None else str(raw_id).strip()
+
+        raw_description = item.get("description")
+
+        description = "" if raw_description is None else str(raw_description).strip()
+
         if not hypothesis_id or not description:
             raise ValueError(f"hypothesis {index} is missing id or description")
 
-        evidence_raw = item.get("evidence", [])
-        if not isinstance(evidence_raw, Sequence) or isinstance(
-            evidence_raw, (str, bytes, bytearray)
+        evidence_raw = item.get(
+            "evidence",
+            [],
+        )
+
+        if not isinstance(
+            evidence_raw,
+            Sequence,
+        ) or isinstance(
+            evidence_raw,
+            (str, bytes, bytearray),
         ):
             raise ValueError(f"hypothesis {index} evidence must be an array")
-        evidence = [str(v) for v in evidence_raw]
 
-        # Enforce the Literal type declared on Hypothesis["status"]
-        raw_status = str(item.get("status", default_status)).strip() or default_status
-        valid_statuses = {"proposed", "confirmed", "rejected"}
-        if raw_status not in valid_statuses:
-            raw_status = default_status if default_status in valid_statuses else "proposed"
+        evidence = [str(value) for value in evidence_raw]
+
+        raw_status = str(
+            item.get(
+                "status",
+                fallback_status,
+            )
+        ).strip()
+
+        status: HypothesisStatus = (
+            cast(
+                HypothesisStatus,
+                raw_status,
+            )
+            if raw_status
+            in {
+                "proposed",
+                "confirmed",
+                "rejected",
+            }
+            else fallback_status
+        )
 
         hypotheses.append(
             Hypothesis(
                 id=hypothesis_id,
                 description=description,
-                confidence=as_confidence(item.get("confidence", 0.0)),
+                confidence=as_confidence(
+                    item.get(
+                        "confidence",
+                        0.0,
+                    )
+                ),
                 evidence=evidence,
-                status=raw_status,  # type: ignore[typeddict-item]
+                status=status,
             )
         )
 
     if not hypotheses:
         raise ValueError("LLM returned no hypotheses")
+
     return hypotheses
-
-
-# ---------------------------------------------------------------------------
-# Tool-spec normalization
-# ---------------------------------------------------------------------------
 
 
 def tool_name(tool: Any) -> str | None:
     """Extract a registry tool name."""
-    value = tool.get("name") if isinstance(tool, Mapping) else getattr(tool, "name", None)
+    value = _mapping_value(
+        tool,
+        "name",
+    )
+
     if value is None:
         return None
+
     name = str(value).strip()
+
     return name or None
 
 
 def tool_description(tool: Any) -> str:
     """Extract a registry tool description."""
-    value = (
-        tool.get("description", "")
-        if isinstance(tool, Mapping)
-        else getattr(tool, "description", "")
+    value = _mapping_value(
+        tool,
+        "description",
+        "",
     )
+
     return str(value or "").strip()
 
 
-def tool_declared_risk_tier(tool: Any) -> int | None:
-    """Extract an optional registry-provided risk tier."""
-    raw = tool.get("risk_tier") if isinstance(tool, Mapping) else getattr(tool, "risk_tier", None)
-    if raw is None or isinstance(raw, bool):
+def tool_declared_risk_tier(
+    tool: Any,
+) -> int | None:
+    """Extract an optional registry-provided integer risk tier."""
+    raw = _mapping_value(
+        tool,
+        "risk_tier",
+    )
+
+    if raw is None or isinstance(
+        raw,
+        bool,
+    ):
         return None
-    try:
-        tier = int(raw)
-    except TypeError, ValueError:
-        return None
-    return tier if tier >= 0 else None
+
+    if isinstance(raw, int):
+        return raw if raw >= 0 else None
+
+    if isinstance(raw, float) and raw.is_integer() and raw >= 0:
+        return int(raw)
+
+    return None
 
 
 async def list_tool_specs(
     registry: ToolRegistry,
 ) -> list[dict[str, Any]]:
-    """Return normalized JSON-safe tool metadata including input schema."""
+    """Return deterministic JSON-safe tool metadata including input schemas."""
     raw_tools = await maybe_await(registry.list_tools())
+
     if raw_tools is None:
         return []
 
+    ordered_tools = sorted(
+        (tool for tool in raw_tools if tool_name(tool)),
+        key=lambda tool: tool_name(tool) or "",
+    )
+
     specs: list[dict[str, Any]] = []
-    for t in raw_tools:
-        name = tool_name(t)
+
+    for tool in ordered_tools:
+        name = tool_name(tool)
+
         if not name:
             continue
 
-        # Get the full input schema from the Pydantic model
         input_schema: dict[str, Any] = {}
+
+        to_openai_schema = getattr(
+            tool,
+            "to_openai_schema",
+            None,
+        )
+
         try:
-            if hasattr(t, "to_openai_schema"):
-                openai_schema = t.to_openai_schema()
-                input_schema = openai_schema.get("function", {}).get("parameters", {})
-            elif hasattr(t, "input_model") and hasattr(t.input_model, "model_json_schema"):
-                input_schema = t.input_model.model_json_schema()
-        except Exception:
-            pass
+            if callable(to_openai_schema):
+                openai_schema = to_openai_schema()
+
+                if isinstance(
+                    openai_schema,
+                    Mapping,
+                ):
+                    function = openai_schema.get(
+                        "function",
+                        {},
+                    )
+
+                    if isinstance(
+                        function,
+                        Mapping,
+                    ):
+                        parameters = function.get(
+                            "parameters",
+                            {},
+                        )
+
+                        if isinstance(
+                            parameters,
+                            Mapping,
+                        ):
+                            input_schema = dict(parameters)
+
+        except Exception:  # noqa: BLE001
+            input_schema = {}
+
+        if not input_schema:
+            try:
+                input_model = getattr(
+                    tool,
+                    "input_model",
+                    None,
+                )
+
+                model_json_schema = getattr(
+                    input_model,
+                    "model_json_schema",
+                    None,
+                )
+
+                if callable(model_json_schema):
+                    generated = model_json_schema()
+
+                    if isinstance(
+                        generated,
+                        Mapping,
+                    ):
+                        input_schema = dict(generated)
+
+            except Exception:  # noqa: BLE001
+                input_schema = {}
 
         specs.append(
             {
                 "name": name,
-                "description": tool_description(t),
-                "risk_tier": tool_declared_risk_tier(t),
+                "description": tool_description(tool),
+                "risk_tier": tool_declared_risk_tier(tool),
                 "input_schema": input_schema,
             }
         )
+
     return specs
 
 
-def find_tool(specs: Sequence[Mapping[str, Any]], name: str) -> Mapping[str, Any] | None:
+def find_tool(
+    specs: Sequence[Mapping[str, Any]],
+    name: str,
+) -> Mapping[str, Any] | None:
     """Find a tool spec by exact name."""
     for spec in specs:
         if spec.get("name") == name:
             return spec
+
     return None
 
 
-def safe_json(value: Any, *, max_chars: int = 4000) -> str:
-    """Serialize tool output into bounded evidence."""
+def safe_json(
+    value: Any,
+    *,
+    max_chars: int = 4000,
+) -> str:
+    """Serialize tool output into bounded evidence text."""
+    if max_chars < 0:
+        raise ValueError("max_chars must be non-negative")
+
     try:
-        text = json.dumps(value, default=str, sort_keys=True)
+        text = json.dumps(
+            value,
+            ensure_ascii=False,
+            default=str,
+            sort_keys=True,
+        )
+
     except TypeError, ValueError:
         text = repr(value)
+
     return text[:max_chars]
+
+
+def _confidence_value(
+    hypothesis: Mapping[str, Any],
+) -> float:
+    try:
+        return as_confidence(
+            hypothesis.get(
+                "confidence",
+                0.0,
+            )
+        )
+    except ValueError:
+        return 0.0
 
 
 def top_hypothesis(
@@ -365,9 +605,10 @@ def top_hypothesis(
     """Return the highest-confidence hypothesis."""
     if not hypotheses:
         return None
+
     return max(
         hypotheses,
-        key=lambda h: float(h.get("confidence", 0.0)),
+        key=_confidence_value,
     )
 
 
@@ -375,10 +616,12 @@ def is_high_confidence(
     hypotheses: Sequence[Mapping[str, Any]],
 ) -> bool:
     """Return whether any hypothesis reached the proposal threshold."""
-    return any(float(h.get("confidence", 0.0)) >= 0.8 for h in hypotheses)
+    return any(_confidence_value(hypothesis) >= 0.8 for hypothesis in hypotheses)
 
 
-def approval_value_to_bool(value: Any) -> bool:
+def approval_value_to_bool(
+    value: Any,
+) -> bool:
     """Normalize simple and structured approval responses."""
     if isinstance(value, bool):
         return value
@@ -386,19 +629,50 @@ def approval_value_to_bool(value: Any) -> bool:
     if isinstance(value, Mapping):
         if "approved" in value:
             approved_value = value["approved"]
-            if isinstance(approved_value, bool):
+
+            if isinstance(
+                approved_value,
+                bool,
+            ):
                 return approved_value
-            return str(approved_value).strip().lower() in {"yes", "approve", "approved", "true"}
+
+            return str(approved_value).strip().lower() in {
+                "yes",
+                "approve",
+                "approved",
+                "true",
+            }
 
         decisions = value.get("decisions")
+
         if (
-            isinstance(decisions, Sequence)
-            and not isinstance(decisions, (str, bytes, bytearray))
+            isinstance(
+                decisions,
+                Sequence,
+            )
+            and not isinstance(
+                decisions,
+                (str, bytes, bytearray),
+            )
             and decisions
         ):
             first = decisions[0]
-            if isinstance(first, Mapping):
-                decision_type = str(first.get("type", "")).strip().lower()
+
+            if isinstance(
+                first,
+                Mapping,
+            ):
+                decision_type = (
+                    str(
+                        first.get(
+                            "type",
+                            "",
+                        )
+                    )
+                    .strip()
+                    .lower()
+                )
+
                 return decision_type == "approve"
 
         return False

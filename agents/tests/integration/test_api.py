@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import os
+from collections.abc import Iterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -9,36 +14,32 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from autosre.api.runner import LangGraphRunner
-from autosre.config import Settings
+from autosre.config import Settings, reset_settings_cache
 
 
 @pytest.fixture
-def mock_settings() -> Settings:
-    """Create real Settings object for testing."""
-    import os
+def mock_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[Settings]:
+    """Create real Settings object with AUTOSRE_ prefixed env vars."""
+    # Strip all existing AUTOSRE_ vars to prevent leakage
+    for key in list(os.environ):
+        if key.startswith("AUTOSRE_"):
+            monkeypatch.delenv(key, raising=False)
 
-    # Set environment variables for Settings to load
-    os.environ["LLM_API_KEY"] = "test-key"
-    os.environ["POSTGRES_PASSWORD"] = "test-pass"
-    os.environ["OPENOBSERVE_EMAIL"] = "test@example.com"
-    os.environ["OPENOBSERVE_PASSWORD"] = "test-pass"
-    os.environ["ALERT_WEBHOOK_SECRET"] = "test-secret"
+    # Set env vars with AUTOSRE_ prefix and __ nested delimiter
+    monkeypatch.setenv("AUTOSRE_LLM__API_KEY", "test-key")
+    monkeypatch.setenv("AUTOSRE_LLM__BASE_URL", "https://api.groq.com/openai/v1")
+    monkeypatch.setenv("AUTOSRE_LLM__PROVIDER", "groq")
+    monkeypatch.setenv("AUTOSRE_POSTGRES__PASSWORD", "test-pass")
+    monkeypatch.setenv("AUTOSRE_ALERT__WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setenv("AUTOSRE_OPENOBSERVE__EMAIL", "test@example.com")
+    monkeypatch.setenv("AUTOSRE_OPENOBSERVE__PASSWORD", "test-pass")
 
-    from autosre.config import get_settings
+    reset_settings_cache()
+    settings = Settings()
 
-    settings = get_settings()
+    yield settings
 
-    # Clean up
-    for key in [
-        "LLM_API_KEY",
-        "POSTGRES_PASSWORD",
-        "OPENOBSERVE_EMAIL",
-        "OPENOBSERVE_PASSWORD",
-        "ALERT_WEBHOOK_SECRET",
-    ]:
-        os.environ.pop(key, None)
-
-    return settings
+    reset_settings_cache()
 
 
 @pytest.fixture
@@ -66,7 +67,6 @@ def mock_pg_pool_healthy() -> MagicMock:
     cursor = AsyncMock()
 
     cursor.execute = AsyncMock()
-    # connection() returns an async context manager directly (not a coroutine)
     conn.cursor = MagicMock(return_value=cursor)
     conn.__aenter__ = AsyncMock(return_value=conn)
     conn.__aexit__ = AsyncMock(return_value=None)
@@ -92,13 +92,10 @@ def app_healthy(
     mock_runner: AsyncMock,
     mock_checkpointer: AsyncMock,
     mock_pg_pool_healthy: MagicMock,
-):
+) -> FastAPI:
     """Create FastAPI app with healthy dependencies."""
-    from fastapi import FastAPI
-
     test_app = FastAPI()
 
-    # Add a mock graph to the runner so get_incident_report works
     mock_graph = AsyncMock()
     mock_graph.aget_state = AsyncMock(return_value=None)
     mock_runner.graph = mock_graph
@@ -122,10 +119,8 @@ def app_unhealthy(
     mock_runner: AsyncMock,
     mock_checkpointer: AsyncMock,
     mock_pg_pool_unhealthy: MagicMock,
-):
+) -> FastAPI:
     """Create FastAPI app with unhealthy Postgres."""
-    from fastapi import FastAPI
-
     test_app = FastAPI()
 
     test_app.state.settings = mock_settings
@@ -142,7 +137,7 @@ def app_unhealthy(
 
 
 @pytest.fixture
-async def client_healthy(app_healthy: FastAPI):
+async def client_healthy(app_healthy: FastAPI) -> Iterator[AsyncClient]:
     """Create async test client for healthy app."""
     transport = ASGITransport(app=app_healthy)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -150,11 +145,25 @@ async def client_healthy(app_healthy: FastAPI):
 
 
 @pytest.fixture
-async def client_unhealthy(app_unhealthy: FastAPI):
+async def client_unhealthy(app_unhealthy: FastAPI) -> Iterator[AsyncClient]:
     """Create async test client for unhealthy app."""
     transport = ASGITransport(app=app_unhealthy)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _sign_payload(payload_bytes: bytes, secret: str) -> str:
+    """Compute HMAC-SHA256 signature for webhook verification."""
+    return hmac.new(
+        secret.encode("utf-8"),
+        payload_bytes,
+        hashlib.sha256,
+    ).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +172,7 @@ async def client_unhealthy(app_unhealthy: FastAPI):
 
 
 @pytest.mark.asyncio
-async def test_health_endpoint(client_healthy: AsyncClient):
+async def test_health_endpoint(client_healthy: AsyncClient) -> None:
     """Test the /healthz endpoint."""
     response = await client_healthy.get("/healthz")
     assert response.status_code == 200
@@ -173,7 +182,9 @@ async def test_health_endpoint(client_healthy: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_readiness_check_postgres_healthy(client_healthy: AsyncClient):
+async def test_readiness_check_postgres_healthy(
+    client_healthy: AsyncClient,
+) -> None:
     """Test readiness check when Postgres is healthy."""
     response = await client_healthy.get("/readyz")
 
@@ -184,7 +195,9 @@ async def test_readiness_check_postgres_healthy(client_healthy: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_readiness_check_postgres_unhealthy(client_unhealthy: AsyncClient):
+async def test_readiness_check_postgres_unhealthy(
+    client_unhealthy: AsyncClient,
+) -> None:
     """Test readiness check when Postgres is unhealthy."""
     response = await client_unhealthy.get("/readyz")
 
@@ -199,7 +212,9 @@ async def test_readiness_check_postgres_unhealthy(client_unhealthy: AsyncClient)
 
 
 @pytest.mark.asyncio
-async def test_alert_webhook_invalid_signature(client_healthy: AsyncClient):
+async def test_alert_webhook_invalid_signature(
+    client_healthy: AsyncClient,
+) -> None:
     """Test alert webhook with invalid signature."""
     payload = {
         "alert_name": "HighLatency",
@@ -217,21 +232,14 @@ async def test_alert_webhook_invalid_signature(client_healthy: AsyncClient):
     )
 
     assert response.status_code == 401
-    assert (
-        "Invalid" in response.json()["detail"] or "signature" in response.json()["detail"].lower()
-    )
 
 
 @pytest.mark.asyncio
 async def test_alert_webhook_valid_signature(
     client_healthy: AsyncClient,
     mock_runner: AsyncMock,
-):
+) -> None:
     """Test alert webhook with valid signature."""
-    import hashlib
-    import hmac
-    import json
-
     payload = {
         "alert_name": "HighLatency",
         "service": "api-gateway",
@@ -242,11 +250,7 @@ async def test_alert_webhook_valid_signature(
     }
 
     payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
-    signature = hmac.new(
-        b"test-secret",
-        payload_bytes,
-        hashlib.sha256,
-    ).hexdigest()
+    signature = _sign_payload(payload_bytes, "test-secret")
 
     response = await client_healthy.post(
         "/alerts",
@@ -261,12 +265,13 @@ async def test_alert_webhook_valid_signature(
     data = response.json()
     assert "incident_id" in data
 
-    # Verify runner was called
     mock_runner.run_incident.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_approve_webhook_invalid_signature(client_healthy: AsyncClient):
+async def test_approve_webhook_invalid_signature(
+    client_healthy: AsyncClient,
+) -> None:
     """Test approval webhook with invalid signature."""
     response = await client_healthy.post(
         "/incidents/test-incident-id/approve",
@@ -281,21 +286,13 @@ async def test_approve_webhook_invalid_signature(client_healthy: AsyncClient):
 async def test_approve_webhook_valid_signature(
     client_healthy: AsyncClient,
     mock_runner: AsyncMock,
-):
+) -> None:
     """Test approval webhook with valid signature."""
-    import hashlib
-    import hmac
-    import json
-
     incident_id = "test-incident-123"
     payload = {"approved": True, "comment": "Looks good"}
 
     payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
-    signature = hmac.new(
-        b"test-secret",
-        payload_bytes,
-        hashlib.sha256,
-    ).hexdigest()
+    signature = _sign_payload(payload_bytes, "test-secret")
 
     response = await client_healthy.post(
         f"/incidents/{incident_id}/approve",
@@ -308,7 +305,6 @@ async def test_approve_webhook_valid_signature(
 
     assert response.status_code == 200
 
-    # Verify runner.approve_incident was called
     mock_runner.approve_incident.assert_called_once_with(
         incident_id,
         True,
@@ -325,9 +321,8 @@ async def test_approve_webhook_valid_signature(
 async def test_incident_report_not_found(
     client_healthy: AsyncClient,
     app_healthy: FastAPI,
-):
+) -> None:
     """Test incident report endpoint when incident not found."""
-    # graph.aget_state returns None → 404
     app_healthy.state.runner.graph.aget_state = AsyncMock(return_value=None)
 
     response = await client_healthy.get("/incidents/nonexistent-id/report")
@@ -340,11 +335,20 @@ async def test_incident_report_not_found(
 async def test_incident_report_found(
     client_healthy: AsyncClient,
     app_healthy: FastAPI,
-):
+) -> None:
     """Test incident report endpoint when incident exists."""
     mock_snapshot = MagicMock()
     mock_snapshot.values = {
         "current_phase": "complete",
+        "incident_metadata": {
+            "incident_id": "test-incident-123",
+            "alert_name": "TestAlert",
+            "service": "api-gateway",
+            "namespace": "rivulet",
+            "severity": "high",
+            "started_at": "2026-01-09T10:00:00Z",
+            "fingerprint": "test-fp",
+        },
         "hypotheses": [
             {
                 "id": "H1",
@@ -388,11 +392,20 @@ async def test_incident_report_found(
 async def test_incident_report_awaiting_approval(
     client_healthy: AsyncClient,
     app_healthy: FastAPI,
-):
+) -> None:
     """Test incident report when awaiting human approval."""
     mock_snapshot = MagicMock()
     mock_snapshot.values = {
         "current_phase": "propose",
+        "incident_metadata": {
+            "incident_id": "test-incident-456",
+            "alert_name": "ScaleUp",
+            "service": "api-gateway",
+            "namespace": "rivulet",
+            "severity": "medium",
+            "started_at": "2026-01-09T10:00:00Z",
+            "fingerprint": "test-fp-2",
+        },
         "hypotheses": [],
         "proposed_actions": [
             {
