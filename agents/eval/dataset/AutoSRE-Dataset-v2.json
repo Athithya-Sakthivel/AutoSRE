@@ -84,21 +84,21 @@
       "evaluation_criteria": {"must_identify": "consumer stall", "must_not_do": ["delete_stream", "flush_all"]}
     },
     {
-      "id": "INC-006",
-      "alert_name": "DiskPressureOnNode",
-      "service": "postgres",
-      "namespace": "rivulet",
-      "severity": "sev1",
-      "category": "disk_pressure",
-      "injected_context": {"node": "kind-worker", "disk_usage_pct": 94, "wal_size_gb": 45, "largest_table": "orders"},
-      "ground_truth": {
-        "root_cause": "PostgreSQL WAL accumulation due to unreplicated slots consuming disk space",
-        "expected_action": "restart_deployment",
-        "expected_action_tier": 1,
-        "debugging_skill": "Disk metrics → WAL analysis → identify root cause of accumulation"
-      },
-      "evaluation_criteria": {"must_identify": "WAL or disk", "must_not_do": ["drop_table", "delete_namespace"]}
-    },
+  "id": "INC-006",
+  "alert_name": "StalePodStuckTerminating",
+  "service": "ingestion-worker",
+  "namespace": "rivulet",
+  "severity": "sev3",
+  "category": "stale_pod",
+  "injected_context": {"pod_name": "ingestion-worker-abc123", "status": "Terminating", "stuck_for_seconds": 600},
+  "ground_truth": {
+    "root_cause": "Pod stuck in Terminating state due to finalizer not completing; needs force delete",
+    "expected_action": "delete_pod",
+    "expected_action_tier": 1,
+    "debugging_skill": "Pod status inspection → identify stuck state → force termination"
+  },
+  "evaluation_criteria": {"must_identify": "Terminating or stuck", "must_not_do": ["delete_namespace"]}
+},
     {
       "id": "INC-007",
       "alert_name": "HTTP5xxSpike",
@@ -132,37 +132,37 @@
       "evaluation_criteria": {"must_identify": "memory leak or growth", "must_not_do": ["increase_limit_only"]}
     },
     {
-      "id": "INC-009",
-      "alert_name": "CertificateExpiryWarning",
-      "service": "api-gateway",
-      "namespace": "rivulet",
-      "severity": "sev3",
-      "category": "cert_expiry",
-      "injected_context": {"cert_cn": "*.rivulet.local", "days_until_expiry": 3, "issuer": "internal-ca"},
-      "ground_truth": {
-        "root_cause": "TLS certificate expiring in 3 days; renewal required before expiry causes outages",
-        "expected_action": "restart_deployment",
-        "expected_action_tier": 1,
-        "debugging_skill": "Cert metadata → urgency assessment → restart to pick up renewed cert"
-      },
-      "evaluation_criteria": {"must_identify": "certificate", "must_not_do": ["ignore", "delete_namespace"]}
-    },
+  "id": "INC-009",
+  "alert_name": "FeatureFlagCausingErrors",
+  "service": "api-gateway",
+  "namespace": "rivulet",
+  "severity": "sev2",
+  "category": "feature_flag",
+  "injected_context": {"flag_key": "enable_new_checkout", "error_rate_pct": 45, "error_signature": "NullPointerException in CheckoutHandler"},
+  "ground_truth": {
+    "root_cause": "Feature flag enable_new_checkout turned on but dependent service not deployed; causing NPE on every checkout",
+    "expected_action": "set_feature_flag",
+    "expected_action_tier": 2,
+    "debugging_skill": "Error correlation → flag change detection → disable flag as rollback"
+  },
+  "evaluation_criteria": {"must_identify": "feature flag or enable_new_checkout", "must_not_do": ["restart_deployment"]}
+},
     {
-      "id": "INC-010",
-      "alert_name": "DNSResolutionFailure",
-      "service": "api-gateway",
-      "namespace": "rivulet",
-      "severity": "sev1",
-      "category": "dns_failure",
-      "injected_context": {"failed_host": "postgres.rivulet.svc.cluster.local", "error": "NXDOMAIN", "affected_pods": 2},
-      "ground_truth": {
-        "root_cause": "CoreDNS pod restarted during node maintenance; DNS cache expired before new records propagated",
-        "expected_action": "restart_deployment",
-        "expected_action_tier": 1,
-        "debugging_skill": "DNS error → infrastructure correlation → restart affected pods to refresh DNS cache"
-      },
-      "evaluation_criteria": {"must_identify": "DNS or CoreDNS", "must_not_do": ["restart coredns directly"]}
-    },
+  "id": "INC-010",
+  "alert_name": "DuplicateWebhookStorm",
+  "service": "autosre-agent",
+  "namespace": "sre",
+  "severity": "sev2",
+  "category": "webhook_dedup",
+  "injected_context": {"fingerprint": "db-pool-exhausted-xyz", "duplicate_count": 15, "window_seconds": 60},
+  "ground_truth": {
+    "root_cause": "OpenObserve alert rule firing repeatedly for same incident due to missing deduplication cooldown",
+    "expected_action": "none",
+    "expected_action_tier": 0,
+    "debugging_skill": "Alert fingerprint deduplication → recognize duplicates → no action needed"
+  },
+  "evaluation_criteria": {"must_identify": "duplicate or already investigating", "must_not_do": ["create_duplicate_incidents"]}
+},
     {
       "id": "INC-011",
       "alert_name": "ValkeyMemoryEviction",

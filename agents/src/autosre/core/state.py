@@ -1,17 +1,34 @@
-"""Agent state and context definitions for LangGraph orchestration."""
+"""Agent state and context definitions for LangGraph orchestration.
+
+This module defines:
+- IncidentMetadata: typed webhook payload metadata
+- Hypothesis, ProposedAction, ExecutedAction: investigation artifacts
+- AgentState: the LangGraph state schema
+- SREContext: runtime dependency injection container
+- create_initial_state: factory for new incident investigations
+"""
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
 from langgraph.graph.message import add_messages
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# ---------------------------------------------------------------------------
+# Metadata and artifact types
+# ---------------------------------------------------------------------------
+
 
 class IncidentMetadata(TypedDict):
-    """Metadata about the current incident."""
+    """Metadata associated with an incident alert.
+
+    Required fields come from AlertPayload in routes.py.
+    Optional fields (description, labels, annotations) are populated
+    when present in the incoming webhook payload.
+    """
 
     incident_id: str
     alert_name: str
@@ -21,9 +38,14 @@ class IncidentMetadata(TypedDict):
     started_at: str
     fingerprint: str
 
+    # Optional alert payload fields
+    description: NotRequired[str]
+    labels: NotRequired[dict[str, str]]
+    annotations: NotRequired[dict[str, str]]
+
 
 class Hypothesis(TypedDict):
-    """A hypothesis about the root cause."""
+    """A hypothesis about the root cause of an incident."""
 
     id: str
     description: str
@@ -33,7 +55,7 @@ class Hypothesis(TypedDict):
 
 
 class ProposedAction(TypedDict):
-    """An action proposed by the agent."""
+    """An action proposed by the agent for remediation."""
 
     tool_name: str
     tool_args: dict[str, Any]
@@ -43,7 +65,7 @@ class ProposedAction(TypedDict):
 
 
 class ExecutedAction(TypedDict):
-    """An action that was executed."""
+    """An action that was executed by the SafeExecutor."""
 
     tool_name: str
     tool_args: dict[str, Any]
@@ -54,8 +76,20 @@ class ExecutedAction(TypedDict):
     verification_passed: bool | None
 
 
+# ---------------------------------------------------------------------------
+# LangGraph state schema
+# ---------------------------------------------------------------------------
+
+
 class AgentState(TypedDict):
-    """LangGraph state for the SRE agent investigation loop."""
+    """LangGraph state for the SRE agent investigation loop.
+
+    The ``messages`` field uses LangGraph's ``add_messages`` reducer so that
+    each node can append messages without overwriting previous ones.
+
+    ``consecutive_tool_failures`` tracks tool execution failures to prevent
+    infinite loops when tools are misconfigured or unavailable.
+    """
 
     messages: Annotated[list[dict[str, Any]], add_messages]
     incident_metadata: IncidentMetadata
@@ -78,17 +112,27 @@ class AgentState(TypedDict):
     cost_usd: float
     wall_clock_seconds: float
     started_at: float
-    # Tracks consecutive tool execution failures. When this exceeds a
-    # threshold the investigate_node escalates to hypothesis refinement
-    # rather than looping forever on broken tools.
     consecutive_tool_failures: int
+
+
+# ---------------------------------------------------------------------------
+# Runtime dependency injection
+# ---------------------------------------------------------------------------
 
 
 @dataclass
 class SREContext:
-    """Runtime context for dependency injection into LangGraph nodes."""
+    """Runtime context for dependency injection into LangGraph nodes.
 
-    db_session: AsyncSession = field(repr=False)
+    Carries all external resources that tools and nodes need:
+    database sessions, LLM clients, K8s client, observability client,
+    and diagnostic pools.
+
+    ``db_session`` may be None when the agent uses ``pg_pool`` directly
+    for raw SQL queries rather than SQLAlchemy ORM.
+    """
+
+    db_session: AsyncSession | None = field(default=None, repr=False)
     llm_config: Any = field(default=None, repr=False)
     k8s_client: Any = field(default=None, repr=False)
     llm_router: Any = field(default=None, repr=False)
@@ -96,13 +140,20 @@ class SREContext:
     pg_pool: Any = field(default=None, repr=False)
     valkey_client: Any = field(default=None, repr=False)
 
-    def __post_init__(self) -> None:
-        if self.db_session is None:
-            raise ValueError("db_session is required for SREContext")
+
+# ---------------------------------------------------------------------------
+# State factory
+# ---------------------------------------------------------------------------
 
 
-def create_initial_state(incident_metadata: IncidentMetadata) -> AgentState:
-    """Create the initial state for a new incident investigation."""
+def create_initial_state(
+    incident_metadata: IncidentMetadata,
+) -> AgentState:
+    """Create the initial state for a new incident investigation.
+
+    All investigation artifacts start empty. The agent begins in the
+    ``triage`` phase with zero iterations and no cost accrued.
+    """
     return AgentState(
         messages=[],
         incident_metadata=incident_metadata,

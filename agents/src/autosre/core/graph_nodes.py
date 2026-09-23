@@ -1,4 +1,13 @@
-"""Graph node functions and routing functions."""
+"""Graph node functions and routing functions for the SRE investigation loop.
+
+Each node function receives (AgentState, RunnableConfig) and returns a partial
+state update dict. Routing functions inspect state and return the next phase name.
+
+Node execution order:
+  triage → investigate → hypothesize → propose → approve → execute → verify → complete
+
+Phase B sync: Ready for scale_deployment, get_pod_metrics, get_valkey_stream_info
+"""
 
 from __future__ import annotations
 
@@ -53,10 +62,12 @@ MAX_REMEDIATION_ATTEMPTS = 3
 
 
 def _utc_now() -> str:
+    """Return current UTC time in ISO 8601 format with Z suffix."""
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _get_sre_context(config: RunnableConfig) -> SREContext:
+    """Extract and validate SREContext from RunnableConfig."""
     sre_context = config.get("configurable", {}).get("sre_context")
     if sre_context is None:
         raise ValueError("SREContext must be provided in config['configurable']['sre_context']")
@@ -66,6 +77,11 @@ def _get_sre_context(config: RunnableConfig) -> SREContext:
 
 
 async def triage_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    """Generate initial hypotheses from the alert metadata.
+
+    Returns 2-3 low-confidence hypotheses to guide investigation.
+    Falls back to a generic hypothesis if LLM call fails.
+    """
     ctx = get_graph_context(config)
     sre_context = _get_sre_context(config)
     metadata = state["incident_metadata"]
@@ -103,7 +119,7 @@ Start with low confidence (0.2-0.4) since no evidence has been gathered yet.
             )
         )
         actual_model = getattr(response, "model", "unknown")
-        prompt_tokens, completion_tokens, call_cost = calculate_cost(
+        prompt_tokens, completion_tokens, _cached, call_cost = calculate_cost(
             getattr(response, "usage", None),
             actual_model,
             sre_context.llm_config,
@@ -134,6 +150,11 @@ Start with low confidence (0.2-0.4) since no evidence has been gathered yet.
 
 
 async def investigate_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    """Select and execute one read-only diagnostic tool.
+
+    Updates hypothesis evidence with tool results. Transitions to hypothesize
+    when MAX_ITERATIONS or MAX_CONSECUTIVE_TOOL_FAILURES is reached.
+    """
     ctx = get_graph_context(config)
     sre_context = _get_sre_context(config)
     iteration = state.get("iteration_count", 0) + 1
@@ -186,6 +207,7 @@ async def investigate_node(state: AgentState, config: RunnableConfig) -> dict[st
             "cost_usd": state.get("cost_usd", 0.0),
         }
 
+    # Filter to read-only tools (Tier 0 or in READ_ONLY_TOOL_NAMES)
     investigation_specs = [
         spec
         for spec in specs
@@ -246,7 +268,7 @@ Return JSON only:
             )
         )
         actual_model = getattr(response, "model", "unknown")
-        prompt_tokens, completion_tokens, call_cost = calculate_cost(
+        prompt_tokens, completion_tokens, _cached, call_cost = calculate_cost(
             getattr(response, "usage", None),
             actual_model,
             sre_context.llm_config,
@@ -309,7 +331,7 @@ Return JSON only:
         updated_h = dict(h)
         evidence_list = list(h.get("evidence", []))
         evidence_list.append(evidence_line)
-        updated_h["evidence"] = evidence_list[-20:]
+        updated_h["evidence"] = evidence_list[-20:]  # Keep last 20 evidence items
         updated_hypotheses.append(cast(Hypothesis, updated_h))
 
     return {
@@ -323,6 +345,11 @@ Return JSON only:
 
 
 async def hypothesize_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    """Refine hypothesis confidence based on collected evidence.
+
+    Transitions to propose when any hypothesis reaches confidence >= 0.8
+    or MAX_ITERATIONS is reached. Otherwise loops back to investigate.
+    """
     ctx = get_graph_context(config)
     sre_context = _get_sre_context(config)
     hypotheses = state.get("hypotheses", [])
@@ -373,7 +400,7 @@ Confidence >= 0.8 is sufficient to propose remediation.
             )
         )
         actual_model = getattr(response, "model", "unknown")
-        prompt_tokens, completion_tokens, call_cost = calculate_cost(
+        prompt_tokens, completion_tokens, _cached, call_cost = calculate_cost(
             getattr(response, "usage", None),
             actual_model,
             sre_context.llm_config,
@@ -396,8 +423,12 @@ Confidence >= 0.8 is sufficient to propose remediation.
 
 
 async def propose_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-    """Create a remediation proposal. Includes full tool schemas AND validation
-    error feedback from previous failed attempts so the LLM doesn't repeat mistakes."""
+    """Create a remediation proposal with full tool schemas and error feedback.
+
+    Includes validation error feedback from previous failed attempts to prevent
+    the LLM from repeating the same mistakes. Sets requires_human_approval=True
+    for Tier-2+ actions.
+    """
     ctx = get_graph_context(config)
     sre_context = _get_sre_context(config)
     existing_actions = state.get("proposed_actions", [])
@@ -428,7 +459,7 @@ async def propose_node(state: AgentState, config: RunnableConfig) -> dict[str, A
     if previous_tools:
         previous_note = f"\nPreviously attempted tools (DO NOT repeat identical calls): {', '.join(previous_tools)}"
 
-    # CRITICAL FIX: Feed back validation errors from failed executions
+    # Feed back validation errors from failed executions to prevent repetition
     error_feedback = ""
     executed = state.get("executed_actions", [])
     failed_actions = [a for a in executed if not a.get("success")]
@@ -437,7 +468,6 @@ async def propose_node(state: AgentState, config: RunnableConfig) -> dict[str, A
         result = last_failed.get("result", {})
         error_msg = result.get("error", "") if isinstance(result, dict) else str(result)
         if error_msg:
-            # Truncate to avoid massive prompts
             error_msg_truncated = error_msg[:1000]
             error_feedback = (
                 f"\n\n### PREVIOUS EXECUTION FAILED ###\n"
@@ -486,7 +516,7 @@ CRITICAL: Use EXACT field names from the schema. The namespace is "{metadata["na
             )
         )
         actual_model = getattr(response, "model", "unknown")
-        prompt_tokens, completion_tokens, call_cost = calculate_cost(
+        prompt_tokens, completion_tokens, _cached, call_cost = calculate_cost(
             getattr(response, "usage", None),
             actual_model,
             sre_context.llm_config,
@@ -550,6 +580,11 @@ CRITICAL: Use EXACT field names from the schema. The namespace is "{metadata["na
 
 
 async def approve_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    """Human-in-the-loop approval gate for Tier-2+ actions.
+
+    Uses LangGraph's interrupt() to pause execution and wait for human approval.
+    Tier-1 actions skip this node and proceed directly to execute.
+    """
     from langgraph.types import interrupt
 
     del config
@@ -590,6 +625,10 @@ async def approve_node(state: AgentState, config: RunnableConfig) -> dict[str, A
 
 
 async def execute_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    """Execute the proposed remediation action via SafeExecutor.
+
+    Records the execution result in executed_actions and transitions to verify.
+    """
     ctx = get_graph_context(config)
     proposed_actions = state.get("proposed_actions", [])
     if not proposed_actions:
@@ -629,8 +668,11 @@ async def execute_node(state: AgentState, config: RunnableConfig) -> dict[str, A
 
 
 async def verify_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-    """Verify remediation result. Routes back to PROPOSE on failure for retry,
-    or COMPLETE if MAX_REMEDIATION_ATTEMPTS reached."""
+    """Verify remediation result and decide whether to retry or complete.
+
+    Routes back to PROPOSE on failure for retry (up to MAX_REMEDIATION_ATTEMPTS).
+    Transitions to COMPLETE on success or when retry limit is reached.
+    """
     del config
     executed_actions = state.get("executed_actions", [])
     if not executed_actions:
@@ -660,6 +702,7 @@ async def verify_node(state: AgentState, config: RunnableConfig) -> dict[str, An
 
 
 async def complete_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    """Terminal node: log final metrics and set wall_clock_seconds."""
     del config
     started_at = state.get("started_at")
     wall_clock = time.monotonic() - started_at if started_at is not None else 0.0
@@ -684,11 +727,13 @@ PhaseLiteral = Literal[
 
 
 def route_initial_phase(state: AgentState) -> PhaseLiteral:
+    """Route to the current phase or default to triage."""
     phase = state.get("current_phase", PHASE_TRIAGE)
     return cast(PhaseLiteral, phase) if phase in PHASES else cast(PhaseLiteral, PHASE_TRIAGE)
 
 
 def route_after_hypothesize(state: AgentState) -> Literal["investigate", "propose", "complete"]:
+    """Route based on hypothesis confidence and iteration count."""
     hypotheses = state.get("hypotheses", [])
     if not hypotheses:
         return "complete"
@@ -698,6 +743,7 @@ def route_after_hypothesize(state: AgentState) -> Literal["investigate", "propos
 
 
 def route_after_propose(state: AgentState) -> Literal["approve", "execute", "complete"]:
+    """Route based on risk tier: Tier-2+ goes to approve, Tier-1 goes to execute."""
     actions = state.get("proposed_actions", [])
     if not actions:
         return "complete"
@@ -705,11 +751,15 @@ def route_after_propose(state: AgentState) -> Literal["approve", "execute", "com
 
 
 def route_after_approval(state: AgentState) -> Literal["execute", "complete"]:
+    """Route based on approval decision."""
     return "execute" if state.get("approval_granted") is True else "complete"
 
 
 def route_after_verify(state: AgentState) -> Literal["complete", "propose"]:
-    """CRITICAL: Must respect MAX_REMEDIATION_ATTEMPTS to prevent infinite loops."""
+    """Route based on verification result and retry limit.
+
+    Respects MAX_REMEDIATION_ATTEMPTS to prevent infinite retry loops.
+    """
     actions = state.get("executed_actions", [])
     if not actions:
         return "complete"
