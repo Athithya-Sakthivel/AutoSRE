@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import contextlib
-from typing import Any
+import os
+from collections.abc import Generator
 
 import pytest
 from openinference.semconv.trace import SpanAttributes
@@ -14,7 +15,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 )
 from opentelemetry.util._once import Once
 
-from autosre.config import Settings, get_settings
+from autosre.config import Settings, get_settings, reset_settings_cache
 from autosre.telemetry import otel as otel_module
 from autosre.telemetry.otel import (
     SEMANTIC_ATTRIBUTES,
@@ -28,8 +29,8 @@ from autosre.telemetry.otel import (
 
 
 @pytest.fixture(autouse=True)
-def clean_telemetry(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Reset module and OTel global state around each test.
+def clean_telemetry(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+    """Reset module and OpenTelemetry global state around each test.
 
     OpenTelemetry intentionally has no public API to replace or reset the global
     tracer provider. Test isolation therefore has to touch its private module
@@ -47,6 +48,8 @@ def clean_telemetry(monkeypatch: pytest.MonkeyPatch) -> Any:
 
     otel_module._state = _TelemetryState()
 
+    reset_settings_cache()
+
     yield
 
     # Post-test: always tear down, even if the test raised mid-span.
@@ -57,24 +60,61 @@ def clean_telemetry(monkeypatch: pytest.MonkeyPatch) -> Any:
     trace._TRACER_PROVIDER_SET_ONCE = Once()  # type: ignore[attr-defined]
 
     otel_module._state = _TelemetryState()
+    reset_settings_cache()
 
 
 @pytest.fixture
-def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
-    """Build valid application settings using only test credentials."""
-    monkeypatch.setenv("LLM_API_KEY", "test-key")
-    monkeypatch.setenv("POSTGRES_PASSWORD", "test-pass")
-    monkeypatch.setenv("OPENOBSERVE_EMAIL", "reader@autosre.local")
-    monkeypatch.setenv("OPENOBSERVE_PASSWORD", "test-pass")
-    monkeypatch.setenv("ALERT_WEBHOOK_SECRET", "secret-123")
-    monkeypatch.setenv("OTEL_SERVICE_NAME", "autosre-agent-test")
+def settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[Settings]:
+    """Build valid application settings using only test credentials.
+
+    The application configuration uses the AUTOSRE_ prefix and ``__`` for
+    nested settings, for example:
+        AUTOSRE_LLM__API_KEY
+        AUTOSRE_POSTGRES__PASSWORD
+        AUTOSRE_OTEL__SERVICE_NAME
+    """
+    # Remove every AUTOSRE_* variable first so the test cannot inherit
+    # unrelated configuration from the developer shell or CI environment.
+    for key in list(os.environ):
+        if key.startswith("AUTOSRE_"):
+            monkeypatch.delenv(key, raising=False)
+
+    # Required application settings.
+    monkeypatch.setenv("AUTOSRE_LLM__API_KEY", "test-key")
+    monkeypatch.setenv("AUTOSRE_POSTGRES__PASSWORD", "test-pass")
+    monkeypatch.setenv("AUTOSRE_ALERT__WEBHOOK_SECRET", "secret-123")
     monkeypatch.setenv(
-        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "AUTOSRE_OPENOBSERVE__EMAIL",
+        "reader@autosre.local",
+    )
+    monkeypatch.setenv(
+        "AUTOSRE_OPENOBSERVE__PASSWORD",
+        "test-pass",
+    )
+
+    # OTel configuration.
+    monkeypatch.setenv(
+        "AUTOSRE_OTEL__SERVICE_NAME",
+        "autosre-agent-test",
+    )
+    monkeypatch.setenv(
+        "AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT",
         "http://otel.test:4318",
     )
-    monkeypatch.setenv("DEPLOYMENT_ENVIRONMENT", "test")
 
-    return get_settings()
+    # Root setting.
+    monkeypatch.setenv(
+        "AUTOSRE_DEPLOYMENT_ENVIRONMENT",
+        "test",
+    )
+
+    reset_settings_cache()
+
+    yield get_settings()
+
+    reset_settings_cache()
 
 
 class TestBuildEndpoint:
@@ -261,7 +301,7 @@ class TestOpenInferenceAttributes:
         assert attrs[SpanAttributes.LLM_PROVIDER] == "groq"
         assert attrs[SpanAttributes.LLM_MODEL_NAME] == "qwen/qwen3.8-27b"
         assert attrs[SpanAttributes.INPUT_VALUE] == "What is MTTR?"
-        assert attrs[SpanAttributes.OUTPUT_VALUE] == ("Mean Time To Recovery.")
+        assert attrs[SpanAttributes.OUTPUT_VALUE] == "Mean Time To Recovery."
         assert attrs[SpanAttributes.LLM_TOKEN_COUNT_PROMPT] == 12
         assert attrs[SpanAttributes.LLM_TOKEN_COUNT_COMPLETION] == 8
         assert attrs[SpanAttributes.LLM_TOKEN_COUNT_TOTAL] == 20
@@ -270,6 +310,7 @@ class TestOpenInferenceAttributes:
         self,
         settings: Settings,
     ) -> None:
+        """Configured OTel resource attributes propagate to exported spans."""
         exporter = InMemorySpanExporter()
 
         init_telemetry(

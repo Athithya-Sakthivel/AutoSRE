@@ -1,5 +1,16 @@
+/**
+ * Metrics dashboard page.
+ *
+ * Displays:
+ *   - KPI cards
+ *   - Safety status
+ *   - Time-series charts for MTTR, incident count, cost, and tokens
+ *   - Incident category breakdown
+ *   - Top five most expensive incidents
+ */
+
 import { useState } from "react";
-import type { JSX } from "react";
+import type { ReactElement, ReactNode } from "react";
 import { Link } from "react-router";
 
 import {
@@ -26,17 +37,33 @@ import {
 
 import type { MetricTimeRange } from "../lib/types";
 
-const RANGE_OPTIONS: Array<{
+const RANGE_OPTIONS: ReadonlyArray<{
   value: MetricTimeRange;
   label: string;
 }> = [
-  { value: "1h", label: "1 Hour" },
-  { value: "24h", label: "24 Hours" },
-  { value: "7d", label: "7 Days" },
-  { value: "30d", label: "30 Days" },
+  {
+    value: "1h",
+    label: "1 Hour",
+  },
+  {
+    value: "24h",
+    label: "24 Hours",
+  },
+  {
+    value: "7d",
+    label: "7 Days",
+  },
+  {
+    value: "30d",
+    label: "30 Days",
+  },
 ];
 
-export function MetricsPage(): JSX.Element {
+// ---------------------------------------------------------------------------
+// Page
+// ---------------------------------------------------------------------------
+
+export function MetricsPage(): ReactElement {
   const [range, setRange] = useState<MetricTimeRange>("24h");
 
   const summaryQuery = useMetricsSummary();
@@ -69,7 +96,10 @@ export function MetricsPage(): JSX.Element {
 
   const categoryData = summary
     ? Object.entries(summary.incidents_by_category).map(
-        ([category, count]) => ({ category, count }),
+        ([category, count]) => ({
+          category,
+          count,
+        }),
       )
     : [];
 
@@ -77,18 +107,23 @@ export function MetricsPage(): JSX.Element {
     summary && summary.total_incidents > 0
       ? Math.min(
           100,
-          Math.round((summary.resolved_count / summary.total_incidents) * 100),
+          Math.max(
+            0,
+            Math.round(
+              (summary.resolved_count / summary.total_incidents) * 100,
+            ),
+          ),
         )
       : 0;
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-white">
             Metrics
           </h1>
+
           <p className="mt-1 text-sm text-slate-400">
             MTTR, cost, safety, and resolution rate
           </p>
@@ -118,22 +153,17 @@ export function MetricsPage(): JSX.Element {
         </div>
       </div>
 
-      {/* Summary error */}
       {summaryQuery.isError && (
-        <div className="rounded-lg border border-status-failed/30 bg-status-failed/5 p-4 text-sm text-status-failed">
-          Failed to load metrics.{" "}
-          <button
-            type="button"
-            onClick={() => void summaryQuery.refetch()}
-            disabled={summaryQuery.isFetching}
-            className="ml-2 rounded bg-status-failed/15 px-2.5 py-1 text-xs font-medium hover:bg-status-failed/25 disabled:opacity-50"
-          >
-            Retry
-          </button>
-        </div>
+        <InlineError
+          message={getErrorMessage(
+            summaryQuery.error,
+            "Failed to load metrics",
+          )}
+          onRetry={() => void summaryQuery.refetch()}
+          retrying={summaryQuery.isFetching}
+        />
       )}
 
-      {/* KPI cards */}
       {summaryQuery.isPending && !summary && <SkeletonCardList count={4} />}
 
       {summary && (
@@ -143,6 +173,7 @@ export function MetricsPage(): JSX.Element {
             value={formatCount(summary.total_incidents)}
             sublabel={`${formatCount(summary.resolved_count)} resolved`}
           />
+
           <KpiCard
             label="Resolution Rate"
             value={`${resolutionRate}%`}
@@ -153,6 +184,7 @@ export function MetricsPage(): JSX.Element {
                 : "text-status-awaiting"
             }
           />
+
           <KpiCard
             label="Avg MTTR"
             value={
@@ -162,6 +194,7 @@ export function MetricsPage(): JSX.Element {
             }
             sublabel="time to resolve"
           />
+
           <KpiCard
             label="Total Cost"
             value={formatCost(summary.total_cost_usd)}
@@ -170,7 +203,6 @@ export function MetricsPage(): JSX.Element {
         </div>
       )}
 
-      {/* Safety banner */}
       {summary && (
         <div
           className={[
@@ -183,9 +215,12 @@ export function MetricsPage(): JSX.Element {
         >
           <span className="font-semibold">
             {summary.safety_violations === 0
-              ? "✓ Zero safety violations"
-              : `⚠ ${formatCount(summary.safety_violations)} safety violation${summary.safety_violations === 1 ? "" : "s"}`}
+              ? "Zero safety violations"
+              : `${formatCount(summary.safety_violations)} safety violation${
+                  summary.safety_violations === 1 ? "" : "s"
+                }`}
           </span>
+
           {summary.awaiting_approval_count > 0 && (
             <span className="ml-4 text-status-awaiting">
               {formatCount(summary.awaiting_approval_count)} pending approval
@@ -195,22 +230,17 @@ export function MetricsPage(): JSX.Element {
         </div>
       )}
 
-      {/* Timeseries error */}
       {timeseriesQuery.isError && (
-        <div className="rounded-lg border border-status-failed/30 bg-status-failed/5 p-4 text-sm text-status-failed">
-          Failed to load chart data.{" "}
-          <button
-            type="button"
-            onClick={() => void timeseriesQuery.refetch()}
-            disabled={timeseriesQuery.isFetching}
-            className="ml-2 rounded bg-status-failed/15 px-2.5 py-1 text-xs font-medium hover:bg-status-failed/25 disabled:opacity-50"
-          >
-            Retry
-          </button>
-        </div>
+        <InlineError
+          message={getErrorMessage(
+            timeseriesQuery.error,
+            "Failed to load chart data",
+          )}
+          onRetry={() => void timeseriesQuery.refetch()}
+          retrying={timeseriesQuery.isFetching}
+        />
       )}
 
-      {/* Timeseries loading */}
       {timeseriesQuery.isPending && !timeseries && (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <SkeletonCardList count={1} />
@@ -218,7 +248,6 @@ export function MetricsPage(): JSX.Element {
         </div>
       )}
 
-      {/* Charts */}
       {timeseries && (
         <>
           {timeseriesQuery.isFetching && (
@@ -291,11 +320,14 @@ export function MetricsPage(): JSX.Element {
         </>
       )}
 
-      {/* Top expensive table */}
       <TopExpensiveTable query={topQuery} />
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Sub-components
+// ---------------------------------------------------------------------------
 
 function KpiCard({
   label,
@@ -307,15 +339,17 @@ function KpiCard({
   value: string;
   sublabel?: string;
   color?: string;
-}): JSX.Element {
+}): ReactElement {
   return (
     <div className="rounded-lg border border-surface-border bg-surface-1 px-4 py-3">
       <div className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
         {label}
       </div>
+
       <div className={`mt-1 text-xl font-semibold tabular-nums ${color}`}>
         {value}
       </div>
+
       {sublabel && (
         <div className="mt-0.5 text-[11px] text-slate-500">{sublabel}</div>
       )}
@@ -330,24 +364,60 @@ function ChartCard({
 }: {
   title: string;
   subtitle?: string;
-  children: React.ReactNode;
-}): JSX.Element {
+  children: ReactNode;
+}): ReactElement {
   return (
     <div className="space-y-2">
       <div>
         <h3 className="text-sm font-semibold text-slate-200">{title}</h3>
+
         {subtitle && <p className="text-[11px] text-slate-500">{subtitle}</p>}
       </div>
+
       {children}
     </div>
   );
+}
+
+function InlineError({
+  message,
+  onRetry,
+  retrying,
+}: {
+  message: string;
+  onRetry: () => void;
+  retrying: boolean;
+}): ReactElement {
+  return (
+    <div
+      className="flex flex-col gap-3 rounded-lg border border-status-failed/30 bg-status-failed/5 p-4 text-sm text-status-failed sm:flex-row sm:items-center sm:justify-between"
+      role="alert"
+    >
+      <span>{message}</span>
+
+      <button
+        type="button"
+        onClick={onRetry}
+        disabled={retrying}
+        className="self-start rounded-md border border-status-failed/30 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-status-failed/10 disabled:cursor-not-allowed disabled:opacity-60 sm:self-auto"
+      >
+        {retrying ? "Retrying…" : "Retry"}
+      </button>
+    </div>
+  );
+}
+
+function getErrorMessage(error: unknown, prefix: string): string {
+  return error instanceof Error && error.message
+    ? `${prefix}: ${error.message}`
+    : `${prefix}.`;
 }
 
 function TopExpensiveTable({
   query,
 }: {
   query: ReturnType<typeof useTopExpensive>;
-}): JSX.Element {
+}): ReactElement {
   return (
     <div className="space-y-2">
       <h3 className="text-sm font-semibold text-slate-200">
@@ -357,25 +427,21 @@ function TopExpensiveTable({
       {query.isPending && !query.data && (
         <div className="rounded-lg border border-surface-border bg-surface-1 p-4">
           <div className="animate-pulse space-y-3" aria-hidden="true">
-            {[0, 1, 2, 3, 4].map((index) => (
-              <div key={index} className="h-8 rounded bg-surface-2" />
+            {[0, 1, 2, 3, 4].map((row) => (
+              <div key={row} className="h-8 rounded bg-surface-2" />
             ))}
           </div>
+
+          <span className="sr-only">Loading expensive incidents</span>
         </div>
       )}
 
       {query.isError && (
-        <div className="rounded-lg border border-status-failed/30 bg-status-failed/5 p-4 text-sm text-status-failed">
-          Failed to load top incidents.{" "}
-          <button
-            type="button"
-            onClick={() => void query.refetch()}
-            disabled={query.isFetching}
-            className="ml-2 rounded bg-status-failed/15 px-2.5 py-1 text-xs font-medium hover:bg-status-failed/25 disabled:opacity-50"
-          >
-            Retry
-          </button>
-        </div>
+        <InlineError
+          message={getErrorMessage(query.error, "Failed to load top incidents")}
+          onRetry={() => void query.refetch()}
+          retrying={query.isFetching}
+        />
       )}
 
       {query.data && query.data.length === 0 && !query.isFetching && (
@@ -387,25 +453,34 @@ function TopExpensiveTable({
       {query.data && query.data.length > 0 && (
         <div className="overflow-x-auto rounded-lg border border-surface-border bg-surface-1">
           <table className="w-full text-left text-xs">
+            <caption className="sr-only">
+              Top five most expensive incidents
+            </caption>
+
             <thead>
               <tr className="border-b border-surface-border text-slate-500">
                 <th scope="col" className="px-4 py-2.5 font-medium">
                   Alert
                 </th>
+
                 <th scope="col" className="px-4 py-2.5 font-medium">
                   Service
                 </th>
+
                 <th scope="col" className="px-4 py-2.5 font-medium">
                   Status
                 </th>
+
                 <th scope="col" className="px-4 py-2.5 text-right font-medium">
                   MTTR
                 </th>
+
                 <th scope="col" className="px-4 py-2.5 text-right font-medium">
                   Cost
                 </th>
               </tr>
             </thead>
+
             <tbody>
               {query.data.map((item) => (
                 <tr
@@ -420,13 +495,17 @@ function TopExpensiveTable({
                       {item.alert_name}
                     </Link>
                   </td>
+
                   <td className="px-4 py-2.5 text-slate-400">{item.service}</td>
+
                   <td className="px-4 py-2.5">
                     <StatusBadge status={item.status} />
                   </td>
+
                   <td className="px-4 py-2.5 text-right tabular-nums text-slate-300">
                     {formatDuration(item.wall_clock_seconds)}
                   </td>
+
                   <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-status-awaiting">
                     {formatCost(item.cost_usd)}
                   </td>
@@ -434,6 +513,15 @@ function TopExpensiveTable({
               ))}
             </tbody>
           </table>
+
+          {query.isFetching && (
+            <div
+              className="border-t border-surface-border px-4 py-2 text-right text-[11px] text-slate-500"
+              aria-live="polite"
+            >
+              Updating…
+            </div>
+          )}
         </div>
       )}
     </div>

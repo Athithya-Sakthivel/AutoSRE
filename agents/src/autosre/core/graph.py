@@ -1,14 +1,19 @@
-"""LangGraph orchestration for autonomous SRE investigations.
+"""LangGraph state graph compilation for the SRE investigation loop.
 
-This module only constructs and compiles the StateGraph. All node logic
-lives in ``graph_nodes`` and all helpers live in ``graph_helpers``.
+The graph has 8 nodes:
+  triage → investigate → hypothesize → propose → approve → execute → verify → complete
+
+Conditional edges route based on state (hypothesis confidence, risk tier,
+approval result, verification result, and retry limits).
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from langgraph.graph import START, StateGraph
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from autosre.core.graph_helpers import (
     PHASE_APPROVE,
@@ -37,21 +42,34 @@ from autosre.core.graph_nodes import (
 )
 from autosre.core.state import AgentState
 
+type CompiledGraph = CompiledStateGraph[Any, Any, Any, Any]
 
-def build_investigation_graph() -> StateGraph[AgentState]:
-    """Build the LangGraph StateGraph."""
-    graph: StateGraph[AgentState] = StateGraph(AgentState)
 
-    graph.add_node(PHASE_TRIAGE, triage_node)
-    graph.add_node(PHASE_INVESTIGATE, investigate_node)
-    graph.add_node(PHASE_HYPOTHESIZE, hypothesize_node)
-    graph.add_node(PHASE_PROPOSE, propose_node)
-    graph.add_node(PHASE_APPROVE, approve_node)
-    graph.add_node(PHASE_EXECUTE, execute_node)
-    graph.add_node(PHASE_VERIFY, verify_node)
-    graph.add_node(PHASE_COMPLETE, complete_node)
+def compile_graph(
+    checkpointer: BaseCheckpointSaver[Any] | None = None,
+) -> CompiledGraph:
+    """Compile the SRE investigation state graph.
 
-    graph.add_conditional_edges(
+    Args:
+        checkpointer: Optional durable LangGraph checkpointer. A checkpointer
+            is required for resumable human-in-the-loop interruptions and
+            durable execution across invocations.
+
+    Returns:
+        A compiled LangGraph state graph.
+    """
+    builder = StateGraph(AgentState)
+
+    builder.add_node(PHASE_TRIAGE, triage_node)
+    builder.add_node(PHASE_INVESTIGATE, investigate_node)
+    builder.add_node(PHASE_HYPOTHESIZE, hypothesize_node)
+    builder.add_node(PHASE_PROPOSE, propose_node)
+    builder.add_node(PHASE_APPROVE, approve_node)
+    builder.add_node(PHASE_EXECUTE, execute_node)
+    builder.add_node(PHASE_VERIFY, verify_node)
+    builder.add_node(PHASE_COMPLETE, complete_node)
+
+    builder.add_conditional_edges(
         START,
         route_initial_phase,
         {
@@ -66,10 +84,12 @@ def build_investigation_graph() -> StateGraph[AgentState]:
         },
     )
 
-    graph.add_edge(PHASE_TRIAGE, PHASE_INVESTIGATE)
-    graph.add_edge(PHASE_INVESTIGATE, PHASE_HYPOTHESIZE)
+    builder.add_edge(PHASE_TRIAGE, PHASE_INVESTIGATE)
+    builder.add_edge(PHASE_INVESTIGATE, PHASE_HYPOTHESIZE)
+    builder.add_edge(PHASE_EXECUTE, PHASE_VERIFY)
+    builder.add_edge(PHASE_COMPLETE, END)
 
-    graph.add_conditional_edges(
+    builder.add_conditional_edges(
         PHASE_HYPOTHESIZE,
         route_after_hypothesize,
         {
@@ -79,7 +99,7 @@ def build_investigation_graph() -> StateGraph[AgentState]:
         },
     )
 
-    graph.add_conditional_edges(
+    builder.add_conditional_edges(
         PHASE_PROPOSE,
         route_after_propose,
         {
@@ -89,7 +109,7 @@ def build_investigation_graph() -> StateGraph[AgentState]:
         },
     )
 
-    graph.add_conditional_edges(
+    builder.add_conditional_edges(
         PHASE_APPROVE,
         route_after_approval,
         {
@@ -98,26 +118,16 @@ def build_investigation_graph() -> StateGraph[AgentState]:
         },
     )
 
-    graph.add_edge(PHASE_EXECUTE, PHASE_VERIFY)
-
-    graph.add_conditional_edges(
+    builder.add_conditional_edges(
         PHASE_VERIFY,
         route_after_verify,
         {
-            "complete": PHASE_COMPLETE,
-            "investigate": PHASE_INVESTIGATE,
             "propose": PHASE_PROPOSE,
+            "complete": PHASE_COMPLETE,
         },
     )
 
-    return graph
+    # Validate graph wiring at construction time instead of first execution.
+    builder.validate()
 
-
-def compile_graph(checkpointer: Any = None) -> Any:
-    """Compile the investigation graph.
-
-    For HITL/interrupt behavior a checkpointer is mandatory. Production
-    async deployments should use ``AsyncPostgresSaver``; tests can use
-    ``InMemorySaver``.
-    """
-    return build_investigation_graph().compile(checkpointer=checkpointer)
+    return builder.compile(checkpointer=checkpointer)

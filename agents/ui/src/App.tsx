@@ -1,4 +1,16 @@
+/**
+ * Root application component with declarative routing.
+ *
+ * Routes:
+ *   /                    -> redirect to /dashboard
+ *   /dashboard           -> incident list + KPIs
+ *   /incidents/:id       -> incident detail with HITL approval
+ *   /approvals           -> incidents awaiting approval
+ *   /metrics             -> metrics dashboard
+ */
+
 import type { ReactElement, ReactNode } from "react";
+
 import {
   BrowserRouter,
   Link,
@@ -14,6 +26,10 @@ import { DashboardPage } from "./pages/Dashboard";
 import { IncidentDetailPage } from "./pages/IncidentDetail";
 import { ApprovalsPage } from "./pages/ApprovalPage";
 import { MetricsPage } from "./pages/Metrics";
+
+// ---------------------------------------------------------------------------
+// App shell
+// ---------------------------------------------------------------------------
 
 function AppShell(): ReactElement {
   return (
@@ -36,7 +52,9 @@ function AppShell(): ReactElement {
             className="flex items-center gap-1 text-sm"
           >
             <TopNavLink to="/dashboard">Dashboard</TopNavLink>
+
             <TopNavLink to="/approvals">Approvals</TopNavLink>
+
             <TopNavLink to="/metrics">Metrics</TopNavLink>
           </nav>
 
@@ -51,7 +69,7 @@ function AppShell(): ReactElement {
       </main>
 
       <footer className="border-t border-surface-border py-3 text-center text-xs text-slate-500">
-        AutoSRE v0.1.0 · Autonomous SRE incident investigation
+        AutoSRE · Autonomous SRE incident investigation
       </footer>
     </div>
   );
@@ -67,6 +85,7 @@ function TopNavLink({
   return (
     <NavLink
       to={to}
+      end
       className={({ isActive }) =>
         [
           "rounded-md px-3 py-1.5 font-medium transition-colors",
@@ -91,10 +110,15 @@ function AgentHealthIndicator(): ReactElement {
         className="h-1.5 w-1.5 rounded-full bg-status-resolved"
         aria-hidden="true"
       />
+
       <span>agent: standby</span>
     </span>
   );
 }
+
+// ---------------------------------------------------------------------------
+// 404
+// ---------------------------------------------------------------------------
 
 function NotFoundPage(): ReactElement {
   return (
@@ -103,14 +127,17 @@ function NotFoundPage(): ReactElement {
         <h1 className="text-2xl font-semibold tracking-tight text-white">
           Not found
         </h1>
+
         <p className="mt-1 text-sm text-slate-400">
           This route does not exist.
         </p>
       </div>
+
       <div className="rounded-lg border border-surface-border bg-surface-1 p-8 text-center">
         <p className="mb-4 text-slate-300">
           The page you requested could not be found.
         </p>
+
         <Link
           to="/dashboard"
           className="inline-flex items-center rounded-md bg-status-running px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-status-running/80"
@@ -122,6 +149,10 @@ function NotFoundPage(): ReactElement {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Root
+// ---------------------------------------------------------------------------
+
 export function App(): ReactElement {
   return (
     <ErrorBoundary>
@@ -129,13 +160,18 @@ export function App(): ReactElement {
         <Routes>
           <Route element={<AppShell />}>
             <Route index element={<Navigate to="/dashboard" replace />} />
+
             <Route path="/dashboard" element={<DashboardPage />} />
+
             <Route
               path="/incidents/:incidentId"
               element={<IncidentDetailPage />}
             />
+
             <Route path="/approvals" element={<ApprovalsPage />} />
+
             <Route path="/metrics" element={<MetricsPage />} />
+
             <Route path="*" element={<NotFoundPage />} />
           </Route>
         </Routes>
