@@ -44,19 +44,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("FastAPI instrumented with OpenTelemetry")
 
         # 2. LLM router
-        llm_router = TokenVelocityRouter(
-            settings.llm,
-            threshold_tokens=6000,
-        )
+        llm_router = TokenVelocityRouter(settings.llm, threshold_tokens=6000)
 
         # 3. Postgres diagnostic pool
         raw_dsn = settings.postgres.raw_dsn
-        pg_pool = AsyncConnectionPool(
-            conninfo=raw_dsn,
-            min_size=2,
-            max_size=10,
-            open=False,
-        )
+        pg_pool = AsyncConnectionPool(conninfo=raw_dsn, min_size=2, max_size=10, open=False)
         stack.push_async_callback(pg_pool.close)
         await pg_pool.open()
         logger.info("Postgres diagnostic pool opened")
@@ -95,7 +87,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.warning("kr8s client unavailable (K8s tools disabled): %s", exc)
 
         # 8. SREContext
-        # Use a dummy session for the context (actual DB work goes through pg_pool)
         sre_context = SREContext(
             db_session=None,
             llm_config=settings.llm,
@@ -111,9 +102,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("Tool registry built with %d tools", len(registry.list_tools()))
 
         # 10. Safety layer
-        policy_engine = PolicyEngine(
-            max_autonomous_tier=RiskTier.REVERSIBLE_LOW,
-        )
+        policy_engine = PolicyEngine(max_autonomous_tier=RiskTier.REVERSIBLE_LOW)
         executor = SafeExecutor(registry, policy_engine)
         logger.info("Policy engine and safe executor initialized")
 
@@ -132,8 +121,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 13. Compile graph
         graph = compile_graph(checkpointer=checkpointer)
 
-        # 14. Runner
-        runner = LangGraphRunner(graph, sre_context, graph_context)
+        # 14. Runner — pass all 4 args: graph, checkpointer, sre_context, graph_context
+        runner = LangGraphRunner(
+            graph=graph,
+            checkpointer=checkpointer,
+            sre_context=sre_context,
+            graph_context=graph_context,
+        )
         logger.info("LangGraph runner initialized")
 
         # 15. Store in app.state
@@ -183,7 +177,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(router)
     app.include_router(webhook_router)
 
-    # Find ui/dist relative to the project root (agents/)
+    # Serve UI static files if built
     _project_root = Path(__file__).resolve().parent.parent.parent.parent
     ui_dist = _project_root / "ui" / "dist"
 
@@ -191,15 +185,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from fastapi.responses import FileResponse
         from fastapi.staticfiles import StaticFiles
 
-        # Mount static assets
         assets_dir = ui_dist / "assets"
         if assets_dir.exists():
-            app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="static-assets")
+            app.mount(
+                "/assets",
+                StaticFiles(directory=str(assets_dir)),
+                name="static-assets",
+            )
 
-        # Serve index.html for all non-API routes (SPA fallback)
         @app.get("/{full_path:path}")
         async def spa_fallback(full_path: str) -> FileResponse:
-            # Don't intercept API routes
             if full_path.startswith("api/") or full_path.startswith("slack/"):
                 raise HTTPException(status_code=404, detail="Not found")
             return FileResponse(str(ui_dist / "index.html"))
