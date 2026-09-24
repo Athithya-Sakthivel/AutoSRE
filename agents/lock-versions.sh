@@ -5,8 +5,20 @@
 #   bash lock-versions.sh                # lock + sync
 #   bash lock-versions.sh --upgrade      # upgrade all deps, then sync
 
+#!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")"
+
+UV_VERSION="0.12.18"
+export UV_LINK_MODE=copy
+
+# Install uv only if missing or wrong version
+if ! command -v uv >/dev/null || [[ "$(uv --version | awk '{print $2}')" != "$UV_VERSION" ]]; then
+    curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" \
+      | env UV_UNMANAGED_INSTALL=/usr/local/bin sh
+fi
+
+# Ensure venv exists on Python 3.14
+[[ -d .venv ]] || uv venv --python 3.14
 
 # Ensure venv exists on Python 3.14
 if [[ ! -d .venv ]]; then
