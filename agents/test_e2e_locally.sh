@@ -40,6 +40,8 @@
 set -Euo pipefail
 IFS=$'\n\t'
 
+export EVAL_INCIDENT_IDS=INC-003
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_FILE="$SCRIPT_DIR/output.txt"
