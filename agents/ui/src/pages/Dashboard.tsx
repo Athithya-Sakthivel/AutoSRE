@@ -1,3 +1,14 @@
+/**
+ * Dashboard page.
+ *
+ * Layout:
+ *   - KPI strip: Active, Awaiting Approval, No Action, Avg Active MTTR, Total Cost
+ *   - Two-column: Active incidents (left), Recently Resolved (right)
+ *
+ * Stale incidents (running for more than one hour) are visually flagged.
+ * They indicate the agent is stuck and warrant operator investigation.
+ */
+
 import type { JSX } from "react";
 import { useNavigate } from "react-router";
 import { useIncidentList } from "../hooks/useIncidents";
@@ -5,10 +16,34 @@ import { IncidentCard } from "../components/IncidentCard";
 import { EmptyState } from "../components/EmptyState";
 import { SkeletonCardList } from "../components/LoadingState";
 import { formatCost, formatCount, formatDuration } from "../lib/utils";
-import type { IncidentStatus } from "../lib/types";
+import type { Incident, IncidentStatus } from "../lib/types";
+
+// Stale threshold: incidents running for over an hour are flagged.
+const STALE_THRESHOLD_MS = 60 * 60 * 1000;
 
 function isTerminal(status: IncidentStatus): boolean {
-  return status === "resolved" || status === "complete" || status === "failed";
+  return (
+    status === "resolved" ||
+    status === "failed" ||
+    status === "no_action" ||
+    status === "blocked" ||
+    status === "complete"
+  );
+}
+
+function isNoAction(status: IncidentStatus): boolean {
+  return status === "no_action";
+}
+
+function isStale(incident: Incident): boolean {
+  if (incident.status !== "running") {
+    return false;
+  }
+  const started = new Date(incident.started_at).getTime();
+  if (Number.isNaN(started)) {
+    return false;
+  }
+  return Date.now() - started > STALE_THRESHOLD_MS;
 }
 
 export function DashboardPage(): JSX.Element {
@@ -24,6 +59,7 @@ export function DashboardPage(): JSX.Element {
   };
 
   const items = query.data?.items ?? [];
+
   const active = items.filter((incident) => !isTerminal(incident.status));
   const resolved = items
     .filter((incident) => incident.status === "resolved")
@@ -31,16 +67,19 @@ export function DashboardPage(): JSX.Element {
   const awaitingCount = items.filter(
     (incident) => incident.status === "awaiting_approval",
   ).length;
+  const noActionCount = items.filter((incident) =>
+    isNoAction(incident.status),
+  ).length;
+
   const totalCost = items.reduce((sum, incident) => sum + incident.cost_usd, 0);
+
   const resolvedForMttr = items.filter(
-    (incident) =>
-      (incident.status === "resolved" || incident.status === "complete") &&
-      incident.wall_clock_seconds > 0,
+    (incident) => incident.status === "resolved" && incident.active_seconds > 0,
   );
   const avgMttr =
     resolvedForMttr.length > 0
       ? resolvedForMttr.reduce(
-          (sum, incident) => sum + incident.wall_clock_seconds,
+          (sum, incident) => sum + incident.active_seconds,
           0,
         ) / resolvedForMttr.length
       : 0;
@@ -66,7 +105,7 @@ export function DashboardPage(): JSX.Element {
         </button>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <StatCard
           label="Active"
           value={formatCount(active.length)}
@@ -78,7 +117,12 @@ export function DashboardPage(): JSX.Element {
           color={awaitingCount > 0 ? "text-status-awaiting" : "text-slate-400"}
         />
         <StatCard
-          label="Avg MTTR"
+          label="No Action"
+          value={formatCount(noActionCount)}
+          color={noActionCount > 0 ? "text-slate-300" : "text-slate-400"}
+        />
+        <StatCard
+          label="Avg Active MTTR"
           value={avgMttr > 0 ? formatDuration(avgMttr) : "—"}
           color="text-slate-200"
         />
@@ -120,11 +164,12 @@ export function DashboardPage(): JSX.Element {
             ) : (
               <div className="space-y-3">
                 {active.map((incident) => (
-                  <IncidentCard
+                  <StaleWrapped
                     key={incident.incident_id}
-                    incident={incident}
-                    onSelect={handleSelect}
-                  />
+                    stale={isStale(incident)}
+                  >
+                    <IncidentCard incident={incident} onSelect={handleSelect} />
+                  </StaleWrapped>
                 ))}
               </div>
             )}
@@ -159,6 +204,10 @@ export function DashboardPage(): JSX.Element {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Sub-components
+// ---------------------------------------------------------------------------
+
 function StatCard({
   label,
   value,
@@ -176,6 +225,30 @@ function StatCard({
       <div className={`mt-1 text-xl font-semibold tabular-nums ${color}`}>
         {value}
       </div>
+    </div>
+  );
+}
+
+function StaleWrapped({
+  stale,
+  children,
+}: {
+  stale: boolean;
+  children: React.ReactNode;
+}): JSX.Element {
+  if (!stale) {
+    return <>{children}</>;
+  }
+
+  return (
+    <div className="relative rounded-lg ring-2 ring-status-failed/40">
+      <span
+        className="absolute -top-2 right-3 z-10 rounded-full bg-status-failed px-2 py-0.5 text-[10px] font-semibold tracking-wide text-white"
+        aria-label="Incident has been running for over an hour"
+      >
+        STALE
+      </span>
+      {children}
     </div>
   );
 }

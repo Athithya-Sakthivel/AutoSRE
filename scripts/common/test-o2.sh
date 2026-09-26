@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# tests/infra/observability.sh
-#
 # End-to-end smoke test for the OpenObserve + OTel Collector pipeline.
 #
 #   1. Verify all pods are Ready.
@@ -11,7 +9,7 @@
 #   5. Confirm the OpenObserve search API responds.
 #
 # Usage:
-#   tests/infra/observability.sh [--dry-run] [--keep] [--help]
+#   bash scripts/common/test-o2.sh [--dry-run] [--keep] [--help]
 #
 #   --dry-run   Print the manifests that would be applied; do not deploy.
 #   --keep      Do not delete the test pods on exit (for debugging).

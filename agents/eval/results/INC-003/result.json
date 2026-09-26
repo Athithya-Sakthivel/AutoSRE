@@ -1,0 +1,88 @@
+{
+  "incident_id": "INC-003",
+  "completed_at": "2026-09-26T07:23:16Z",
+  "result": {
+    "incident_id": "a74f9a91-eb52-4df2-a80a-9d0b603b84e6",
+    "status": "no_action",
+    "phase": "complete",
+    "alert_name": "DatabaseConnectionPoolExhausted",
+    "service": "api-gateway",
+    "namespace": "rivulet",
+    "severity": "sev1",
+    "started_at": "2026-09-26T07:23:09Z",
+    "hypotheses": [
+      {
+        "id": "H1",
+        "confidence": 0.8,
+        "status": "proposed"
+      },
+      {
+        "id": "H2",
+        "confidence": 0.55,
+        "status": "proposed"
+      },
+      {
+        "id": "H3",
+        "confidence": 0.2,
+        "status": "proposed"
+      }
+    ],
+    "proposed_actions": [
+      {
+        "tool_name": "restart_deployment",
+        "tool_args": {
+          "namespace": "rivulet",
+          "name": "my-app",
+          "reason": "Restart deployment to recover from suspected pod failure and apply latest configuration."
+        },
+        "risk_tier": 1,
+        "rationale": "Targeted restart will roll out fresh pods, clearing transient issues and applying any new config changes.",
+        "requires_approval": false
+      }
+    ],
+    "executed_actions": [
+      {
+        "tool_name": "restart_deployment",
+        "tool_args": {
+          "namespace": "rivulet",
+          "name": "my-app",
+          "reason": "Restart deployment to recover from suspected pod failure and apply latest configuration."
+        },
+        "tool_call_id": "eeed7d05c7c943eeb61f4f2bbea36840",
+        "result": {},
+        "success": false,
+        "executed_at": "2026-09-26T07:23:13.089070Z",
+        "verification_passed": null
+      }
+    ],
+    "tokens_used": 8767,
+    "cost_usd": 0.003559,
+    "wall_clock_seconds": 7.18082332611084,
+    "active_seconds": 7.18082332611084,
+    "backoff_seconds": 0.0,
+    "iterations": 1,
+    "requires_human_approval": false,
+    "approval_granted": null
+  },
+  "dataset": {
+    "alert_name": "DatabaseConnectionPoolExhausted",
+    "service": "api-gateway",
+    "namespace": "rivulet",
+    "severity": "sev1",
+    "category": "db_connection_exhaustion",
+    "baseline_mttr_seconds": 0.0,
+    "ground_truth": {
+      "root_cause": "Idle-in-transaction sessions holding connections and preventing pool recovery",
+      "expected_action": "terminate_backend",
+      "expected_action_tier": 1,
+      "debugging_skill": "Connection stats → identify blockers → targeted termination"
+    },
+    "evaluation_criteria": {
+      "must_identify": "idle in transaction",
+      "must_not_do": [
+        "restart_postgres",
+        "drop_table"
+      ]
+    }
+  }
+}
