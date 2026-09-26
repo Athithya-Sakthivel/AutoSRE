@@ -1,14 +1,11 @@
 """Integration tests for Postgres tools against a real Postgres container.
 
 Bootstrap strategy:
-    PostgresContainer is started with the default ``postgres`` superuser.
+    PostgresContainer is started with the default `postgres` superuser.
     After the container is ready, we connect as that bootstrap superuser
-    to create a *non-superuser* test role (``autosre_test``) and grant it
-    the minimal privileges the agent needs (pg_monitor, pg_signal_backend).
+    to create a non-superuser test role (autosre_test) and grant it the
+    minimal privileges the agent needs (pg_monitor, pg_signal_backend).
     All tool execution goes through the non-superuser pool.
-
-    This avoids the PostgreSQL constraint that the bootstrap superuser
-    cannot have its SUPERUSER attribute removed by itself.
 """
 
 from __future__ import annotations
@@ -28,22 +25,22 @@ from autosre.core.state import SREContext
 from autosre.tools import postgres as pg_tools
 from autosre.tools.registry import ToolExecutionError, ToolRegistry
 
-# Non-superuser role used by the tool pool. The bootstrap superuser
-# creates it in the session-scoped fixture.
 _TEST_ROLE = "autosre_test"
 _TEST_ROLE_PASSWORD = "autosre_test"
 _TEST_DB = "autosre_test"
-_PG_IMAGE = "docker.io/library/postgres:18.6-trixie@sha256:86c951e05bf56c93d95d397747fb8820ac76cc3bedb78f43abd83eedbe3666ae"
+_PG_IMAGE = (
+    "docker.io/library/postgres:18.6-trixie"
+    "@sha256:86c951e05bf56c93d95d397747fb8820ac76cc3bedb78f43abd83eedbe3666ae"
+)
 
 
 @pytest.fixture(scope="session")
 def postgres_container() -> Any:
-    """Spin up PostgreSQL 18.6 with a separate non-superuser test role."""
-
+    """Start a Postgres 18.6 container with a non-superuser test role."""
     with PostgresContainer(
         image=_PG_IMAGE,
         dbname=_TEST_DB,
-        username="postgres",  # bootstrap superuser
+        username="postgres",
         password="postgres",
     ) as pg:
         bootstrap_dsn = (
@@ -52,13 +49,8 @@ def postgres_container() -> Any:
             f":{pg.get_exposed_port(5432)}/{_TEST_DB}"
         )
 
-        # Connect as the bootstrap superuser and create a non-superuser role
-        # with only the minimal privileges the agent needs.
         with psycopg.connect(bootstrap_dsn, autocommit=True) as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT 1 FROM pg_roles WHERE rolname = %s",
-                (_TEST_ROLE,),
-            )
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (_TEST_ROLE,))
             if cur.fetchone() is None:
                 cur.execute(
                     f"CREATE ROLE {_TEST_ROLE} "
@@ -67,30 +59,21 @@ def postgres_container() -> Any:
             cur.execute(f"GRANT pg_monitor TO {_TEST_ROLE}")
             cur.execute(f"GRANT pg_signal_backend TO {_TEST_ROLE}")
             cur.execute(f"GRANT ALL PRIVILEGES ON DATABASE {_TEST_DB} TO {_TEST_ROLE}")
-            # The test role needs to create tables for the lock-wait test.
             cur.execute(f"GRANT ALL ON SCHEMA public TO {_TEST_ROLE}")
 
         yield pg
 
 
 @pytest_asyncio.fixture
-async def pg_pool(
-    postgres_container: Any,
-) -> AsyncIterator[AsyncConnectionPool]:
+async def pg_pool(postgres_container: Any) -> AsyncIterator[AsyncConnectionPool]:
     """Async pool logged in as the non-superuser test role."""
-
     dsn = (
         f"postgresql://{_TEST_ROLE}:{_TEST_ROLE_PASSWORD}"
         f"@{postgres_container.get_container_host_ip()}"
         f":{postgres_container.get_exposed_port(5432)}/{_TEST_DB}"
     )
 
-    pool = AsyncConnectionPool(
-        conninfo=dsn,
-        min_size=1,
-        max_size=5,
-        open=False,
-    )
+    pool = AsyncConnectionPool(conninfo=dsn, min_size=1, max_size=5, open=False)
     await pool.open()
 
     try:
@@ -102,11 +85,7 @@ async def pg_pool(
 @pytest_asyncio.fixture
 async def context(pg_pool: AsyncConnectionPool) -> SREContext:
     """Build an SREContext carrying the real psycopg pool."""
-    from unittest.mock import AsyncMock
-
-    ctx = SREContext(db_session=AsyncMock())  # type: ignore[arg-type]
-    ctx.pg_pool = pg_pool  # type: ignore[attr-defined]
-    return ctx
+    return SREContext(pg_pool=pg_pool)
 
 
 @pytest_asyncio.fixture
@@ -118,14 +97,13 @@ async def registry(context: SREContext) -> ToolRegistry:
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Tier 0 — Read-only diagnostics
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_get_connection_stats_returns_shape(
-    registry: ToolRegistry,
-    context: SREContext,
+    registry: ToolRegistry, context: SREContext
 ) -> None:
     result = await registry.execute("get_connection_stats", {}, context=context)
     stats = result["stats"]
@@ -136,8 +114,7 @@ async def test_get_connection_stats_returns_shape(
 
 @pytest.mark.asyncio
 async def test_get_active_queries_returns_shape(
-    registry: ToolRegistry,
-    context: SREContext,
+    registry: ToolRegistry, context: SREContext
 ) -> None:
     result = await registry.execute(
         "get_active_queries",
@@ -169,7 +146,7 @@ async def test_get_active_queries_sees_long_query(
             ):
                 break
             if asyncio.get_running_loop().time() >= deadline:
-                raise AssertionError("pg_sleep was not visible in pg_stat_activity")
+                raise AssertionError("pg_sleep not visible in pg_stat_activity")
             await asyncio.sleep(0.05)
     finally:
         if not task.done():
@@ -201,10 +178,7 @@ async def test_get_lock_waits_sees_blocker(
             "INSERT INTO autosre_lock_test (id, value) VALUES (1, 0) ON CONFLICT (id) DO NOTHING"
         )
 
-    async with (
-        pg_pool.connection() as holder,
-        pg_pool.connection() as waiter,
-    ):
+    async with pg_pool.connection() as holder, pg_pool.connection() as waiter:
         await holder.execute("BEGIN")
         await holder.execute("SELECT * FROM autosre_lock_test WHERE id = 1 FOR UPDATE")
 
@@ -216,7 +190,7 @@ async def test_get_lock_waits_sees_blocker(
                 if any(row["blocking_pid"] == holder.info.backend_pid for row in result["waits"]):
                     break
                 if asyncio.get_running_loop().time() >= deadline:
-                    raise AssertionError("lock wait was not visible in pg_locks")
+                    raise AssertionError("lock wait not visible in pg_locks")
                 await asyncio.sleep(0.05)
         finally:
             if not waiter_task.done():
@@ -238,13 +212,18 @@ async def _blocked_update(conn: Any) -> None:
         raise
 
 
+# ---------------------------------------------------------------------------
+# Tier 1 — Reversible remediation
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
 async def test_terminate_backend_kills_real_session(
     registry: ToolRegistry,
     context: SREContext,
     pg_pool: AsyncConnectionPool,
 ) -> None:
-    """Open a non-superuser backend and terminate it via the tool."""
+    """Open a non-superuser backend, terminate it via the tool, confirm dead."""
     victim = await pg_pool.getconn()
     victim_pid = victim.info.backend_pid
 
@@ -252,6 +231,7 @@ async def test_terminate_backend_kills_real_session(
         await victim.set_autocommit(True)
         sleep_task = asyncio.create_task(_sleep_on_conn(victim))
         try:
+            # Wait for the victim to be visibly running pg_sleep.
             deadline = asyncio.get_running_loop().time() + 5.0
             while True:
                 result = await registry.execute(
@@ -265,7 +245,7 @@ async def test_terminate_backend_kills_real_session(
                 ):
                     break
                 if asyncio.get_running_loop().time() >= deadline:
-                    raise AssertionError("victim session was not visible")
+                    raise AssertionError("victim session not visible")
                 await asyncio.sleep(0.05)
 
             result = await registry.execute(
@@ -274,7 +254,26 @@ async def test_terminate_backend_kills_real_session(
                 context=context,
             )
             assert result["pid"] == victim_pid
-            assert result["terminated"] is True
+            assert result["success"] is True
+
+            # Wait for the victim to actually disappear from pg_stat_activity.
+            deadline = asyncio.get_running_loop().time() + 5.0
+            while True:
+                probes = await registry.execute(
+                    "get_active_queries",
+                    {
+                        "min_duration_seconds": 0,
+                        "limit": 100,
+                        "exclude_idle": False,
+                    },
+                    context=context,
+                )
+                still_present = any(row["pid"] == victim_pid for row in probes["queries"])
+                if not still_present:
+                    break
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise AssertionError(f"victim pid {victim_pid} still present")
+                await asyncio.sleep(0.1)
         finally:
             if not sleep_task.done():
                 sleep_task.cancel()
@@ -297,7 +296,7 @@ async def test_terminate_backend_refuses_own_backend(
     registry: ToolRegistry,
     pg_pool: AsyncConnectionPool,
 ) -> None:
-    """The tool must refuse to kill the connection it's running on."""
+    """The tool must refuse to kill the connection it is running on."""
     conn = await pg_pool.getconn()
     try:
         await conn.set_autocommit(True)
@@ -307,11 +306,7 @@ async def test_terminate_backend_refuses_own_backend(
             async def connection(self) -> AsyncIterator[Any]:
                 yield conn
 
-        from unittest.mock import AsyncMock
-
-        test_context = SREContext(db_session=AsyncMock())  # type: ignore[arg-type]
-        test_context.pg_pool = _StaticPool()  # type: ignore[attr-defined]
-
+        test_context = SREContext(pg_pool=_StaticPool())  # type: ignore[arg-type]
         test_registry = ToolRegistry()
         pg_tools.register(test_registry, test_context)
 

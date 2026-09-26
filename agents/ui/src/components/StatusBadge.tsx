@@ -1,5 +1,5 @@
 import type { JSX } from "react";
-import type { IncidentSeverity, IncidentStatus } from "../lib/types";
+import type { IncidentStatus } from "../lib/types";
 import {
   severityClasses,
   severityLabel,
@@ -25,11 +25,12 @@ export function StatusBadge({
   );
 }
 
-export function SeverityBadge({
-  severity,
-}: {
-  severity: IncidentSeverity;
-}): JSX.Element {
+/**
+ * Severity is a free-form string on the wire; the UI renders it via
+ * getSeverityLabel which gracefully degrades unknown values to the raw
+ * severity string.
+ */
+export function SeverityBadge({ severity }: { severity: string }): JSX.Element {
   return (
     <span
       className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-semibold tracking-wide ${severityClasses(severity)}`}

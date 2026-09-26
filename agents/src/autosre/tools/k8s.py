@@ -1,13 +1,49 @@
 """Kubernetes diagnostic and remediation tools using kr8s.
 
-Tools registered:
-  Tier 0 (read-only): list_pods, get_pod_events, get_pod_logs,
-                      get_deployment_status, get_pod_metrics
-  Tier 1 (targeted mutations): restart_deployment, delete_pod
-  Tier 2 (scaling): scale_deployment
+## Tools Registered
 
-The Kubernetes client stored on ``SREContext.k8s_client`` must be a
-``kr8s.asyncio.Api`` instance (or an API-compatible async client).
+### Tier 0 — Read-Only Diagnostics (5 tools)
+- `list_pods`: List pods with status, restarts, age, node
+- `get_pod_events`: Kubernetes events for a specific pod
+- `get_pod_logs`: Recent log lines from a pod (supports previous=True)
+- `get_deployment_status`: Deployment replica counts and conditions
+- `get_pod_metrics`: CPU (millicores) and memory (MiB) usage per pod
+
+### Tier 1 — Reversible Remediation (2 tools)
+- `restart_deployment`: Patch restartedAt annotation → rolling restart
+- `delete_pod`: Delete a pod (grace_period=0 for force delete)
+
+### Tier 2 — Requires Approval (1 tool)
+- `scale_deployment`: Scale deployment replicas to target count
+
+## Contracts
+
+### Output Contract
+Every Tier-1 tool output model includes:
+- `success: bool` — True if the tool executed without error
+- `verification_passed: bool | None` — True if output indicates root cause
+  resolved, None if indeterminate
+
+This is required by `verify_node` in graph_nodes.py. Tier-1 actions may
+return `verification_passed=None` when the Kubernetes controller has not yet
+reconciled the requested change; verification is then handled by the graph.
+
+### SREContext Contract
+The Kubernetes client is accessed via `context.k8s_client`. It must be a
+`kr8s.asyncio.Api` instance (or API-compatible async client). If None,
+tools raise ToolExecutionError.
+
+### Error Handling Contract
+All kr8s API calls are wrapped in try/except and re-raised as
+ToolExecutionError with the tool name and original exception. This ensures
+the graph node can catch and handle tool failures uniformly.
+
+### Metrics API Contract
+The `get_pod_metrics` tool queries `pods.metrics.k8s.io`. If the metrics
+server is not installed or unavailable (returns 404/503/504), the tool returns
+an empty metrics list with `reason="metrics_api_unavailable"` instead of
+failing. This is a graceful degradation — the agent can still investigate
+using other tools.
 """
 
 from __future__ import annotations
@@ -23,13 +59,18 @@ from kr8s.asyncio.objects import Deployment, Pod
 from pydantic import BaseModel, Field
 
 from autosre.core.state import SREContext
-from autosre.tools.registry import Tool, ToolExecutionError, ToolInputModel, ToolRegistry
+from autosre.tools.registry import (
+    Tool,
+    ToolExecutionError,
+    ToolInputModel,
+    ToolRegistry,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Input / Output models
+# Input / Output Models
 # ---------------------------------------------------------------------------
 
 
@@ -117,6 +158,7 @@ class PodMetrics(BaseModel):
 class GetPodMetricsOutput(BaseModel):
     metrics: list[PodMetrics]
     total: int
+    reason: str | None = None
 
 
 class RestartDeploymentInput(ToolInputModel):
@@ -130,6 +172,8 @@ class RestartDeploymentOutput(BaseModel):
     namespace: str
     restarted: bool
     reason: str
+    success: bool = True
+    verification_passed: bool | None = None
 
 
 class ScaleDeploymentInput(ToolInputModel):
@@ -137,7 +181,11 @@ class ScaleDeploymentInput(ToolInputModel):
 
     namespace: str = Field(min_length=1, max_length=253)
     name: str = Field(min_length=1, max_length=253)
-    replicas: int = Field(ge=1, le=50, description="Target replica count")
+    replicas: int = Field(
+        ge=0,
+        le=50,
+        description="Target replica count; 0 requires approval",
+    )
     reason: str = Field(min_length=1, max_length=500)
 
 
@@ -148,10 +196,12 @@ class ScaleDeploymentOutput(BaseModel):
     new_replicas: int
     scaled: bool
     reason: str
+    success: bool = True
+    verification_passed: bool | None = None
 
 
 class DeletePodInput(ToolInputModel):
-    """Delete a pod; ``grace_period_seconds=0`` maps to kr8s force deletion."""
+    """Delete a pod; grace_period_seconds=0 maps to kr8s force deletion."""
 
     namespace: str = Field(min_length=1, max_length=253)
     name: str = Field(min_length=1, max_length=253)
@@ -164,6 +214,8 @@ class DeletePodOutput(BaseModel):
     namespace: str
     deleted: bool
     reason: str
+    success: bool = True
+    verification_passed: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +224,11 @@ class DeletePodOutput(BaseModel):
 
 
 def _k8s_client(context: SREContext) -> Any:
-    """Return the async kr8s client from SREContext."""
+    """Return the async kr8s client from SREContext.
+
+    Raises:
+        ToolExecutionError: If k8s_client is not initialized
+    """
     client = getattr(context, "k8s_client", None)
     if client is None:
         raise ToolExecutionError(
@@ -190,29 +246,61 @@ async def _collect_async(iterable: Any, tool_name: str) -> list[Any]:
         raise ToolExecutionError(tool_name, exc) from exc
 
 
-async def _get_pod(client: Any, name: str, namespace: str, tool_name: str) -> Any:
+async def _get_pod(
+    client: Any,
+    name: str,
+    namespace: str,
+    tool_name: str,
+) -> Any:
     try:
         return await Pod.get(name, namespace=namespace, api=client)
     except Exception as exc:
         raise ToolExecutionError(tool_name, exc) from exc
 
 
-async def _get_deployment(client: Any, name: str, namespace: str, tool_name: str) -> Any:
+def _is_not_found(exc: BaseException) -> bool:
+    """Return True when a Kubernetes client exception represents HTTP 404."""
+    status = getattr(exc, "status", None)
+    if status == 404:
+        return True
+
+    response = getattr(exc, "response", None)
+    response_status = getattr(response, "status_code", None)
+    if response_status == 404:
+        return True
+
+    message = str(exc).lower()
+    return "404" in message or "not found" in message
+
+
+async def _get_deployment(
+    client: Any,
+    name: str,
+    namespace: str,
+    tool_name: str,
+) -> Any:
     try:
         return await Deployment.get(name, namespace=namespace, api=client)
     except Exception as exc:
         raise ToolExecutionError(tool_name, exc) from exc
 
 
-def _map_get(mapping: Mapping[Any, Any] | Any, key: str, default: Any = None) -> Any:
+def _map_get(
+    mapping: Mapping[Any, Any] | Any,
+    key: str,
+    default: Any = None,
+) -> Any:
     """Read a string key from mappings that may use bytes keys."""
     if not isinstance(mapping, Mapping):
         return default
+
     if key in mapping:
         return mapping[key]
+
     byte_key = key.encode()
     if byte_key in mapping:
         return mapping[byte_key]
+
     return default
 
 
@@ -220,8 +308,10 @@ def _to_int(value: Any, default: int = 0) -> int:
     try:
         if value is None:
             return default
+
         if isinstance(value, bytes):
             value = value.decode("utf-8", errors="replace")
+
         return int(value)
     except TypeError, ValueError:
         return default
@@ -230,8 +320,10 @@ def _to_int(value: Any, default: int = 0) -> int:
 def _to_text(value: Any, default: str = "") -> str:
     if value is None:
         return default
+
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
+
     return str(value)
 
 
@@ -253,6 +345,7 @@ def _event_timestamp(event: Mapping[str, Any]) -> str:
 
 def _event_sort_key(event: Mapping[str, Any]) -> datetime:
     timestamp = _event_timestamp(event)
+
     if not timestamp:
         return datetime.min.replace(tzinfo=UTC)
 
@@ -266,10 +359,12 @@ def _event_sort_key(event: Mapping[str, Any]) -> datetime:
 def _parse_quantity(value: Any) -> tuple[Decimal, str] | None:
     """Split a Kubernetes resource quantity into numeric part and suffix."""
     text = _to_text(value).strip()
+
     match = re.fullmatch(
         r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)([a-zA-Z]{0,2})",
         text,
     )
+
     if not match:
         return None
 
@@ -286,10 +381,12 @@ def _decimal_to_int(value: Decimal) -> int:
 def _parse_cpu(value: Any) -> int:
     """Parse a Kubernetes CPU quantity into millicores."""
     parsed = _parse_quantity(value)
+
     if parsed is None:
         return 0
 
     number, suffix = parsed
+
     factors = {
         "": Decimal("1000"),
         "m": Decimal("1"),
@@ -297,7 +394,9 @@ def _parse_cpu(value: Any) -> int:
         "n": Decimal("0.000001"),
         "k": Decimal("1000000"),
     }
+
     factor = factors.get(suffix)
+
     if factor is None:
         return 0
 
@@ -307,13 +406,14 @@ def _parse_cpu(value: Any) -> int:
 def _parse_memory_mb(value: Any) -> int:
     """Parse a Kubernetes memory quantity into MiB."""
     parsed = _parse_quantity(value)
+
     if parsed is None:
         return 0
 
     number, suffix = parsed
 
     # Kubernetes binary suffixes use powers of 1024; decimal suffixes use
-    # powers of 1000. The public field is historically named ``*_mb`` but
+    # powers of 1000. The public field is historically named *_mb but
     # represents MiB.
     bytes_per_unit = {
         "Ki": Decimal(1024),
@@ -331,7 +431,9 @@ def _parse_memory_mb(value: Any) -> int:
         "E": Decimal(1000) ** 6,
         "": Decimal(1),
     }
+
     factor = bytes_per_unit.get(suffix)
+
     if factor is None:
         return 0
 
@@ -342,10 +444,12 @@ def _parse_memory_mb(value: Any) -> int:
 def _metrics_api_unavailable(exc: Exception) -> bool:
     """Identify common absence/unavailability cases for metrics.k8s.io."""
     status = getattr(exc, "status", None)
+
     if status in {404, 503, 504}:
         return True
 
     message = str(exc).lower()
+
     return "metrics.k8s.io" in message and (
         "not found" in message
         or "no resource" in message
@@ -359,7 +463,10 @@ def _metrics_api_unavailable(exc: Exception) -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def _list_pods(args: ListPodsInput, context: SREContext) -> ListPodsOutput:
+async def _list_pods(
+    args: ListPodsInput,
+    context: SREContext,
+) -> ListPodsOutput:
     client = _k8s_client(context)
     selector = args.label_selector or None
 
@@ -376,6 +483,7 @@ async def _list_pods(args: ListPodsInput, context: SREContext) -> ListPodsOutput
     pods_raw = await _collect_async(raw_iter, "list_pods")
 
     pods: list[PodInfo] = []
+
     for raw in pods_raw:
         if not isinstance(raw, Mapping):
             continue
@@ -396,10 +504,14 @@ async def _list_pods(args: ListPodsInput, context: SREContext) -> ListPodsOutput
 
         creation = _to_text(_map_get(metadata, "creationTimestamp", ""))
         age_seconds = 0.0
+
         if creation:
             try:
                 created = datetime.fromisoformat(creation.replace("Z", "+00:00"))
-                age_seconds = max(0.0, (datetime.now(UTC) - created).total_seconds())
+                age_seconds = max(
+                    0.0,
+                    (datetime.now(UTC) - created).total_seconds(),
+                )
             except TypeError, ValueError:
                 age_seconds = 0.0
 
@@ -408,18 +520,30 @@ async def _list_pods(args: ListPodsInput, context: SREContext) -> ListPodsOutput
         pods.append(
             PodInfo(
                 name=_to_text(_map_get(metadata, "name", "")),
-                namespace=_to_text(_map_get(metadata, "namespace", args.namespace), args.namespace),
-                status=_to_text(_map_get(status_raw, "phase", "Unknown"), "Unknown"),
+                namespace=_to_text(
+                    _map_get(metadata, "namespace", args.namespace),
+                    args.namespace,
+                ),
+                status=_to_text(
+                    _map_get(status_raw, "phase", "Unknown"),
+                    "Unknown",
+                ),
                 restarts=restarts,
                 age_seconds=round(age_seconds, 2),
                 node=_to_text(node_raw) if node_raw is not None else None,
             )
         )
 
-    return ListPodsOutput(pods=pods, total=len(pods))
+    return ListPodsOutput(
+        pods=pods,
+        total=len(pods),
+    )
 
 
-async def _get_pod_events(args: GetPodEventsInput, context: SREContext) -> GetPodEventsOutput:
+async def _get_pod_events(
+    args: GetPodEventsInput,
+    context: SREContext,
+) -> GetPodEventsOutput:
     client = _k8s_client(context)
 
     try:
@@ -432,29 +556,54 @@ async def _get_pod_events(args: GetPodEventsInput, context: SREContext) -> GetPo
     except Exception as exc:
         raise ToolExecutionError("get_pod_events", exc) from exc
 
-    events_raw = await _collect_async(raw_iter, "get_pod_events")
+    events_raw = await _collect_async(
+        raw_iter,
+        "get_pod_events",
+    )
 
     candidates = [event for event in events_raw if isinstance(event, Mapping)]
-    candidates.sort(key=_event_sort_key, reverse=True)
+    candidates.sort(
+        key=_event_sort_key,
+        reverse=True,
+    )
 
     events: list[EventInfo] = []
+
     for event in candidates[: args.limit]:
         events.append(
             EventInfo(
-                type=_to_text(_map_get(event, "type", "Normal"), "Normal"),
+                type=_to_text(
+                    _map_get(event, "type", "Normal"),
+                    "Normal",
+                ),
                 reason=_to_text(_map_get(event, "reason", "")),
                 message=_to_text(_map_get(event, "message", "")),
-                count=_to_int(_map_get(event, "count", 1), 1),
+                count=_to_int(
+                    _map_get(event, "count", 1),
+                    1,
+                ),
                 last_timestamp=_event_timestamp(event),
             )
         )
 
-    return GetPodEventsOutput(events=events, total=len(events))
+    return GetPodEventsOutput(
+        events=events,
+        total=len(events),
+    )
 
 
-async def _get_pod_logs(args: GetPodLogsInput, context: SREContext) -> GetPodLogsOutput:
+async def _get_pod_logs(
+    args: GetPodLogsInput,
+    context: SREContext,
+) -> GetPodLogsOutput:
     client = _k8s_client(context)
-    pod = await _get_pod(client, args.pod_name, args.namespace, "get_pod_logs")
+
+    pod = await _get_pod(
+        client,
+        args.pod_name,
+        args.namespace,
+        "get_pod_logs",
+    )
 
     try:
         log_iter = pod.logs(
@@ -465,12 +614,16 @@ async def _get_pod_logs(args: GetPodLogsInput, context: SREContext) -> GetPodLog
         )
         chunks = [chunk async for chunk in log_iter]
     except Exception as exc:
-        raise ToolExecutionError("get_pod_logs", exc) from exc
+        raise ToolExecutionError(
+            "get_pod_logs",
+            exc,
+        ) from exc
 
     log_text = "\n".join(_to_text(chunk).rstrip("\n") for chunk in chunks)
 
     max_chars = 20_000
     truncated = len(log_text) > max_chars
+
     if truncated:
         log_text = log_text[:max_chars]
 
@@ -481,9 +634,11 @@ async def _get_pod_logs(args: GetPodLogsInput, context: SREContext) -> GetPodLog
 
 
 async def _get_deployment_status(
-    args: GetDeploymentStatusInput, context: SREContext
+    args: GetDeploymentStatusInput,
+    context: SREContext,
 ) -> GetDeploymentStatusOutput:
     client = _k8s_client(context)
+
     dep = await _get_deployment(
         client,
         args.name,
@@ -492,11 +647,14 @@ async def _get_deployment_status(
     )
 
     raw = dep.to_dict()
+
     status = raw.get("status") if isinstance(raw, Mapping) else {}
+
     if not isinstance(status, Mapping):
         status = {}
 
     conditions_raw = status.get("conditions", [])
+
     if not isinstance(conditions_raw, list):
         conditions_raw = []
 
@@ -522,28 +680,21 @@ async def _get_deployment_status(
     )
 
 
-async def _get_pod_metrics(args: GetPodMetricsInput, context: SREContext) -> GetPodMetricsOutput:
-    """Get Pod CPU/memory usage from the Kubernetes Metrics API."""
+async def _get_pod_metrics(
+    args: GetPodMetricsInput,
+    context: SREContext,
+) -> GetPodMetricsOutput:
+    """Get Pod CPU/memory usage and configured resource requests.
+
+    Pod specs are read before the Metrics API to minimise mismatches caused by
+    pods being created or deleted between the two reads. If metrics.k8s.io is
+    unavailable, the tool degrades gracefully and identifies the reason.
+    """
     client = _k8s_client(context)
     selector = args.label_selector or None
 
-    try:
-        metrics_iter = client.get(
-            "pods.metrics.k8s.io",
-            namespace=args.namespace,
-            label_selector=selector,
-            raw=True,
-        )
-        metrics_raw = [item async for item in metrics_iter]
-    except Exception as exc:
-        if _metrics_api_unavailable(exc):
-            logger.warning("metrics.k8s.io unavailable; returning empty metrics")
-            return GetPodMetricsOutput(metrics=[], total=0)
-
-        raise ToolExecutionError("get_pod_metrics", exc) from exc
-
-    # The Metrics API exposes usage, but not container resource requests.
-    # Read the matching Pods so request values can be returned as well.
+    # Read Pod specs first so resource requests are anchored to the same
+    # namespace/selector before taking the usage snapshot.
     try:
         pods_iter = client.get(
             "pods",
@@ -551,9 +702,15 @@ async def _get_pod_metrics(args: GetPodMetricsInput, context: SREContext) -> Get
             label_selector=selector,
             raw=True,
         )
-        pods_raw = await _collect_async(pods_iter, "get_pod_metrics")
+        pods_raw = await _collect_async(
+            pods_iter,
+            "get_pod_metrics",
+        )
     except Exception as exc:
-        raise ToolExecutionError("get_pod_metrics", exc) from exc
+        raise ToolExecutionError(
+            "get_pod_metrics",
+            exc,
+        ) from exc
 
     requests_by_pod: dict[str, tuple[int, int]] = {}
 
@@ -587,6 +744,28 @@ async def _get_pod_metrics(args: GetPodMetricsInput, context: SREContext) -> Get
             cpu_request,
             memory_request,
         )
+
+    try:
+        metrics_iter = client.get(
+            "pods.metrics.k8s.io",
+            namespace=args.namespace,
+            label_selector=selector,
+            raw=True,
+        )
+        metrics_raw = [item async for item in metrics_iter]
+    except Exception as exc:
+        if _metrics_api_unavailable(exc):
+            logger.warning("metrics.k8s.io unavailable; returning empty metrics")
+            return GetPodMetricsOutput(
+                metrics=[],
+                total=0,
+                reason="metrics_api_unavailable",
+            )
+
+        raise ToolExecutionError(
+            "get_pod_metrics",
+            exc,
+        ) from exc
 
     metrics: list[PodMetrics] = []
 
@@ -641,8 +820,15 @@ async def _get_pod_metrics(args: GetPodMetricsInput, context: SREContext) -> Get
 
 
 async def _restart_deployment(
-    args: RestartDeploymentInput, context: SREContext
+    args: RestartDeploymentInput,
+    context: SREContext,
 ) -> RestartDeploymentOutput:
+    """Trigger a rolling restart by updating the pod-template annotation.
+
+    The Kubernetes API accepts the patch synchronously, but the rollout itself
+    is asynchronous. Therefore verification_passed remains None and is left to
+    the graph's verification step.
+    """
     client = _k8s_client(context)
 
     dep = await _get_deployment(
@@ -666,51 +852,127 @@ async def _restart_deployment(
 
     try:
         await dep.patch(restart_patch)
-    except Exception as exc:
-        raise ToolExecutionError("restart_deployment", exc) from exc
+        logger.info(
+            "Deployment %s/%s restart initiated",
+            args.namespace,
+            args.name,
+        )
 
-    return RestartDeploymentOutput(
-        name=args.name,
-        namespace=args.namespace,
-        restarted=True,
-        reason=args.reason,
-    )
-
-
-async def _delete_pod(args: DeletePodInput, context: SREContext) -> DeletePodOutput:
-    client = _k8s_client(context)
-
-    pod = await _get_pod(
-        client,
-        args.name,
-        args.namespace,
-        "delete_pod",
-    )
-
-    try:
-        await pod.delete(
-            grace_period=args.grace_period_seconds,
-            force=args.grace_period_seconds == 0,
+        return RestartDeploymentOutput(
+            name=args.name,
+            namespace=args.namespace,
+            restarted=True,
+            reason=args.reason,
+            success=True,
+            verification_passed=None,
         )
     except Exception as exc:
-        raise ToolExecutionError("delete_pod", exc) from exc
+        raise ToolExecutionError(
+            "restart_deployment",
+            exc,
+        ) from exc
+
+
+async def _delete_pod(
+    args: DeletePodInput,
+    context: SREContext,
+) -> DeletePodOutput:
+    """Delete a pod, optionally with force (grace_period=0).
+
+    A pod that is already absent is treated as success because the desired
+    post-condition has already been reached. A successful DELETE request does
+    not prove that termination has completed, so verification is deferred.
+    """
+    client = _k8s_client(context)
+
+    try:
+        pod = await _get_pod(
+            client,
+            args.name,
+            args.namespace,
+            "delete_pod",
+        )
+    except ToolExecutionError as exc:
+        if _is_not_found(exc.original):
+            logger.info(
+                "Pod %s/%s already absent",
+                args.namespace,
+                args.name,
+            )
+
+            return DeletePodOutput(
+                name=args.name,
+                namespace=args.namespace,
+                deleted=True,
+                reason=args.reason,
+                success=True,
+                verification_passed=True,
+            )
+
+        raise
+
+    delete_kwargs: dict[str, Any] = {}
+
+    if args.grace_period_seconds == 0:
+        delete_kwargs["grace_period_seconds"] = 0
+
+    try:
+        await pod.delete(**delete_kwargs)
+    except Exception as exc:
+        if _is_not_found(exc):
+            logger.info(
+                "Pod %s/%s became absent during deletion",
+                args.namespace,
+                args.name,
+            )
+
+            return DeletePodOutput(
+                name=args.name,
+                namespace=args.namespace,
+                deleted=True,
+                reason=args.reason,
+                success=True,
+                verification_passed=True,
+            )
+
+        raise ToolExecutionError(
+            "delete_pod",
+            exc,
+        ) from exc
+
+    logger.info(
+        "Pod %s/%s deletion requested (grace=%ds)",
+        args.namespace,
+        args.name,
+        args.grace_period_seconds,
+    )
 
     return DeletePodOutput(
         name=args.name,
         namespace=args.namespace,
         deleted=True,
         reason=args.reason,
+        success=True,
+        verification_passed=None,
     )
 
 
 # ---------------------------------------------------------------------------
-# Tier 2: Scaling (requires HITL approval at graph level)
+# Tier 2: Requires approval
 # ---------------------------------------------------------------------------
 
 
 async def _scale_deployment(
-    args: ScaleDeploymentInput, context: SREContext
+    args: ScaleDeploymentInput,
+    context: SREContext,
 ) -> ScaleDeploymentOutput:
+    """Scale a deployment to a target replica count.
+
+    This action requires approval at the graph/policy layer. Scaling is
+    asynchronous, so verification_passed remains None after a successful patch.
+    If the deployment is already at the requested replica count, the tool treats
+    the desired state as already achieved and returns verification_passed=True.
+    """
     client = _k8s_client(context)
 
     dep = await _get_deployment(
@@ -720,12 +982,20 @@ async def _scale_deployment(
         "scale_deployment",
     )
 
-    try:
-        previous_replicas = int(dep.replicas or 0)
-    except (TypeError, ValueError) as exc:
-        raise ToolExecutionError("scale_deployment", exc) from exc
+    raw = dep.to_dict()
+
+    spec = raw.get("spec", {}) if isinstance(raw, Mapping) else {}
+
+    previous_replicas = _to_int(spec.get("replicas", 0) if isinstance(spec, Mapping) else 0)
 
     if previous_replicas == args.replicas:
+        logger.info(
+            "Deployment %s/%s already at %d replicas",
+            args.namespace,
+            args.name,
+            args.replicas,
+        )
+
         return ScaleDeploymentOutput(
             name=args.name,
             namespace=args.namespace,
@@ -733,21 +1003,38 @@ async def _scale_deployment(
             new_replicas=args.replicas,
             scaled=False,
             reason=args.reason,
+            success=True,
+            verification_passed=True,
         )
 
-    try:
-        await dep.scale(args.replicas)
-    except Exception as exc:
-        raise ToolExecutionError("scale_deployment", exc) from exc
+    scale_patch = {"spec": {"replicas": args.replicas}}
 
-    return ScaleDeploymentOutput(
-        name=args.name,
-        namespace=args.namespace,
-        previous_replicas=previous_replicas,
-        new_replicas=args.replicas,
-        scaled=True,
-        reason=args.reason,
-    )
+    try:
+        await dep.patch(scale_patch)
+
+        logger.info(
+            "Deployment %s/%s scaled from %d to %d replicas",
+            args.namespace,
+            args.name,
+            previous_replicas,
+            args.replicas,
+        )
+
+        return ScaleDeploymentOutput(
+            name=args.name,
+            namespace=args.namespace,
+            previous_replicas=previous_replicas,
+            new_replicas=args.replicas,
+            scaled=True,
+            reason=args.reason,
+            success=True,
+            verification_passed=None,
+        )
+    except Exception as exc:
+        raise ToolExecutionError(
+            "scale_deployment",
+            exc,
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -755,14 +1042,25 @@ async def _scale_deployment(
 # ---------------------------------------------------------------------------
 
 
-def register(registry: ToolRegistry, context: SREContext) -> None:
-    """Register all Kubernetes tools."""
-    del context
+def register(
+    registry: ToolRegistry,
+    context: SREContext,
+) -> None:
+    """Register all Kubernetes tools with the given registry.
 
+    Called by build_default_registry() in registry.py.
+
+    Args:
+        registry: ToolRegistry to register tools with
+        context: SREContext (passed to handlers at execution time, not stored)
+    """
+    # Tier 0: Read-only diagnostics
     registry.register(
         Tool(
             name="list_pods",
-            description=("List pods in a namespace with status, restarts, age, and node."),
+            description=(
+                "List pods in a namespace with status, restart count, age, and node assignment"
+            ),
             input_model=ListPodsInput,
             output_model=ListPodsOutput,
             handler=_list_pods,
@@ -773,7 +1071,10 @@ def register(registry: ToolRegistry, context: SREContext) -> None:
     registry.register(
         Tool(
             name="get_pod_events",
-            description=("Get the most recent Kubernetes events for a specific pod."),
+            description=(
+                "Get Kubernetes events for a specific pod, including "
+                "CrashLoopBackOff, OOMKilled, and scheduling events"
+            ),
             input_model=GetPodEventsInput,
             output_model=GetPodEventsOutput,
             handler=_get_pod_events,
@@ -785,9 +1086,8 @@ def register(registry: ToolRegistry, context: SREContext) -> None:
         Tool(
             name="get_pod_logs",
             description=(
-                "Get recent log lines from a pod. Set previous=True for logs from "
-                "the previous terminated container instance; set container for "
-                "multi-container pods."
+                "Get recent log lines from a pod. Use previous=True to "
+                "get logs from the last crashed container"
             ),
             input_model=GetPodLogsInput,
             output_model=GetPodLogsOutput,
@@ -799,7 +1099,9 @@ def register(registry: ToolRegistry, context: SREContext) -> None:
     registry.register(
         Tool(
             name="get_deployment_status",
-            description=("Get deployment replica counts and conditions."),
+            description=(
+                "Get deployment replica counts and conditions (ready, updated, available)"
+            ),
             input_model=GetDeploymentStatusInput,
             output_model=GetDeploymentStatusOutput,
             handler=_get_deployment_status,
@@ -811,9 +1113,8 @@ def register(registry: ToolRegistry, context: SREContext) -> None:
         Tool(
             name="get_pod_metrics",
             description=(
-                "Get current Pod CPU usage (millicores), memory working-set usage "
-                "(MiB), and configured container resource requests. Requires a "
-                "metrics.k8s.io provider."
+                "Get CPU (millicores) and memory (MiB) usage for pods. "
+                "Returns empty with reason if metrics-server is unavailable"
             ),
             input_model=GetPodMetricsInput,
             output_model=GetPodMetricsOutput,
@@ -822,12 +1123,12 @@ def register(registry: ToolRegistry, context: SREContext) -> None:
         )
     )
 
+    # Tier 1: Reversible remediation
     registry.register(
         Tool(
             name="restart_deployment",
             description=(
-                "Restart a deployment by patching the pod-template restartedAt "
-                "annotation. This triggers a normal Deployment rollout."
+                "Restart a deployment by patching the restartedAt annotation (rolling restart)"
             ),
             input_model=RestartDeploymentInput,
             output_model=RestartDeploymentOutput,
@@ -840,8 +1141,7 @@ def register(registry: ToolRegistry, context: SREContext) -> None:
         Tool(
             name="delete_pod",
             description=(
-                "Delete a specific pod. A grace period of 0 uses kr8s force "
-                "deletion. Use only for targeted remediation."
+                "Delete a pod. Use grace_period_seconds=0 to force delete stuck Terminating pods"
             ),
             input_model=DeletePodInput,
             output_model=DeletePodOutput,
@@ -850,12 +1150,13 @@ def register(registry: ToolRegistry, context: SREContext) -> None:
         )
     )
 
+    # Tier 2: Requires approval
     registry.register(
         Tool(
             name="scale_deployment",
             description=(
-                "Scale a deployment to a target replica count. Tier-2 action; "
-                "the graph must obtain human approval before invoking the tool."
+                "Scale a deployment to a target replica count. "
+                "Requires human approval before execution"
             ),
             input_model=ScaleDeploymentInput,
             output_model=ScaleDeploymentOutput,

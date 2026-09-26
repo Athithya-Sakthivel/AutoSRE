@@ -1,13 +1,39 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-export LLM_PROVIDER="${LLM_PROVIDER:-groq}"
-export LLM_BASE_URL="${LLM_BASE_URL:-https://api.groq.com/openai/v1}"
-export LLM_API_KEY="${LLM_API_KEY:?LLM_API_KEY is required but empty}"
-export LLM_MODEL_COORDINATOR="${LLM_MODEL_COORDINATOR:-openai/gpt-oss-120b}"
-export LLM_MODEL_WORKER="${LLM_MODEL_WORKER:-openai/gpt-oss-20b}"
-export LLM_MODEL_SYNTHESIZER="${LLM_MODEL_SYNTHESIZER:-openai/gpt-oss-120b}"
-export LLM_MODEL_SELF_CHECK="${LLM_MODEL_SELF_CHECK:-openai/gpt-oss-20b}"
+# ---------------------------------------------------------------------------
+# LLM provider
+# ---------------------------------------------------------------------------
+# The router prefixes every model ID with AUTOSRE_LLM__PROVIDER unless it
+# already carries that prefix. Model IDs that contain a slash of their
+# own (openai/gpt-oss-20b, qwen/qwen3.8-27b) are NOT considered prefixed.
+# This is why groq + openai/gpt-oss-20b → groq/openai/gpt-oss-20b.
+
+export AUTOSRE_LLM__PROVIDER="groq"                             # groq | openai | anthropic | ollama
+export AUTOSRE_LLM__BASE_URL="https://api.groq.com/openai/v1"
+export AUTOSRE_LLM__MODEL_COORDINATOR="qwen/qwen3.8-27b"
+export AUTOSRE_LLM__MODEL_WORKER="openai/gpt-oss-20b"
+export AUTOSRE_LLM__API_KEY=""
+
+# Optional. When the primary provider fails after retries, LiteLLM
+# transparently retries on the first model in this list.
+# export AUTOSRE_LLM__FALLBACK_MODELS='["openai/gpt-4o-mini"]'
+
+# Token pricing (USD / 1K tokens)
+export AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR="0.0008"
+export AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR="0.004"
+export AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER="0.000075"
+export AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER="0.0003"
+
+# ---------------------------------------------------------------------------
+# Eval judge
+# ---------------------------------------------------------------------------
+# The judge bypasses TokenVelocityRouter and is passed directly to
+# LiteLLM, so its model ID MUST be fully qualified.
+
+export AUTOSRE_EVAL__JUDGE_MODEL="groq/openai/gpt-oss-20b"
+export AUTOSRE_EVAL__JUDGE_BASE_URL="${AUTOSRE_LLM__BASE_URL}"
+export AUTOSRE_EVAL__JUDGE_API_KEY="${AUTOSRE_LLM__API_KEY}"
 
 
 bash scripts/staging/kind_cluster.sh
@@ -33,17 +59,19 @@ helm upgrade --install autosre-cilium infra/k8s/cilium/ \
   --wait \
   --timeout 120s
 
-
+bash scripts/common/rivulet-api-gateway-deploy.sh deploy
+bash scripts/common/rivulet-frontend-deploy.sh deploy
+bash scripts/common/rivulet-ingestion-worker-deploy.sh deploy
 
 # Verify
 kubectl get clustersecretstore -A
 kubectl get externalsecret -A
 
-kubectl get pods -n openobserve
-kubectl get daemonset -n openobserve
-kubectl get secrets -n openobserve
+kubectl get pods -A
+kubectl get daemonset -A
+kubectl get secrets -A
 
-bash tests/infra/observability.sh
+bash scripts/common/test-o2.sh
 
 # Verify policies are applied
 kubectl get ciliumnetworkpolicy -A

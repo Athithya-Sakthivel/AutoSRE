@@ -1,26 +1,77 @@
-"""PostgreSQL diagnostic and narrowly-scoped remediation tools."""
+"""PostgreSQL diagnostic and narrowly-scoped remediation tools.
+
+## Tools Registered
+
+### Tier 0 — Read-Only Diagnostics (3 tools)
+- `get_active_queries`: List sessions with active-query age and wait events
+- `get_lock_waits`: Return lock-wait graph (blocked/blocking PIDs, queries, duration)
+- `get_connection_stats`: Aggregate client-connection counts and utilisation vs max_connections
+
+### Tier 1 — Reversible Remediation (1 tool)
+- `terminate_backend`: Terminate a PostgreSQL backend with pg_terminate_backend
+
+## Contracts
+
+### Output Contract
+Every Tier-1 tool output model includes:
+- `success: bool` — True if the tool executed without error
+- `verification_passed: bool | None` — True if output indicates root cause
+  resolved, None if indeterminate
+
+For `terminate_backend`, the tool explicitly rechecks whether the targeted
+backend identity has disappeared before reporting verification success.
+
+### SREContext Contract
+The PostgreSQL connection pool is accessed via `context.pg_pool`. It must be
+an `psycopg_pool.AsyncConnectionPool` instance or a compatible object exposing
+`connection()`. If None, tools raise `ToolExecutionError`.
+
+### Error Handling Contract
+All psycopg queries are wrapped in async context managers and exceptions are
+re-raised as `ToolExecutionError` with the tool name and original exception.
+
+### Safety Contract (terminate_backend)
+The terminate_backend tool refuses to kill:
+- The agent's own connection (is_self)
+- Superuser sessions (is_superuser)
+- Sessions without a login role (usename is None)
+
+This prevents accidental termination of critical infrastructure.
+"""
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
 from autosre.core.state import SREContext
-from autosre.tools.registry import Tool, ToolExecutionError, ToolInputModel, ToolRegistry
+from autosre.tools.registry import (
+    Tool,
+    ToolExecutionError,
+    ToolInputModel,
+    ToolRegistry,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Input / Output Models
+# ---------------------------------------------------------------------------
 
 
 class GetActiveQueriesInput(ToolInputModel):
+    """Input for listing active PostgreSQL queries."""
+
     min_duration_seconds: int = Field(
         default=0,
         ge=0,
         description=("Only return sessions whose active query age is at least this many seconds"),
     )
-    limit: int = Field(
-        default=25,
-        ge=1,
-        le=200,
-    )
+    limit: int = Field(default=25, ge=1, le=200)
     exclude_idle: bool = Field(
         default=True,
         description=("Exclude idle, idle-in-transaction, and idle-in-transaction-aborted sessions"),
@@ -28,6 +79,8 @@ class GetActiveQueriesInput(ToolInputModel):
 
 
 class ActiveQuery(BaseModel):
+    """A single active PostgreSQL query session."""
+
     pid: int
     usename: str | None
     datname: str | None
@@ -39,19 +92,21 @@ class ActiveQuery(BaseModel):
 
 
 class GetActiveQueriesOutput(BaseModel):
+    """Output for get_active_queries tool."""
+
     queries: list[ActiveQuery]
     total_running: int
 
 
 class GetLockWaitsInput(ToolInputModel):
-    limit: int = Field(
-        default=25,
-        ge=1,
-        le=200,
-    )
+    """Input for listing lock waits."""
+
+    limit: int = Field(default=25, ge=1, le=200)
 
 
 class LockWait(BaseModel):
+    """A single lock wait relationship."""
+
     blocked_pid: int
     blocking_pid: int
     blocked_query: str
@@ -60,14 +115,18 @@ class LockWait(BaseModel):
 
 
 class GetLockWaitsOutput(BaseModel):
+    """Output for get_lock_waits tool."""
+
     waits: list[LockWait]
 
 
 class GetConnectionStatsInput(ToolInputModel):
-    """No parameters."""
+    """Input for connection stats (no parameters)."""
 
 
 class ConnectionStats(BaseModel):
+    """Aggregate PostgreSQL client connection statistics."""
+
     total_connections: int
     active: int
     idle: int
@@ -77,44 +136,53 @@ class ConnectionStats(BaseModel):
 
 
 class GetConnectionStatsOutput(BaseModel):
+    """Output for get_connection_stats tool."""
+
     stats: ConnectionStats
 
 
 class TerminateBackendInput(ToolInputModel):
+    """Input for terminating a PostgreSQL backend."""
+
     pid: int = Field(
         gt=0,
         description="PostgreSQL backend PID to terminate",
     )
-    reason: str = Field(
-        min_length=1,
-        max_length=500,
-    )
+    reason: str = Field(min_length=1, max_length=500)
 
     @field_validator("reason")
     @classmethod
     def validate_reason(cls, value: str) -> str:
+        """Ensure reason is not blank after stripping."""
         value = value.strip()
-
         if not value:
             raise ValueError("reason must not be blank")
-
         return value
 
 
 class TerminateBackendOutput(BaseModel):
+    """Output for terminate_backend tool."""
+
     pid: int
     terminated: bool
     reason: str
+    success: bool = True
+    verification_passed: bool | None = None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _connection(context: SREContext) -> Any:
-    """Return the async psycopg pool context manager from ``SREContext``."""
+    """Return the async psycopg pool context manager from SREContext.
 
-    pool = getattr(
-        context,
-        "pg_pool",
-        None,
-    )
+    Raises:
+        ToolExecutionError: If pg_pool is not initialized or doesn't
+            implement connection().
+    """
+    pool = getattr(context, "pg_pool", None)
 
     if pool is None:
         raise ToolExecutionError(
@@ -122,11 +190,7 @@ def _connection(context: SREContext) -> Any:
             RuntimeError("SREContext.pg_pool is not initialised"),
         )
 
-    connection = getattr(
-        pool,
-        "connection",
-        None,
-    )
+    connection = getattr(pool, "connection", None)
 
     if not callable(connection):
         raise ToolExecutionError(
@@ -137,10 +201,16 @@ def _connection(context: SREContext) -> Any:
     return connection()
 
 
+# ---------------------------------------------------------------------------
+# Tier 0: Read-only diagnostics
+# ---------------------------------------------------------------------------
+
+
 async def _get_active_queries(
     args: GetActiveQueriesInput,
     context: SREContext,
 ) -> GetActiveQueriesOutput:
+    """List PostgreSQL sessions with active-query age and wait information."""
     query = """
         WITH activity AS (
             SELECT
@@ -160,11 +230,14 @@ async def _get_active_queries(
                 LEFT(COALESCE(query, ''), 500) AS query
             FROM pg_stat_activity
             WHERE pid <> pg_backend_pid()
-              AND (%s = FALSE OR state NOT IN (
-                  'idle',
-                  'idle in transaction',
-                  'idle in transaction (aborted)'
-              ))
+              AND (
+                  %s = FALSE
+                  OR state NOT IN (
+                      'idle',
+                      'idle in transaction',
+                      'idle in transaction (aborted)'
+                  )
+              )
         )
         SELECT
             pid,
@@ -191,7 +264,6 @@ async def _get_active_queries(
                 args.limit,
             ),
         )
-
         rows = await cur.fetchall()
 
     total_matching = int(rows[0][8]) if rows else 0
@@ -218,6 +290,7 @@ async def _get_lock_waits(
     args: GetLockWaitsInput,
     context: SREContext,
 ) -> GetLockWaitsOutput:
+    """Return the current PostgreSQL lock-wait graph."""
     query = """
         WITH waiting_locks AS (
             SELECT DISTINCT ON (pid)
@@ -250,11 +323,7 @@ async def _get_lock_waits(
     """
 
     async with _connection(context) as conn, conn.cursor() as cur:
-        await cur.execute(
-            query,
-            (args.limit,),
-        )
-
+        await cur.execute(query, (args.limit,))
         rows = await cur.fetchall()
 
     return GetLockWaitsOutput(
@@ -275,23 +344,25 @@ async def _get_connection_stats(
     args: GetConnectionStatsInput,
     context: SREContext,
 ) -> GetConnectionStatsOutput:
+    """Return PostgreSQL client connection counts and utilisation."""
     del args
 
     async with _connection(context) as conn, conn.cursor() as cur:
         await cur.execute(
             """
-                SELECT
-                    COUNT(*) AS total,
-                    COUNT(*) FILTER (WHERE state = 'active') AS active,
-                    COUNT(*) FILTER (WHERE state = 'idle') AS idle,
-                    COUNT(*) FILTER (
-                        WHERE state IN (
-                            'idle in transaction',
-                            'idle in transaction (aborted)'
-                        )
-                    ) AS idle_tx
-                FROM pg_stat_activity
-                """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE state = 'active') AS active,
+                COUNT(*) FILTER (WHERE state = 'idle') AS idle,
+                COUNT(*) FILTER (
+                    WHERE state IN (
+                        'idle in transaction',
+                        'idle in transaction (aborted)'
+                    )
+                ) AS idle_tx
+            FROM pg_stat_activity
+            WHERE backend_type = 'client backend'
+            """
         )
 
         row = await cur.fetchone()
@@ -305,7 +376,6 @@ async def _get_connection_stats(
         total, active, idle, idle_tx = (int(value) for value in row)
 
         await cur.execute("SHOW max_connections")
-
         max_row = await cur.fetchone()
 
         if max_row is None:
@@ -325,30 +395,44 @@ async def _get_connection_stats(
             idle=idle,
             idle_in_transaction=idle_tx,
             max_connections=max_conn,
-            utilisation_pct=round(
-                utilisation,
-                2,
-            ),
+            utilisation_pct=round(utilisation, 2),
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# Tier 1: Reversible remediation
+# ---------------------------------------------------------------------------
 
 
 async def _terminate_backend(
     args: TerminateBackendInput,
     context: SREContext,
 ) -> TerminateBackendOutput:
+    """Terminate one PostgreSQL backend and verify its disappearance.
+
+    Safety checks:
+    - Refuses to terminate the agent's own connection
+    - Refuses to terminate superuser sessions
+    - Refuses to terminate sessions without a login role
+
+    A PID that is already absent is treated as an already-satisfied desired
+    state. Verification compares `backend_start` as well as PID to avoid
+    treating a reused PostgreSQL PID as the original backend.
+    """
     async with _connection(context) as conn, conn.cursor() as cur:
         await cur.execute(
             """
-                SELECT
-                    activity.usename,
-                    COALESCE(roles.rolsuper, TRUE) AS is_superuser,
-                    activity.pid = pg_backend_pid() AS is_self
-                FROM pg_stat_activity AS activity
-                LEFT JOIN pg_roles AS roles
-                  ON roles.rolname = activity.usename
-                WHERE activity.pid = %s
-                """,
+            SELECT
+                activity.usename,
+                COALESCE(roles.rolsuper, TRUE) AS is_superuser,
+                activity.pid = pg_backend_pid() AS is_self,
+                activity.backend_start
+            FROM pg_stat_activity AS activity
+            LEFT JOIN pg_roles AS roles
+              ON roles.rolname = activity.usename
+            WHERE activity.pid = %s
+            """,
             (args.pid,),
         )
 
@@ -358,12 +442,15 @@ async def _terminate_backend(
             return TerminateBackendOutput(
                 pid=args.pid,
                 terminated=False,
-                reason="pid not found",
+                reason=args.reason,
+                success=True,
+                verification_passed=True,
             )
 
         usename = row[0]
         is_superuser = bool(row[1])
         is_self = bool(row[2])
+        backend_start = row[3]
 
         if is_self:
             raise ToolExecutionError(
@@ -383,31 +470,66 @@ async def _terminate_backend(
                 PermissionError(f"refusing to terminate superuser pid {args.pid}"),
             )
 
+        try:
+            await cur.execute(
+                "SELECT pg_terminate_backend(%s, %s)",
+                (args.pid, 1000),
+            )
+            result_row = await cur.fetchone()
+        except Exception as exc:
+            raise ToolExecutionError(
+                "terminate_backend",
+                exc,
+            ) from exc
+
+        termination_requested = bool(result_row[0]) if result_row else False
+
+        # pg_terminate_backend() reports whether termination was requested,
+        # not whether PostgreSQL has finished removing the backend.
+        await asyncio.sleep(0.5)
+
         await cur.execute(
-            "SELECT pg_terminate_backend(%s, %s)",
-            (
-                args.pid,
-                1000,
-            ),
+            """
+            SELECT 1
+            FROM pg_stat_activity
+            WHERE pid = %s
+              AND backend_start = %s
+            """,
+            (args.pid, backend_start),
         )
+        still_present = await cur.fetchone() is not None
 
-        result_row = await cur.fetchone()
+        verified = not still_present
 
-        terminated = bool(result_row[0]) if result_row else False
+        logger.info(
+            "Backend %d termination requested: requested=%s verified=%s",
+            args.pid,
+            termination_requested,
+            verified,
+        )
 
     return TerminateBackendOutput(
         pid=args.pid,
-        terminated=terminated,
+        terminated=termination_requested and verified,
         reason=args.reason,
+        success=True,
+        verification_passed=verified,
     )
+
+
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
 
 
 def register(
     registry: ToolRegistry,
     context: SREContext,
 ) -> None:
-    """Register all Postgres tools."""
+    """Register all PostgreSQL tools with the given registry."""
+    del context
 
+    # Tier 0: Read-only diagnostics
     registry.register(
         Tool(
             name="get_active_queries",
@@ -440,7 +562,7 @@ def register(
         Tool(
             name="get_connection_stats",
             description=(
-                "Return aggregate PostgreSQL connection counts and utilisation "
+                "Return PostgreSQL client connection counts and utilisation "
                 "against max_connections."
             ),
             input_model=GetConnectionStatsInput,
@@ -450,12 +572,13 @@ def register(
         )
     )
 
+    # Tier 1: Reversible remediation
     registry.register(
         Tool(
             name="terminate_backend",
             description=(
                 "Terminate one PostgreSQL backend with pg_terminate_backend; "
-                "refuses superuser, self, and background backends. Tier-1 action."
+                "refuses superuser, self, and background backends."
             ),
             input_model=TerminateBackendInput,
             output_model=TerminateBackendOutput,
