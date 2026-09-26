@@ -33,6 +33,8 @@ dependencies = [
     "openinference-instrumentation-litellm>=0.1.46",
     "openinference-instrumentation-langchain>=0.1.76",
     "openinference-semantic-conventions>=0.1.39",
+    "slack-sdk>=3.44.1,<4.0.0",
+    "aiohttp>=3.10,<4.0.0",
 ]
 
 [project.optional-dependencies]
@@ -86,5 +88,11 @@ module = [
     "testcontainers.*",
     "deepeval.*",
     "redis.*",
+    "slack_sdk.*",
+    "aiohttp.*",
 ]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["autosre.slack.socket_mode"]
+allow_untyped_calls = true

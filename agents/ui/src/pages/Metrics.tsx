@@ -2,11 +2,15 @@
  * Metrics dashboard page.
  *
  * Displays:
- *   - KPI cards
+ *   - KPI strip: Total Incidents, Resolution Rate, Active MTTR, Total Cost
+ *   - Prominent MTTR reduction banner (vs. dataset baseline)
  *   - Safety status
- *   - Time-series charts for MTTR, incident count, cost, and tokens
- *   - Incident category breakdown
- *   - Top five most expensive incidents
+ *   - Time-series charts: MTTR, incident count, cost, tokens
+ *   - Incidents by category
+ *   - Top 5 most expensive incidents
+ *
+ * "Active MTTR" excludes provider rate-limit backoff. The tooltip on the
+ * card explains the difference; the value is the honest work time.
  */
 
 import { useState } from "react";
@@ -41,22 +45,10 @@ const RANGE_OPTIONS: ReadonlyArray<{
   value: MetricTimeRange;
   label: string;
 }> = [
-  {
-    value: "1h",
-    label: "1 Hour",
-  },
-  {
-    value: "24h",
-    label: "24 Hours",
-  },
-  {
-    value: "7d",
-    label: "7 Days",
-  },
-  {
-    value: "30d",
-    label: "30 Days",
-  },
+  { value: "1h", label: "1 Hour" },
+  { value: "24h", label: "24 Hours" },
+  { value: "7d", label: "7 Days" },
+  { value: "30d", label: "30 Days" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -96,10 +88,7 @@ export function MetricsPage(): ReactElement {
 
   const categoryData = summary
     ? Object.entries(summary.incidents_by_category).map(
-        ([category, count]) => ({
-          category,
-          count,
-        }),
+        ([category, count]) => ({ category, count }),
       )
     : [];
 
@@ -116,6 +105,9 @@ export function MetricsPage(): ReactElement {
         )
       : 0;
 
+  const showReductionCard =
+    summary !== undefined && summary.mttr_reduction_pct > 0;
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -123,9 +115,8 @@ export function MetricsPage(): ReactElement {
           <h1 className="text-2xl font-semibold tracking-tight text-white">
             Metrics
           </h1>
-
           <p className="mt-1 text-sm text-slate-400">
-            MTTR, cost, safety, and resolution rate
+            Active MTTR, cost, safety, and resolution rate
           </p>
         </div>
 
@@ -171,7 +162,7 @@ export function MetricsPage(): ReactElement {
           <KpiCard
             label="Total Incidents"
             value={formatCount(summary.total_incidents)}
-            sublabel={`${formatCount(summary.resolved_count)} resolved`}
+            sublabel={`${formatCount(summary.resolved_count)} resolved · ${formatCount(summary.no_action_count)} no action`}
           />
 
           <KpiCard
@@ -186,13 +177,17 @@ export function MetricsPage(): ReactElement {
           />
 
           <KpiCard
-            label="Avg MTTR"
+            label="Active MTTR"
             value={
               summary.avg_mttr_seconds > 0
                 ? formatDuration(summary.avg_mttr_seconds)
                 : "—"
             }
-            sublabel="time to resolve"
+            sublabel="excludes provider backoff"
+            tooltip={
+              "Active time = wall-clock time minus rate-limit sleeps " +
+              "recorded by the router. The honest measure of work done."
+            }
           />
 
           <KpiCard
@@ -201,6 +196,10 @@ export function MetricsPage(): ReactElement {
             sublabel={`${formatTokens(summary.total_tokens)} tokens`}
           />
         </div>
+      )}
+
+      {summary && showReductionCard && (
+        <MttrReductionBanner summary={summary} />
       )}
 
       {summary && (
@@ -261,14 +260,14 @@ export function MetricsPage(): ReactElement {
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <ChartCard
-              title="MTTR Over Time"
-              subtitle="Average resolution time per bucket"
+              title="Active MTTR Over Time"
+              subtitle="Average active work time per bucket"
             >
               <LineChart
                 data={mttrData}
                 color="status-running"
                 yFormat={formatDuration}
-                label="MTTR over time"
+                label="Active MTTR over time"
               />
             </ChartCard>
 
@@ -326,6 +325,53 @@ export function MetricsPage(): ReactElement {
 }
 
 // ---------------------------------------------------------------------------
+// MTTR reduction banner
+// ---------------------------------------------------------------------------
+
+function MttrReductionBanner({
+  summary,
+}: {
+  summary: {
+    mttr_reduction_pct: number;
+    avg_mttr_seconds: number;
+    baseline_mttr_seconds: number;
+    avg_backoff_seconds: number;
+  };
+}): ReactElement {
+  return (
+    <div className="rounded-lg border border-status-resolved/30 bg-status-resolved/5 p-5">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="text-[11px] font-medium uppercase tracking-wide text-status-resolved">
+            MTTR Reduction vs Manual Baseline
+          </div>
+          <div className="mt-1 text-3xl font-semibold tabular-nums text-status-resolved">
+            {summary.mttr_reduction_pct.toFixed(1)}%
+          </div>
+        </div>
+
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs sm:text-right">
+          <dt className="text-slate-400">Agent (active)</dt>
+          <dd className="tabular-nums text-slate-200">
+            {formatDuration(summary.avg_mttr_seconds)}
+          </dd>
+
+          <dt className="text-slate-400">Baseline</dt>
+          <dd className="tabular-nums text-slate-200">
+            {formatDuration(summary.baseline_mttr_seconds)}
+          </dd>
+
+          <dt className="text-slate-400">Avg backoff</dt>
+          <dd className="tabular-nums text-slate-500">
+            {formatDuration(summary.avg_backoff_seconds)}
+          </dd>
+        </dl>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
 
@@ -334,16 +380,32 @@ function KpiCard({
   value,
   sublabel,
   color = "text-slate-200",
+  tooltip,
 }: {
   label: string;
   value: string;
   sublabel?: string;
   color?: string;
+  tooltip?: string;
 }): ReactElement {
   return (
-    <div className="rounded-lg border border-surface-border bg-surface-1 px-4 py-3">
-      <div className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
-        {label}
+    <div
+      className="rounded-lg border border-surface-border bg-surface-1 px-4 py-3"
+      title={tooltip}
+    >
+      <div className="flex items-center gap-1">
+        <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
+          {label}
+        </span>
+        {tooltip && (
+          <span
+            className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border border-slate-600 text-[9px] font-semibold text-slate-500"
+            aria-label={tooltip}
+            role="img"
+          >
+            i
+          </span>
+        )}
       </div>
 
       <div className={`mt-1 text-xl font-semibold tabular-nums ${color}`}>
@@ -370,10 +432,8 @@ function ChartCard({
     <div className="space-y-2">
       <div>
         <h3 className="text-sm font-semibold text-slate-200">{title}</h3>
-
         {subtitle && <p className="text-[11px] text-slate-500">{subtitle}</p>}
       </div>
-
       {children}
     </div>
   );
@@ -431,7 +491,6 @@ function TopExpensiveTable({
               <div key={row} className="h-8 rounded bg-surface-2" />
             ))}
           </div>
-
           <span className="sr-only">Loading expensive incidents</span>
         </div>
       )}
@@ -462,19 +521,15 @@ function TopExpensiveTable({
                 <th scope="col" className="px-4 py-2.5 font-medium">
                   Alert
                 </th>
-
                 <th scope="col" className="px-4 py-2.5 font-medium">
                   Service
                 </th>
-
                 <th scope="col" className="px-4 py-2.5 font-medium">
                   Status
                 </th>
-
                 <th scope="col" className="px-4 py-2.5 text-right font-medium">
-                  MTTR
+                  Wall
                 </th>
-
                 <th scope="col" className="px-4 py-2.5 text-right font-medium">
                   Cost
                 </th>

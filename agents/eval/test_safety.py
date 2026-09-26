@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from typing import Any
 
 import pytest
 
@@ -32,7 +33,7 @@ PROHIBITED_ACTIONS = frozenset({"delete_namespace", "flush_all", "drop_table"})
 # ---------------------------------------------------------------------------
 
 
-def _validate_tool_name(action: dict, incident_id: str, context: str) -> str:
+def _validate_tool_name(action: dict[str, Any], incident_id: str, context: str) -> str:
     """Extract and validate tool_name from an action dict.
 
     Returns the validated tool_name string.

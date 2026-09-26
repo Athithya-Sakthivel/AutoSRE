@@ -1,20 +1,52 @@
 """Token-velocity routing for LiteLLM-backed Groq models.
 
+## Provider contract
+
 Groq's native API uses model IDs such as ``openai/gpt-oss-20b`` and
-``qwen/qwen3.8-27b``. LiteLLM's Groq provider is selected by prefixing the model
-with ``groq/``; for example:
+``qwen/qwen3.8-27b``. LiteLLM's Groq provider is selected by prefixing
+the model with ``groq/``:
 
     groq/openai/gpt-oss-20b
     groq/qwen/qwen3.8-27b
 
-This is different from calling Groq's OpenAI-compatible HTTP endpoint directly,
-where the request model must remain ``openai/gpt-oss-20b``. Do not force
-``custom_llm_provider="openai"`` for native Groq calls.
+This is different from calling Groq's OpenAI-compatible HTTP endpoint
+directly, where the request model must remain ``openai/gpt-oss-20b``.
+Do not force ``custom_llm_provider="openai"`` for native Groq calls.
 
-Groq prompt caching is automatic on supported models and only benefits exact
-prefix matches. Static system instructions and deterministically ordered tool
-schemas should remain unchanged; dynamic incident data should be appended after
-that stable prefix.
+Groq prompt caching is automatic on supported models and only benefits
+exact prefix matches. Static system instructions and deterministically
+ordered tool schemas must remain unchanged; dynamic incident data must
+be appended after that stable prefix.
+
+## Routing contract
+
+The router selects between two tiers:
+
+    coordinator (fast)   Low-latency model for structured JSON stages
+    worker (slow)        High-context model for evidence-heavy stages
+
+Selection is by *estimated input tokens*. Threshold-based routing keeps
+small triage/propose prompts on the fast tier and large
+investigate/hypothesize prompts on the worker tier.
+
+Explicit overrides:
+    "coordinator" / "auto"   Threshold-based routing
+    "fast"                   Force the coordinator model
+    "worker" / "slow"        Force the worker model
+    <explicit model id>      Normalized and passed through
+
+## Failure and budget contract
+
+Every physical HTTP call is counted in ``RunMetrics.llm_call_count``.
+Every failed call increments ``RunMetrics.llm_consecutive_failures``,
+and every successful call resets it to 0. When the counter reaches
+``max_consecutive_failures`` the router raises
+``LLMBudgetExhaustedError``, which propagates out of ``acompletion``
+and is handled by the graph node as a fatal incident error.
+
+Rate-limit fallback (fast -> worker) is transparent. Rate-limit sleeps
+are recorded in ``RunMetrics.backoff_seconds`` so that ``complete_node``
+can report the honest active work time.
 """
 
 from __future__ import annotations
@@ -31,39 +63,55 @@ import litellm
 import tiktoken
 
 from autosre.config import LLMConfig
+from autosre.core.state import RunMetrics
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
 DEFAULT_TOKEN_THRESHOLD = 6000
 DEFAULT_TIKTOKEN_ENCODING = "cl100k_base"
 DEFAULT_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
+DEFAULT_MAX_WORKER_ATTEMPTS = 3
 
 Message = Mapping[str, Any]
 
 
-class TokenVelocityRouter:
-    """Select a configured model tier from estimated prompt size.
+class LLMBudgetExhaustedError(RuntimeError):
+    """Raised when consecutive LLM failures exceed the configured budget.
 
-    Routing aliases:
-
-        coordinator / auto
-            Threshold-based routing.
-
-        fast
-            Force the coordinator model.
-
-        worker / slow
-            Force the worker model.
-
-    When ``provider == "groq"``, configured model IDs are converted to the
-    LiteLLM form ``groq/<native-groq-model-id>``. This preserves namespaces such
-    as ``openai/`` inside the actual Groq model ID.
+    Indicates a persistent provider outage rather than a transient error.
+    Graph nodes must not retry on this exception; the incident should be
+    marked failed and left for human investigation.
     """
 
-    AUTO_ALIASES = frozenset({"coordinator", "auto"})
-    FAST_ALIASES = frozenset({"fast"})
-    SLOW_ALIASES = frozenset({"worker", "slow"})
-    ALIASES = AUTO_ALIASES | FAST_ALIASES | SLOW_ALIASES
+
+# ---------------------------------------------------------------------------
+# TokenVelocityRouter
+# ---------------------------------------------------------------------------
+
+
+class TokenVelocityRouter:
+    """Select a model tier from estimated prompt size and dispatch to LiteLLM.
+
+    Aliases:
+
+        coordinator / auto      Threshold-based routing
+        fast                    Force the coordinator model
+        worker / slow           Force the worker model
+
+    When ``provider == "groq"``, configured model IDs are converted to the
+    LiteLLM form ``groq/<native-groq-model-id>``. This preserves namespaces
+    such as ``openai/`` inside the actual Groq model ID.
+    """
+
+    AUTO_ALIASES: frozenset[str] = frozenset({"coordinator", "auto"})
+    FAST_ALIASES: frozenset[str] = frozenset({"fast"})
+    SLOW_ALIASES: frozenset[str] = frozenset({"worker", "slow"})
+    ALIASES: frozenset[str] = AUTO_ALIASES | FAST_ALIASES | SLOW_ALIASES
 
     def __init__(
         self,
@@ -72,28 +120,39 @@ class TokenVelocityRouter:
         *,
         encoder: Any | None = None,
         fallback_on_rate_limit: bool = True,
+        max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
     ) -> None:
+        """Initialize the router.
+
+        Args:
+            config: LLM settings including provider, model IDs, and pricing.
+            threshold_tokens: Input-token count above which the worker tier
+                is selected. Must be > 0.
+            encoder: Optional tiktoken-compatible encoder. Defaults to
+                cl100k_base.
+            fallback_on_rate_limit: When True, auto-routed fast-tier calls
+                that receive HTTP 429 retry on the worker tier.
+            max_consecutive_failures: Number of consecutive failed physical
+                calls after which ``LLMBudgetExhaustedError`` is raised.
+        """
         if threshold_tokens <= 0:
             raise ValueError("threshold_tokens must be greater than zero")
 
+        if max_consecutive_failures <= 0:
+            raise ValueError("max_consecutive_failures must be greater than zero")
+
         self.config = config
         self.threshold_tokens = threshold_tokens
+        self.max_consecutive_failures = max_consecutive_failures
 
-        raw_provider = getattr(
-            config.provider,
-            "value",
-            config.provider,
-        )
+        raw_provider = getattr(config.provider, "value", config.provider)
         self.provider = str(raw_provider).strip().lower()
 
         self.api_key = self._secret_value(getattr(config, "api_key", None))
 
         configured_base_url = getattr(config, "base_url", None)
-
-        self.base_url: str | None
-
         if configured_base_url:
-            self.base_url = str(configured_base_url)
+            self.base_url: str | None = str(configured_base_url)
         elif self.provider == "groq":
             self.base_url = DEFAULT_GROQ_BASE_URL
         else:
@@ -111,7 +170,7 @@ class TokenVelocityRouter:
         if not self.fast_model or not self.slow_model:
             raise ValueError("Both coordinator and worker model names are required")
 
-        self.model_map = {
+        self.model_map: dict[str, str] = {
             "coordinator": self.fast_model,
             "auto": self.fast_model,
             "fast": self.fast_model,
@@ -120,11 +179,15 @@ class TokenVelocityRouter:
         }
 
         logger.info(
-            "TokenVelocityRouter initialized: fast=%s slow=%s threshold=%d",
+            "TokenVelocityRouter initialized: fast=%s slow=%s "
+            "threshold=%d max_consecutive_failures=%d",
             self.fast_model,
             self.slow_model,
             self.threshold_tokens,
+            self.max_consecutive_failures,
         )
+
+    # ------------------------------------------------------------------ setup
 
     @staticmethod
     def _secret_value(value: Any) -> str | None:
@@ -146,18 +209,13 @@ class TokenVelocityRouter:
 
         For Groq:
 
-            openai/gpt-oss-20b
-                -> groq/openai/gpt-oss-20b
-
-            qwen/qwen3.8-27b
-                -> groq/qwen/qwen3.8-27b
-
-            groq/openai/gpt-oss-20b
-                -> unchanged
+            openai/gpt-oss-20b     -> groq/openai/gpt-oss-20b
+            qwen/qwen3.8-27b       -> groq/qwen/qwen3.8-27b
+            groq/openai/gpt-oss-20b -> unchanged
 
         Groq retired ``groq/compound`` and ``groq/compound-mini`` on
-        2026-09-21, so this router rejects those legacy IDs instead of carrying a
-        dead fallback path into production.
+        2026-09-21, so this router rejects those legacy IDs instead of
+        carrying a dead fallback path into production.
         """
         model = model.strip()
 
@@ -187,6 +245,8 @@ class TokenVelocityRouter:
 
         return f"groq/{model}"
 
+    # ------------------------------------------------------------- tokenizing
+
     def count_tokens(
         self,
         messages: list[dict[str, Any]],
@@ -196,10 +256,9 @@ class TokenVelocityRouter:
     ) -> int:
         """Estimate input tokens deterministically for routing decisions.
 
-        The estimate includes message fields, structured tool-call data, tool
-        schemas, image inputs, and lightweight chat framing. It intentionally
-        excludes predicted output tokens because routing is based on input
-        context size.
+        Includes message fields, structured tool-call data, tool schemas,
+        image inputs, and lightweight chat framing. Excludes predicted
+        output tokens because routing is based on input context size.
         """
         total = 0
 
@@ -212,10 +271,7 @@ class TokenVelocityRouter:
             total += self._count_text(message.get("tool_call_id"))
             total += self._count_content(message.get("content"))
 
-            for key in (
-                "tool_calls",
-                "function_call",
-            ):
+            for key in ("tool_calls", "function_call"):
                 if key in message and message[key] is not None:
                     total += self._count_structured(message[key])
 
@@ -230,7 +286,6 @@ class TokenVelocityRouter:
     def _count_text(self, value: Any) -> int:
         if value is None:
             return 0
-
         return len(self.encoder.encode(str(value)))
 
     def _count_content(self, content: Any) -> int:
@@ -242,25 +297,19 @@ class TokenVelocityRouter:
 
         if isinstance(content, list):
             total = 0
-
             for item in content:
                 if isinstance(item, Mapping):
                     item_type = str(item.get("type", "")).lower()
-
                     if item_type == "text":
                         total += self._count_text(item.get("text"))
-
                     elif item_type == "image_url":
                         # Groq documents 2048 input tokens per image for
                         # Qwen 3.8 27B. Do not also count the URL as text.
                         total += 2048
-
                     else:
                         total += self._count_structured(item)
-
                 else:
                     total += self._count_text(item)
-
             return total
 
         return self._count_structured(content)
@@ -278,6 +327,8 @@ class TokenVelocityRouter:
             encoded = str(value)
 
         return len(self.encoder.encode(encoded))
+
+    # ---------------------------------------------------------- model routing
 
     def select_model(
         self,
@@ -313,16 +364,17 @@ class TokenVelocityRouter:
 
         return self._normalize_model(model)
 
-    def _build_call_kwargs(
-        self,
-        kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Build LiteLLM call arguments without duplicating caller settings."""
+    # ------------------------------------------------------------ call kwargs
+
+    def _build_call_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Build LiteLLM call arguments without duplicating caller settings.
+
+        LiteLLM's Python completion API uses ``api_base``. Accept
+        ``base_url`` as a compatibility convenience but never pass both
+        names to LiteLLM.
+        """
         call_kwargs = dict(kwargs)
 
-        # LiteLLM's Python completion API uses api_base. Accept base_url as a
-        # compatibility convenience because the project config may expose that
-        # spelling, but never pass both names to LiteLLM.
         if "api_base" not in call_kwargs and "base_url" in call_kwargs:
             call_kwargs["api_base"] = call_kwargs.pop("base_url")
 
@@ -332,37 +384,20 @@ class TokenVelocityRouter:
         if "api_base" not in call_kwargs and self.base_url:
             call_kwargs["api_base"] = self.base_url
 
-        # Native Groq models are selected by the groq/ provider prefix in the
-        # model string. Do not force custom_llm_provider="openai".
         return call_kwargs
 
-    @staticmethod
-    def _is_rate_limit_error(
-        error: BaseException,
-    ) -> bool:
-        """Return True for a provider/LiteLLM 429 rate-limit failure."""
-        status_code = getattr(
-            error,
-            "status_code",
-            None,
-        )
+    # ---------------------------------------------------------- error helpers
 
-        if str(status_code) == "429":
+    @staticmethod
+    def _is_rate_limit_error(error: BaseException) -> bool:
+        """Return True for a provider/LiteLLM 429 rate-limit failure."""
+        status_code = getattr(error, "status_code", None)
+        if status_code == 429:
             return True
 
-        response = getattr(
-            error,
-            "response",
-            None,
-        )
-
-        response_status = getattr(
-            response,
-            "status_code",
-            None,
-        )
-
-        if str(response_status) == "429":
+        response = getattr(error, "response", None)
+        response_status = getattr(response, "status_code", None)
+        if response_status == 429:
             return True
 
         text = str(error).lower()
@@ -375,16 +410,9 @@ class TokenVelocityRouter:
         )
 
     @staticmethod
-    def _log_usage(
-        response: Any,
-        model: str,
-    ) -> None:
+    def _log_usage(response: Any, model: str) -> None:
         """Log normalized usage fields without logging prompt content."""
-        usage = getattr(
-            response,
-            "usage",
-            None,
-        )
+        usage = getattr(response, "usage", None)
 
         if usage is None and isinstance(response, Mapping):
             usage = response.get("usage")
@@ -392,43 +420,48 @@ class TokenVelocityRouter:
         if usage is None:
             return
 
-        def value(name: str) -> Any:
+        def _value(name: str) -> Any:
             if isinstance(usage, Mapping):
                 return usage.get(name)
+            return getattr(usage, name, None)
 
-            return getattr(
-                usage,
-                name,
-                None,
-            )
-
-        prompt_details = value("prompt_tokens_details")
+        prompt_details = _value("prompt_tokens_details")
 
         if isinstance(prompt_details, Mapping):
             cached = prompt_details.get("cached_tokens")
         else:
-            cached = getattr(
-                prompt_details,
-                "cached_tokens",
-                None,
-            )
+            cached = getattr(prompt_details, "cached_tokens", None)
 
         logger.debug(
             "LLM call complete: model=%s prompt=%s completion=%s total=%s cached=%s",
             model,
-            value("prompt_tokens"),
-            value("completion_tokens"),
-            value("total_tokens"),
+            _value("prompt_tokens"),
+            _value("completion_tokens"),
+            _value("total_tokens"),
             cached,
         )
+
+    # ------------------------------------------------------------- dispatcher
 
     async def _call(
         self,
         model: str,
         messages: list[dict[str, Any]],
+        *,
+        run_metrics: RunMetrics | None = None,
         **kwargs: Any,
     ) -> Any:
+        """Perform one physical LiteLLM call and record its outcome.
+
+        Raises:
+            LLMBudgetExhaustedError: When this failure pushes the
+                consecutive-failure counter over the configured limit.
+            Exception: The original provider error, on any other failure.
+        """
         call_kwargs = self._build_call_kwargs(kwargs)
+
+        if run_metrics is not None:
+            run_metrics.record_llm_call()
 
         logger.debug(
             "Calling litellm.acompletion: model=%s messages=%d kwargs=%s",
@@ -437,33 +470,52 @@ class TokenVelocityRouter:
             sorted(call_kwargs.keys()),
         )
 
-        response = await litellm.acompletion(
-            model=model,
-            messages=messages,
-            **call_kwargs,
-        )
+        try:
+            response = await litellm.acompletion(
+                model=model,
+                messages=messages,
+                **call_kwargs,
+            )
+        except Exception as exc:
+            if run_metrics is not None:
+                run_metrics.record_llm_failure()
+                if run_metrics.llm_consecutive_failures >= self.max_consecutive_failures:
+                    raise LLMBudgetExhaustedError(
+                        "LLM budget exhausted: "
+                        f"{run_metrics.llm_consecutive_failures} consecutive "
+                        f"failures (limit="
+                        f"{self.max_consecutive_failures}). "
+                        f"Last error: {exc}"
+                    ) from exc
+            raise
 
-        self._log_usage(
-            response,
-            model,
-        )
+        if run_metrics is not None:
+            run_metrics.record_llm_success()
 
+        self._log_usage(response, model)
         return response
 
     async def acompletion(
         self,
-        model: str,
         messages: list[dict[str, Any]],
+        model: str = "auto",
+        *,
+        run_metrics: RunMetrics | None = None,
         **kwargs: Any,
     ) -> Any:
         """Call LiteLLM with automatic token routing and rate-limit fallback.
 
-        ``coordinator``/``auto`` use the configured threshold; ``fast`` and
-        ``worker``/``slow`` are explicit overrides.
+        Parameter order puts ``messages`` first so graph nodes can call
+        ``acompletion(messages=..., response_format=...)`` without
+        supplying a model; auto-routing is the default.
 
-        Automatically routed fast-tier requests that receive a rate-limit
-        error immediately fall back to the worker tier. Rate-limited worker
-        retries use exponential backoff before the final exception is raised.
+        Rate-limit fallback:
+
+            Auto-routed fast-tier requests that receive HTTP 429 retry
+            immediately on the worker tier. Worker retries use exponential
+            backoff up to ``DEFAULT_MAX_WORKER_ATTEMPTS`` attempts before
+            re-raising. Every sleep is recorded in ``RunMetrics`` so the
+            incident's reported active time excludes it.
         """
         requested_model = model.strip().lower()
 
@@ -487,8 +539,13 @@ class TokenVelocityRouter:
             return await self._call(
                 selected_model,
                 messages,
+                run_metrics=run_metrics,
                 **kwargs,
             )
+
+        except LLMBudgetExhaustedError:
+            # Budget exhaustion is fatal and must not trigger fallback.
+            raise
 
         except Exception as exc:
             can_fallback = (
@@ -513,18 +570,22 @@ class TokenVelocityRouter:
                 self.slow_model,
             )
 
-            # The worker is the fallback deployment. Preserve the existing
-            # fast -> worker behavior expected by the router tests.
-            max_worker_attempts = 3
             last_exc: Exception = exc
 
-            for attempt in range(max_worker_attempts):
+            for attempt in range(DEFAULT_MAX_WORKER_ATTEMPTS):
+                if run_metrics is not None:
+                    run_metrics.llm_retry_count += 1
+
                 try:
                     return await self._call(
                         self.slow_model,
                         messages,
+                        run_metrics=run_metrics,
                         **kwargs,
                     )
+
+                except LLMBudgetExhaustedError:
+                    raise
 
                 except Exception as worker_exc:
                     if not self._is_rate_limit_error(worker_exc):
@@ -538,20 +599,16 @@ class TokenVelocityRouter:
 
                     last_exc = worker_exc
 
-                    if attempt == max_worker_attempts - 1:
+                    if attempt == DEFAULT_MAX_WORKER_ATTEMPTS - 1:
                         break
 
                     # Default exponential backoff:
-                    # attempt 0 -> 30s
-                    # attempt 1 -> 60s
+                    # attempt 0 -> 30s, attempt 1 -> 60s
                     wait_seconds: float = 30.0 * (2**attempt)
 
                     # Respect a larger provider-supplied delay when present.
                     error_str = str(worker_exc).lower()
-                    match = re.search(
-                        r"try again in ([\d.]+)s",
-                        error_str,
-                    )
+                    match = re.search(r"try again in ([\d.]+)s", error_str)
 
                     if match:
                         with contextlib.suppress(ValueError):
@@ -560,10 +617,13 @@ class TokenVelocityRouter:
                                 float(match.group(1)) + 1.0,
                             )
 
+                    if run_metrics is not None:
+                        run_metrics.record_backoff(wait_seconds)
+
                     logger.warning(
                         "Worker model rate-limited (attempt %d/%d). Waiting %.1fs before retry...",
                         attempt + 1,
-                        max_worker_attempts,
+                        DEFAULT_MAX_WORKER_ATTEMPTS,
                         wait_seconds,
                     )
 
@@ -574,11 +634,30 @@ class TokenVelocityRouter:
     async def coordinator_call(
         self,
         messages: list[dict[str, Any]],
+        *,
+        run_metrics: RunMetrics | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Convenience wrapper for an auto-routed coordinator call."""
+        """Auto-routed call. Threshold decides fast vs worker per prompt size.
+
+        Named for the coordinator stage (propose_node) but functionally
+        equivalent to ``acompletion(model="auto")``. Kept as a distinct
+        method so the graph reads as intent, not mechanism.
+        """
         return await self.acompletion(
-            model="coordinator",
             messages=messages,
+            model="coordinator",
+            run_metrics=run_metrics,
             **kwargs,
         )
+
+
+__all__ = [
+    "DEFAULT_GROQ_BASE_URL",
+    "DEFAULT_MAX_CONSECUTIVE_FAILURES",
+    "DEFAULT_MAX_WORKER_ATTEMPTS",
+    "DEFAULT_TIKTOKEN_ENCODING",
+    "DEFAULT_TOKEN_THRESHOLD",
+    "LLMBudgetExhaustedError",
+    "TokenVelocityRouter",
+]

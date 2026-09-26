@@ -1,18 +1,15 @@
 /**
  * HTTP API client for the AutoSRE backend.
  *
- * Endpoints mirror src/autosre/api/routes.py:
- *   GET  /incidents
- *   GET  /incidents/{id}/report
- *   POST /incidents/{id}/approve
- *   GET  /metrics/summary
- *   GET  /metrics/timeseries?range=...
- *   GET  /metrics/top-expensive?limit=...
- *   GET  /healthz
+ * Endpoint contract syncs with src/autosre/api/routes.py.
  *
- * GET requests retry once on 5xx. Mutations never retry.
- * TanStack Query may provide an AbortSignal; it is propagated to fetch and
- * also cancels the retry backoff when the query becomes obsolete.
+ * Approval flow:
+ *   1. POST /api/sign-approval       -> { signature, body }
+ *   2. POST /incidents/{id}/approve  -> HMAC-signed body forwarded verbatim
+ *
+ * The signature covers the exact bytes returned in `body`; the client must
+ * forward those bytes without re-serializing, otherwise HMAC verification
+ * on the server fails.
  */
 
 import type {
@@ -20,11 +17,12 @@ import type {
   ApprovalResponse,
   ExpensiveIncident,
   HealthResponse,
-  Incident,
   IncidentListResponse,
+  IncidentReport,
   MetricsSummary,
   MetricsTimeseriesResponse,
   MetricTimeRange,
+  ReadyResponse,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -56,18 +54,24 @@ export class ApiError extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// Core fetch wrapper
+// Constants
 // ---------------------------------------------------------------------------
-
-export interface ApiRequestInit extends Omit<RequestInit, "body"> {
-  body?: unknown;
-  timeoutMs?: number;
-}
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const RETRY_BACKOFF_MS = 500;
-const DEFAULT_TOP_EXPENSIVE_LIMIT = 5;
-const MAX_TOP_EXPENSIVE_LIMIT = 100;
+const SIGN_APPROVAL_PATH = "/api/sign-approval";
+
+// ---------------------------------------------------------------------------
+// Core fetch wrapper
+// ---------------------------------------------------------------------------
+
+interface ApiRequestInit extends Omit<RequestInit, "body"> {
+  /** Serialized as JSON. Mutually exclusive with rawBody. */
+  body?: unknown;
+  /** Sent verbatim; use when the caller needs byte-exact control (HMAC). */
+  rawBody?: string;
+  timeoutMs?: number;
+}
 
 async function parseResponseBody(response: Response): Promise<unknown> {
   if (response.status === 204 || response.status === 205) {
@@ -99,7 +103,7 @@ function getAbortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException("Request aborted", "AbortError");
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
   if (ms <= 0) {
     return Promise.resolve();
   }
@@ -130,13 +134,6 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function normalizeTopExpensiveLimit(limit: number): number {
-  if (!Number.isFinite(limit)) {
-    return DEFAULT_TOP_EXPENSIVE_LIMIT;
-  }
-  return Math.min(MAX_TOP_EXPENSIVE_LIMIT, Math.max(1, Math.trunc(limit)));
-}
-
 export async function apiFetch<T>(
   url: string,
   init: ApiRequestInit = {},
@@ -145,9 +142,14 @@ export async function apiFetch<T>(
     timeoutMs = DEFAULT_TIMEOUT_MS,
     headers: initHeaders,
     body,
+    rawBody,
     signal: callerSignal,
     ...requestInit
   } = init;
+
+  if (body !== undefined && rawBody !== undefined) {
+    throw new TypeError("apiFetch: body and rawBody are mutually exclusive");
+  }
 
   const headers = new Headers(initHeaders);
   if (!headers.has("Accept")) {
@@ -155,7 +157,10 @@ export async function apiFetch<T>(
   }
 
   let serializedBody: BodyInit | undefined;
-  if (body !== undefined) {
+  if (rawBody !== undefined) {
+    // Verbatim: caller is responsible for Content-Type (e.g. HMAC-signed payload).
+    serializedBody = rawBody;
+  } else if (body !== undefined) {
     if (!headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");
     }
@@ -212,10 +217,7 @@ export async function apiFetch<T>(
           response.status >= 500 &&
           attempt < maxAttempts - 1
         ) {
-          await sleep(
-            RETRY_BACKOFF_MS * 2 ** attempt,
-            callerSignal ?? undefined,
-          );
+          await sleep(RETRY_BACKOFF_MS * 2 ** attempt, callerSignal);
           continue;
         }
 
@@ -249,58 +251,204 @@ export async function apiFetch<T>(
 }
 
 // ---------------------------------------------------------------------------
-// Typed API endpoints
+// Health & readiness
 // ---------------------------------------------------------------------------
 
-export const incidentsApi = {
-  list: (signal?: AbortSignal): Promise<IncidentListResponse> =>
-    apiFetch<IncidentListResponse>("/incidents", { signal }),
+export const healthApi = {
+  /** Liveness check. Returns 200 if the process is alive. */
+  check: (signal?: AbortSignal | null): Promise<HealthResponse> =>
+    apiFetch<HealthResponse>("/healthz", { signal: signal ?? undefined }),
 
-  get: (incidentId: string, signal?: AbortSignal): Promise<Incident> =>
-    apiFetch<Incident>(`/incidents/${encodeURIComponent(incidentId)}/report`, {
-      signal,
-    }),
+  /** Readiness check. Returns 200 only when all backing services respond. */
+  readiness: (signal?: AbortSignal | null): Promise<ReadyResponse> =>
+    apiFetch<ReadyResponse>("/readyz", { signal: signal ?? undefined }),
 
-  approve: (
-    incidentId: string,
-    request: ApprovalRequest,
-    signal?: AbortSignal,
-  ): Promise<ApprovalResponse> =>
-    apiFetch<ApprovalResponse>(
-      `/incidents/${encodeURIComponent(incidentId)}/approve`,
-      { method: "POST", body: request, signal },
-    ),
+  /**
+   * Bootstrap gate for the UI. Polls /readyz until the backend reports
+   * "ready" or the timeout elapses.
+   */
+  ready: async (
+    options: { timeoutMs?: number; pollIntervalMs?: number } = {},
+  ): Promise<void> => {
+    const timeoutMs = options.timeoutMs ?? 30_000;
+    const pollIntervalMs = options.pollIntervalMs ?? 1_000;
+
+    const deadline = Date.now() + timeoutMs;
+    let lastError: unknown = null;
+
+    while (Date.now() < deadline) {
+      try {
+        const response = await fetch("/readyz", {
+          headers: { Accept: "application/json" },
+        });
+
+        if (response.ok) {
+          try {
+            const body = (await response.json()) as ReadyResponse;
+            if (body.status === "ready") {
+              return;
+            }
+            lastError = new Error(
+              `Backend not ready: ${JSON.stringify(body.checks)}`,
+            );
+          } catch {
+            lastError = new Error("Backend returned invalid /readyz body");
+          }
+        } else {
+          lastError = new ApiError(
+            response.status,
+            response.statusText,
+            null,
+            "/readyz",
+          );
+        }
+      } catch (error) {
+        if (isAbortError(error)) {
+          throw error;
+        }
+        lastError = error instanceof Error ? error : new Error(String(error));
+      }
+
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        break;
+      }
+
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(pollIntervalMs, remaining)),
+      );
+    }
+
+    const reason =
+      lastError instanceof Error ? lastError.message : "Unknown error";
+    throw new Error(
+      `Backend did not become ready within ${timeoutMs}ms: ${reason}`,
+    );
+  },
 };
 
-export const metricsApi = {
-  summary: (signal?: AbortSignal): Promise<MetricsSummary> =>
-    apiFetch<MetricsSummary>("/metrics/summary", { signal }),
+// ---------------------------------------------------------------------------
+// Incidents
+// ---------------------------------------------------------------------------
 
+interface SignedApprovalPayload {
+  signature: string;
+  body: string;
+}
+
+export const incidentsApi = {
+  /**
+   * List incidents, optionally filtered by status.
+   *
+   * `status=awaiting_approval` is a derived status computed by the backend
+   * from `requires_human_approval && approval_granted === null`.
+   */
+  list: (
+    params: { status?: string; limit?: number } = {},
+    signal?: AbortSignal | null,
+  ): Promise<IncidentListResponse> => {
+    const searchParams = new URLSearchParams();
+    if (params.status) {
+      searchParams.set("status", params.status);
+    }
+    if (params.limit) {
+      searchParams.set("limit", String(params.limit));
+    }
+    const query = searchParams.toString();
+    return apiFetch<IncidentListResponse>(
+      `/incidents${query ? `?${query}` : ""}`,
+      { signal: signal ?? undefined },
+    );
+  },
+
+  /** Fetch the full incident report (hypotheses, actions, metrics). */
+  get: (
+    incidentId: string,
+    signal?: AbortSignal | null,
+  ): Promise<IncidentReport> =>
+    apiFetch<IncidentReport>(
+      `/incidents/${encodeURIComponent(incidentId)}/report`,
+      { signal: signal ?? undefined },
+    ),
+
+  /**
+   * Approve or reject an incident.
+   *
+   * Two-step flow because the approval route is HMAC-protected and the
+   * browser cannot compute HMAC-SHA256 without exposing the shared secret:
+   *   1. Request a signature from the same-origin /api/sign-approval route.
+   *   2. POST the returned body verbatim with the returned signature header.
+   */
+  approve: async (
+    incidentId: string,
+    request: ApprovalRequest,
+    signal?: AbortSignal | null,
+  ): Promise<ApprovalResponse> => {
+    const signed = await apiFetch<SignedApprovalPayload>(SIGN_APPROVAL_PATH, {
+      method: "POST",
+      body: request,
+      signal: signal ?? undefined,
+    });
+
+    if (
+      typeof signed?.signature !== "string" ||
+      typeof signed?.body !== "string"
+    ) {
+      throw new ApiError(
+        500,
+        "InvalidSignResponse",
+        signed,
+        SIGN_APPROVAL_PATH,
+      );
+    }
+
+    return apiFetch<ApprovalResponse>(
+      `/incidents/${encodeURIComponent(incidentId)}/approve`,
+      {
+        method: "POST",
+        rawBody: signed.body,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Webhook-Signature": signed.signature,
+        },
+        signal: signal ?? undefined,
+      },
+    );
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+
+export const metricsApi = {
+  /** Aggregate KPIs across all incidents. */
+  summary: (signal?: AbortSignal | null): Promise<MetricsSummary> =>
+    apiFetch<MetricsSummary>("/metrics/summary", {
+      signal: signal ?? undefined,
+    }),
+
+  /** Time-bucketed metrics for the requested range. */
   timeseries: (
     range: MetricTimeRange,
-    signal?: AbortSignal,
+    signal?: AbortSignal | null,
   ): Promise<MetricsTimeseriesResponse> => {
     const searchParams = new URLSearchParams({ range });
     return apiFetch<MetricsTimeseriesResponse>(
       `/metrics/timeseries?${searchParams.toString()}`,
-      { signal },
+      { signal: signal ?? undefined },
     );
   },
 
+  /** Top N most expensive incidents. */
   topExpensive: (
-    limit = DEFAULT_TOP_EXPENSIVE_LIMIT,
-    signal?: AbortSignal,
+    limit = 5,
+    signal?: AbortSignal | null,
   ): Promise<ExpensiveIncident[]> => {
-    const safeLimit = normalizeTopExpensiveLimit(limit);
-    const searchParams = new URLSearchParams({ limit: String(safeLimit) });
+    const searchParams = new URLSearchParams({ limit: String(limit) });
     return apiFetch<ExpensiveIncident[]>(
       `/metrics/top-expensive?${searchParams.toString()}`,
-      { signal },
+      { signal: signal ?? undefined },
     );
   },
-};
-
-export const healthApi = {
-  check: (signal?: AbortSignal): Promise<HealthResponse> =>
-    apiFetch<HealthResponse>("/healthz", { signal }),
 };

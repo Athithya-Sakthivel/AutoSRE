@@ -1,304 +1,265 @@
-"""Global pytest configuration and fixtures for AutoSRE test suite.
+"""Global pytest configuration and fixtures for the AutoSRE test suite.
 
-This module provides:
-- Test database session (async PostgreSQL via testcontainers)
-- Mock Kubernetes client
-- Mock LiteLLM router with scripted responses
-- Environment isolation (monkeypatched settings)
-- Common test utilities
+Environment isolation uses the same env-var convention as
+``autosre.config.Settings``: ``AUTOSRE_<SECTION>__<FIELD>`` (double
+underscore nested delimiter). Any fixture that touches Settings must
+either use these names or call ``reset_settings_cache()`` before use.
 """
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import pytest_asyncio
-from testcontainers.community.postgres import PostgresContainer
 
-from autosre.config import get_settings
+from autosre.config import get_settings, reset_settings_cache
 from autosre.core.router import TokenVelocityRouter
 from autosre.core.state import SREContext
 
 # ============================================================================
-# Event Loop Fixture
-# ============================================================================
-
-
-@pytest.fixture(scope="session")
-def event_loop() -> Iterator[asyncio.AbstractEventLoop]:
-    """Create a session-scoped event loop for async tests."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-# ============================================================================
-# Environment Isolation
+# Environment isolation
 # ============================================================================
 
 
 @pytest.fixture(autouse=True)
 def _isolated_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Provide deterministic settings values and clear cached settings."""
-    # Set minimal required environment variables
-    monkeypatch.setenv("LLM_API_KEY", "test-key-for-unit-tests")
-    monkeypatch.setenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
-    monkeypatch.setenv("LLM_PROVIDER", "groq")
-    monkeypatch.setenv("LLM_MODEL_COORDINATOR", "qwen/qwen3.8-27b")
-    monkeypatch.setenv("LLM_MODEL_WORKER", "groq/compound")
+    """Provide deterministic settings values and clear the settings cache.
 
-    monkeypatch.setenv("POSTGRES_HOST", "localhost")
-    monkeypatch.setenv("POSTGRES_PORT", "5432")
-    monkeypatch.setenv("POSTGRES_USER", "test_user")
-    monkeypatch.setenv("POSTGRES_PASSWORD", "test_password")
-    monkeypatch.setenv("POSTGRES_DB", "test_db")
+    Uses AUTOSRE_ prefixed names with ``__`` nested delimiter so that
+    ``Settings()`` reads the values without additional mapping.
+    """
+    values = {
+        # LLM
+        "AUTOSRE_LLM__API_KEY": "test-key-for-unit-tests",
+        "AUTOSRE_LLM__BASE_URL": "https://api.groq.com/openai/v1",
+        "AUTOSRE_LLM__PROVIDER": "groq",
+        "AUTOSRE_LLM__MODEL_COORDINATOR": "qwen/qwen3.8-27b",
+        "AUTOSRE_LLM__MODEL_WORKER": "openai/gpt-oss-20b",
+        # Postgres
+        "AUTOSRE_POSTGRES__HOST": "localhost",
+        "AUTOSRE_POSTGRES__PORT": "5432",
+        "AUTOSRE_POSTGRES__USER": "test_user",
+        "AUTOSRE_POSTGRES__PASSWORD": "test_password",
+        "AUTOSRE_POSTGRES__DB": "test_db",
+        # OpenObserve
+        "AUTOSRE_OPENOBSERVE__EMAIL": "test@example.com",
+        "AUTOSRE_OPENOBSERVE__PASSWORD": "test_password",
+        "AUTOSRE_OPENOBSERVE__URL": "http://localhost:5080",
+        # OTel
+        "AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+        "AUTOSRE_OTEL__EXPORTER_OTLP_HEADERS": "",
+        "AUTOSRE_OTEL__SERVICE_NAME": "autosre-agent-test",
+        "AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT": "test",
+        # Safety
+        "AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS": "1",
+        "AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT": "10",
+        "AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS": "600",
+        # Alert
+        "AUTOSRE_ALERT__WEBHOOK_SECRET": "test-webhook-secret",
+    }
 
-    monkeypatch.setenv("OPENOBSERVE_EMAIL", "test@example.com")
-    monkeypatch.setenv("OPENOBSERVE_PASSWORD", "test_password")
-    monkeypatch.setenv("OPENOBSERVE_URL", "http://localhost:5080")
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
 
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
-    monkeypatch.setenv("OTEL_EXPORTER_HEADERS", "")
-    monkeypatch.setenv("OTEL_SERVICE_NAME", "autosre-agent-test")
-
-    monkeypatch.setenv("MAX_RISK_TIER_AUTONOMOUS", "1")
-    monkeypatch.setenv("MAX_ACTIONS_PER_INCIDENT", "10")
-    monkeypatch.setenv("MAX_WALL_CLOCK_SECONDS", "600")
-
-    monkeypatch.setenv("ALERT_WEBHOOK_SECRET", "test-webhook-secret")
-
-    # Clear cached settings (only if get_settings uses @lru_cache)
-    if hasattr(get_settings, "cache_clear"):
-        get_settings.cache_clear()
-
+    reset_settings_cache()
     yield
-
-    # Clear cached settings after test
-    if hasattr(get_settings, "cache_clear"):
-        get_settings.cache_clear()
+    reset_settings_cache()
 
 
 # ============================================================================
-# Test Database
-# ============================================================================
-
-
-@pytest.fixture(scope="session")
-def postgres_container() -> Iterator[PostgresContainer]:
-    """Start a PostgreSQL container for integration tests."""
-    with PostgresContainer(
-        image="postgres:16-alpine",
-        dbname="test_autosre",
-        username="test_user",
-        password="test_password",
-    ) as postgres:
-        yield postgres
-
-
-@pytest_asyncio.fixture
-async def test_db_session(postgres_container: PostgresContainer) -> AsyncIterator[Any]:
-    """Provide an async database session for integration tests."""
-    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-    from sqlalchemy.orm import sessionmaker
-
-    # Build connection string
-    host = postgres_container.get_container_host_ip()
-    port = postgres_container.get_exposed_port(5432)
-    connection_string = f"postgresql+asyncpg://test_user:test_password@{host}:{port}/test_autosre"
-
-    # Create engine and session
-    engine = create_async_engine(connection_string, echo=False)
-    async_session_maker = sessionmaker(
-        engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-    )
-
-    async with async_session_maker() as session:
-        yield session
-
-    await engine.dispose()
-
-
-# ============================================================================
-# Mock Clients
+# Mock clients
 # ============================================================================
 
 
 @pytest.fixture
 def mock_k8s_client() -> MagicMock:
-    """Provide a mock Kubernetes client."""
+    """Mock kr8s.asyncio.Api with the surface our tools actually use.
+
+    The k8s tools call ``client.get("pods", namespace=..., raw=True)`` which
+    returns an async iterable, and ``Pod.get(name, namespace=..., api=client)``.
+    """
     client = MagicMock()
 
-    # Mock common operations
-    client.list_pods = AsyncMock(return_value=[])
-    client.get_pod_logs = AsyncMock(return_value="Mock log output")
-    client.get_deployment = AsyncMock(
-        return_value={
-            "metadata": {"name": "test-deployment"},
-            "spec": {"replicas": 3},
-            "status": {"availableReplicas": 3},
-        }
-    )
+    async def _empty_iter() -> Any:
+        return
+        yield  # pragma: no cover -- async generator shape only
 
+    client.get = MagicMock(return_value=_empty_iter())
+    client.version = AsyncMock(return_value={"gitVersion": "v1.31.0"})
     return client
 
 
 @pytest.fixture
 def mock_valkey_client() -> MagicMock:
-    """Provide a mock Valkey/Redis client."""
+    """Mock redis.asyncio.Redis with the surface our tools actually use."""
     client = MagicMock()
 
-    # Mock common operations
-    client.get = AsyncMock(return_value=None)
-    client.set = AsyncMock(return_value=True)
-    client.delete = AsyncMock(return_value=1)
-    client.keys = AsyncMock(return_value=[])
-
+    client.info = AsyncMock(return_value={})
+    client.xlen = AsyncMock(return_value=0)
+    client.xinfo_groups = AsyncMock(return_value=[])
+    client.delete = AsyncMock(return_value=0)
+    client.aclose = AsyncMock(return_value=None)
     return client
 
 
 @pytest.fixture
 def mock_llm_router() -> MagicMock:
-    """Provide a mock LLM router with scripted responses."""
+    """Mock TokenVelocityRouter with a scripted tool-selection response."""
     router = MagicMock(spec=TokenVelocityRouter)
 
-    # Mock acompletion
-    mock_response = MagicMock()
-    mock_response.choices = [
+    response = MagicMock()
+    response.choices = [
         MagicMock(
             message=MagicMock(
-                content='{"tool_name": "get_pod_logs", "tool_args": {"namespace": "default", "pod_name": "test-pod"}}'
+                content=(
+                    '{"tool_name": "get_pod_logs", '
+                    '"tool_args": {"namespace": "rivulet", "pod_name": "test-pod"}}'
+                )
             )
         )
     ]
+    response.usage = None
 
-    router.acompletion = AsyncMock(return_value=mock_response)
-
+    router.acompletion = AsyncMock(return_value=response)
+    router.coordinator_call = AsyncMock(return_value=response)
     return router
 
 
 @pytest.fixture
 def mock_openobserve_client() -> MagicMock:
-    """Provide a mock OpenObserve client."""
+    """Mock OpenObserveClient with the surface our tools actually use."""
     client = MagicMock()
 
-    # Mock search operation
-    client.search = AsyncMock(
-        return_value={"hits": [{"timestamp": "2026-01-01T00:00:00Z", "message": "Test log entry"}]}
-    )
-
+    client.query = AsyncMock(return_value={"hits": [], "total": 0})
+    client.close = AsyncMock(return_value=None)
     return client
 
 
 # ============================================================================
-# SREContext Fixture
+# SREContext
 # ============================================================================
 
 
-@pytest_asyncio.fixture
-async def sre_context(
-    test_db_session: Any,
+@pytest.fixture
+def sre_context(
     mock_k8s_client: MagicMock,
     mock_valkey_client: MagicMock,
     mock_llm_router: MagicMock,
     mock_openobserve_client: MagicMock,
 ) -> SREContext:
-    """Provide a fully configured SREContext with mocked clients."""
+    """Fully populated SREContext with mocked external dependencies.
+
+    ``pg_pool`` and ``llm_config`` are left as None; tools that require them
+    will raise ToolExecutionError, which is the expected behavior in tests
+    that don't wire Postgres.
+    """
     return SREContext(
-        db_session=test_db_session,
+        db_session=None,
         k8s_client=mock_k8s_client,
         valkey_client=mock_valkey_client,
         llm_router=mock_llm_router,
         openobserve_client=mock_openobserve_client,
+        pg_pool=None,
+        llm_config=get_settings().llm,
     )
 
 
 # ============================================================================
-# Utility Fixtures
+# Sample data
 # ============================================================================
 
 
 @pytest.fixture
 def sample_alert_metadata() -> dict[str, Any]:
-    """Provide sample alert metadata for testing."""
+    """Sample alert metadata for graph and API tests."""
     return {
         "incident_id": "test-incident-001",
         "alert_name": "HighLatency",
         "service": "api-gateway",
-        "namespace": "production",
+        "namespace": "rivulet",
         "severity": "sev2",
-        "started_at": "2026-01-15T10:30:00Z",
+        "started_at": "2026-09-25T10:30:00Z",
         "fingerprint": "test-fingerprint-123",
+        "description": "p99 latency above SLO",
+        "labels": {"category": "high_latency"},
+        "annotations": {},
     }
 
 
 @pytest.fixture
 def sample_tool_registry() -> MagicMock:
-    """Provide a mock tool registry with sample tools."""
+    """Mock ToolRegistry with two tools (one read-only, one Tier-1)."""
     registry = MagicMock()
 
-    # Mock tools
-    mock_tools = [
-        MagicMock(
-            name="get_pod_logs",
-            description="Fetch logs from a pod",
-            risk_tier=0,
-            input_model=MagicMock(model_json_schema=lambda: {"type": "object"}),
-        ),
-        MagicMock(
-            name="restart_deployment",
-            description="Restart a deployment",
-            risk_tier=1,
-            input_model=MagicMock(model_json_schema=lambda: {"type": "object"}),
-        ),
-    ]
-
-    registry.list_tools = AsyncMock(return_value=mock_tools)
-    registry.get = AsyncMock(
-        side_effect=lambda name: next((t for t in mock_tools if t.name == name), None)
+    read_tool = MagicMock(
+        name="get_pod_logs",
+        description="Fetch logs from a pod",
+        risk_tier=0,
+        input_model=MagicMock(model_json_schema=lambda: {"type": "object"}),
+        to_openai_schema=MagicMock(return_value={"type": "function", "function": {}}),
+    )
+    write_tool = MagicMock(
+        name="restart_deployment",
+        description="Restart a deployment",
+        risk_tier=1,
+        input_model=MagicMock(model_json_schema=lambda: {"type": "object"}),
+        to_openai_schema=MagicMock(return_value={"type": "function", "function": {}}),
     )
 
+    registry.list_tools = MagicMock(return_value=[read_tool, write_tool])
+    registry.get = MagicMock(
+        side_effect=lambda name: next((t for t in (read_tool, write_tool) if t.name == name), None)
+    )
     return registry
 
 
 @pytest.fixture
 def sample_policy_engine() -> MagicMock:
-    """Provide a mock policy engine."""
+    """Mock PolicyEngine.
+
+    Uses the real method name ``classify`` (not ``classify_action``) and
+    returns a decision matching the real PolicyDecision shape.
+    """
+    from autosre.safety.policy import PolicyDecision, RiskTier
+
     engine = MagicMock()
-
-    # Mock decision
-    mock_decision = MagicMock()
-    mock_decision.risk_tier = 1
-    mock_decision.requires_approval = False
-
-    engine.classify_action = AsyncMock(return_value=mock_decision)
-
+    engine.classify = MagicMock(
+        return_value=PolicyDecision(
+            allowed=True,
+            risk_tier=RiskTier.REVERSIBLE_LOW,
+            requires_approval=False,
+            reason="mock classification",
+        )
+    )
     return engine
 
 
 @pytest.fixture
 def sample_safe_executor() -> MagicMock:
-    """Provide a mock safe executor."""
+    """Mock SafeExecutor returning a successful ExecutionResult shape."""
+    from autosre.safety.executor import ExecutionResult
+
     executor = MagicMock()
 
-    # Mock execution result
-    mock_result = MagicMock()
-    mock_result.success = True
-    mock_result.verified = True
-    mock_result.output = {"status": "success"}
+    def _build_result(action, decision):
+        return ExecutionResult(
+            action=action,
+            decision=decision,
+            executed=True,
+            verified=True,
+            rolled_back=False,
+            error=None,
+            output={"status": "success"},
+        )
 
-    executor.execute = AsyncMock(return_value=mock_result)
-
+    executor.execute = AsyncMock(side_effect=_build_result)
     return executor
 
 
 # ============================================================================
-# Test Markers
+# Markers
 # ============================================================================
 
 
@@ -306,8 +267,10 @@ def pytest_configure(config: pytest.Config) -> None:
     """Register custom pytest markers."""
     config.addinivalue_line("markers", "unit: marks tests as unit tests (fast)")
     config.addinivalue_line(
-        "markers", "integration: marks tests as integration tests (requires containers)"
+        "markers",
+        "integration: marks tests as integration tests (requires containers)",
     )
     config.addinivalue_line(
-        "markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')"
+        "markers",
+        "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     )

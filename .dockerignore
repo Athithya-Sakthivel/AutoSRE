@@ -77,7 +77,31 @@ worker-e2e.log
 .repos
 
 
-cat > .dockerignore << 'EOF'
+# Dependencies
+node_modules
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Build artifacts
+dist
+*.egg-info
+ui/dist
+
+# Git and IDE
+.git
+.gitignore
+.vscode
+.idea
+
+# Logs and outputs
+output.txt
+.pytest_cache
+.coverage
+.deepeval
+
 # Version control
 .git
 .gitignore

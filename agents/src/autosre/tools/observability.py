@@ -1,12 +1,39 @@
 """OpenObserve client and read-only observability tools.
 
-Exports:
-  OpenObserveClient — HTTP adapter for OpenObserve Search API
-  query_openobserve — Tier-0 tool wrapping OpenObserveClient
-  get_postgres_stats — Tier-0 tool for PostgreSQL stats
+## Exports
 
-Tools registered:
-  Tier 0 (read-only): query_openobserve, get_postgres_stats
+- `OpenObserveClient` — HTTP adapter for OpenObserve Search API
+- `query_openobserve` — Tier-0 tool wrapping OpenObserveClient
+
+## Tools Registered
+
+### Tier 0 — Read-Only Diagnostics (1 tool)
+- `query_openobserve`: Run SQL-compatible queries against OpenObserve streams
+
+## Contracts
+
+### Output Contract
+The observability tool is Tier-0 (read-only), so it does not include `success` or
+`verification_passed` fields in its output model. These fields are only
+required for Tier-1+ remediation tools.
+
+### SREContext Contract
+- `query_openobserve` reads from `context.openobserve_client`, which must be
+  an `OpenObserveClient` instance (or compatible). If None, the tool raises
+  `ToolExecutionError`.
+
+### Error Handling Contract
+The OpenObserve client degrades query failures into an explicit `error` field so
+that the agent can distinguish an empty result from an unavailable backend. A
+missing client or malformed tool invocation still raises `ToolExecutionError`.
+
+### OpenObserve Query Contract
+Queries are bounded by:
+- `time_range_minutes` (1-1440 minutes lookback)
+- `limit` (1-500 rows)
+- SQL syntax validated by OpenObserve server (no client-side validation)
+
+The client converts Python datetime to OpenObserve's microsecond timestamp format.
 """
 
 from __future__ import annotations
@@ -31,46 +58,104 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# OpenObserve HTTP client
+# OpenObserve HTTP Client
 # ---------------------------------------------------------------------------
 
 
 class OpenObserveClient:
-    """Adapter for OpenObserve Search API queries.
+    """HTTP adapter for OpenObserve Search API queries.
 
     Wraps HTTP calls to OpenObserve with basic-auth and time-bounded queries.
-    The client reads connection details from ``settings.openobserve``.
+    The client reads connection details from `settings.openobserve`.
+
+    Attributes:
+        _settings: Application settings object with openobserve config
+        _session: Lazily-created httpx.AsyncClient
+        _org_id: OpenObserve organization ID, defaulting to "default"
+
+    Usage:
+        client = OpenObserveClient(settings)
+        result = await client.query(
+            query="SELECT * FROM logs WHERE status >= 500",
+            stream="logs",
+            time_range_minutes=30,
+            limit=100,
+        )
+        await client.close()
     """
 
     def __init__(self, settings: Any) -> None:
+        """Initialize the OpenObserve client.
+
+        Args:
+            settings: Application settings object with openobserve config
+        """
         self._settings = settings
         self._session: Any | None = None
+        self._org_id = "default"
 
     async def _ensure_session(self) -> Any:
-        """Lazily create the httpx session."""
+        """Lazily create the httpx session.
+
+        Returns:
+            httpx.AsyncClient configured with OpenObserve credentials
+
+        Raises:
+            RuntimeError: If settings.openobserve is not configured
+        """
         if self._session is not None:
             return self._session
 
         import httpx
 
         o2 = getattr(self._settings, "openobserve", None)
+
         if o2 is None:
             raise RuntimeError("settings.openobserve not configured")
 
-        base_url = str(getattr(o2, "url", "http://localhost:5080"))
-        email = str(getattr(o2, "email", ""))
-        password_secret = getattr(o2, "password", None)
+        base_url = str(
+            getattr(
+                o2,
+                "url",
+                "http://localhost:5080",
+            )
+        )
+        email = str(
+            getattr(
+                o2,
+                "email",
+                "",
+            )
+        )
+        password_secret = getattr(
+            o2,
+            "password",
+            None,
+        )
 
-        if password_secret is not None and hasattr(password_secret, "get_secret_value"):
+        if password_secret is not None and hasattr(
+            password_secret,
+            "get_secret_value",
+        ):
             password = password_secret.get_secret_value()
         else:
             password = str(password_secret or "")
+
+        self._org_id = str(
+            getattr(
+                o2,
+                "org_id",
+                "default",
+            )
+            or "default"
+        )
 
         self._session = httpx.AsyncClient(
             base_url=base_url,
             auth=(email, password),
             timeout=30.0,
         )
+
         return self._session
 
     async def query(
@@ -81,7 +166,22 @@ class OpenObserveClient:
         time_range_minutes: int = 30,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """Execute a bounded SQL query against an OpenObserve stream."""
+        """Execute a bounded SQL query against an OpenObserve stream.
+
+        Args:
+            query: SQL-compatible query string
+            stream: OpenObserve stream name (e.g., "logs", "metrics")
+            time_range_minutes: Lookback window in minutes (1-1440)
+            limit: Maximum rows to return (1-500)
+
+        Returns:
+            Dict with "hits" (list of rows) and "total" (total matching rows).
+            Query failures return empty hits plus an explicit "error" field so
+            callers can distinguish backend failure from a genuine empty result.
+
+        Note:
+            Time bounds are converted to OpenObserve's microsecond timestamp format.
+        """
         session = await self._ensure_session()
 
         end_time = datetime.now(UTC)
@@ -98,27 +198,39 @@ class OpenObserveClient:
         }
 
         try:
-            response = await session.post("/api/default/_search", json=payload)
+            response = await session.post(
+                f"/api/{self._org_id}/_search",
+                json=payload,
+            )
             response.raise_for_status()
             parsed: dict[str, Any] = response.json()
             return parsed
         except Exception as exc:
-            logger.warning("OpenObserve query failed: %s", exc)
-            return {"hits": [], "total": 0}
+            logger.warning(
+                "OpenObserve query failed: %s",
+                exc,
+            )
+            return {
+                "hits": [],
+                "total": 0,
+                "error": str(exc),
+            }
 
     async def close(self) -> None:
-        """Close the HTTP session."""
+        """Close the HTTP session and release resources."""
         if self._session is not None:
             await self._session.aclose()
             self._session = None
 
 
 # ---------------------------------------------------------------------------
-# Input / Output models
+# Input / Output Models
 # ---------------------------------------------------------------------------
 
 
 class QueryOpenObserveInput(ToolInputModel):
+    """Input for querying OpenObserve streams."""
+
     query: str = Field(
         min_length=1,
         max_length=5000,
@@ -136,31 +248,27 @@ class QueryOpenObserveInput(ToolInputModel):
         le=1440,
         description="Lookback window in minutes",
     )
-    limit: int = Field(default=50, ge=1, le=500)
+    limit: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+    )
 
 
 class QueryOpenObserveOutput(BaseModel):
+    """Output for query_openobserve tool.
+
+    Attributes:
+        rows: List of result rows (dicts)
+        total: Total matching rows (may be > len(rows) if truncated)
+        truncated: True if results were truncated due to limit
+        error: Query/backend error when the request could not be completed
+    """
+
     rows: list[dict[str, Any]]
     total: int
     truncated: bool
-
-
-class GetPostgresStatsInput(ToolInputModel):
-    """No parameters."""
-
-
-class PostgresStats(BaseModel):
-    total_connections: int
-    active: int
-    idle: int
-    idle_in_transaction: int
-    max_connections: int
-    utilisation_pct: float
-    database_size_mb: float
-
-
-class GetPostgresStatsOutput(BaseModel):
-    stats: PostgresStats
+    error: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -169,32 +277,67 @@ class GetPostgresStatsOutput(BaseModel):
 
 
 def _o11y_client(context: SREContext) -> Any:
-    """Return the OpenObserve client from SREContext."""
-    client = getattr(context, "openobserve_client", None)
+    """Return the OpenObserve client from SREContext.
+
+    Returns:
+        OpenObserveClient instance
+
+    Raises:
+        ToolExecutionError: If openobserve_client is not initialized
+    """
+    client = getattr(
+        context,
+        "openobserve_client",
+        None,
+    )
+
     if client is None:
         raise ToolExecutionError(
             "observability._o11y_client",
             RuntimeError("SREContext.openobserve_client is not initialised"),
         )
+
     return client
 
 
 def _normalise_openobserve_result(
     result: Any,
-) -> tuple[list[dict[str, Any]], int | None]:
-    """Normalise common OpenObserve adapter result shapes."""
-    if isinstance(result, (bytes, bytearray, str)):
+) -> tuple[
+    list[dict[str, Any]],
+    int | None,
+    str | None,
+]:
+    """Normalise common OpenObserve adapter result shapes.
+
+    Handles JSON strings/bytes, raw row lists, standard ``hits`` responses,
+    nested ``hits.hits`` responses, and explicit adapter/query errors.
+    """
+    if isinstance(
+        result,
+        (bytes, bytearray, str),
+    ):
         try:
             result = json.loads(result)
         except TypeError, ValueError:
-            return [], None
+            return (
+                [],
+                None,
+                "OpenObserve returned non-JSON data",
+            )
 
     if isinstance(result, list):
         rows = [dict(row) for row in result if isinstance(row, Mapping)]
-        return rows, None
+        return rows, None, None
 
     if not isinstance(result, Mapping):
-        return [], None
+        return (
+            [],
+            None,
+            "OpenObserve returned an unsupported response shape",
+        )
+
+    error_raw = result.get("error")
+    error = str(error_raw) if error_raw else None
 
     hits = result.get("hits", [])
 
@@ -207,22 +350,13 @@ def _normalise_openobserve_result(
     rows = [dict(row) for row in hits if isinstance(row, Mapping)]
 
     total_raw = result.get("total")
+
     try:
         total = int(total_raw) if total_raw is not None else None
     except TypeError, ValueError:
         total = None
 
-    return rows, total
-
-
-def _row_value(row: Any, key: str, index: int = 0) -> Any:
-    """Read a column from tuple-like or dict-like DB rows."""
-    if isinstance(row, Mapping):
-        return row.get(key)
-    try:
-        return row[index]
-    except IndexError, KeyError, TypeError:
-        return None
+    return rows, total, error
 
 
 # ---------------------------------------------------------------------------
@@ -234,9 +368,15 @@ async def _query_openobserve(
     args: QueryOpenObserveInput,
     context: SREContext,
 ) -> QueryOpenObserveOutput:
+    """Run a bounded SQL-compatible query against an OpenObserve stream."""
     client = _o11y_client(context)
 
-    query_method = getattr(client, "query", None)
+    query_method = getattr(
+        client,
+        "query",
+        None,
+    )
+
     if not callable(query_method):
         raise ToolExecutionError(
             "query_openobserve",
@@ -251,96 +391,29 @@ async def _query_openobserve(
             limit=args.limit,
         )
     except Exception as exc:
-        raise ToolExecutionError("query_openobserve", exc) from exc
+        raise ToolExecutionError(
+            "query_openobserve",
+            exc,
+        ) from exc
 
-    rows, reported_total = _normalise_openobserve_result(result)
+    rows, reported_total, error = _normalise_openobserve_result(result)
 
-    total = max(reported_total, len(rows)) if reported_total is not None else len(rows)
+    total = (
+        max(
+            reported_total,
+            len(rows),
+        )
+        if reported_total is not None
+        else len(rows)
+    )
 
-    truncated = len(rows) >= args.limit or total > len(rows)
+    truncated = not error and (len(rows) >= args.limit or total > len(rows))
 
     return QueryOpenObserveOutput(
         rows=rows,
         total=total,
         truncated=truncated,
-    )
-
-
-async def _get_postgres_stats(
-    args: GetPostgresStatsInput,
-    context: SREContext,
-) -> GetPostgresStatsOutput:
-    del args
-
-    pool = getattr(context, "pg_pool", None)
-    if pool is None:
-        raise ToolExecutionError(
-            "get_postgres_stats",
-            RuntimeError("SREContext.pg_pool is not initialised"),
-        )
-
-    connection_factory = getattr(pool, "connection", None)
-    if not callable(connection_factory):
-        raise ToolExecutionError(
-            "get_postgres_stats",
-            TypeError("SREContext.pg_pool does not implement connection()"),
-        )
-
-    try:
-        async with connection_factory() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT
-                    COUNT(*) AS total,
-                    COUNT(*) FILTER (WHERE state = 'active') AS active,
-                    COUNT(*) FILTER (WHERE state = 'idle') AS idle,
-                    COUNT(*) FILTER (
-                        WHERE state IN (
-                            'idle in transaction',
-                            'idle in transaction (aborted)'
-                        )
-                    ) AS idle_tx
-                FROM pg_stat_activity
-                WHERE backend_type = 'client backend'
-                """
-            )
-
-            row = await cur.fetchone()
-            if row is None:
-                raise RuntimeError("pg_stat_activity returned no rows")
-
-            total = int(_row_value(row, "total", 0) or 0)
-            active = int(_row_value(row, "active", 1) or 0)
-            idle = int(_row_value(row, "idle", 2) or 0)
-            idle_tx = int(_row_value(row, "idle_tx", 3) or 0)
-
-            await cur.execute("SELECT current_setting('max_connections')::int AS max_connections")
-            max_row = await cur.fetchone()
-            max_conn = int(_row_value(max_row, "max_connections", 0) or 0) if max_row else 0
-
-            await cur.execute(
-                "SELECT pg_database_size(current_database()) / 1048576.0 AS database_size_mb"
-            )
-            size_row = await cur.fetchone()
-            db_size_mb = float(_row_value(size_row, "database_size_mb", 0) or 0.0)
-
-    except ToolExecutionError:
-        raise
-    except Exception as exc:
-        raise ToolExecutionError("get_postgres_stats", exc) from exc
-
-    utilisation = total / max_conn * 100.0 if max_conn > 0 else 0.0
-
-    return GetPostgresStatsOutput(
-        stats=PostgresStats(
-            total_connections=total,
-            active=active,
-            idle=idle,
-            idle_in_transaction=idle_tx,
-            max_connections=max_conn,
-            utilisation_pct=round(utilisation, 2),
-            database_size_mb=round(db_size_mb, 2),
-        )
+        error=error,
     )
 
 
@@ -349,8 +422,11 @@ async def _get_postgres_stats(
 # ---------------------------------------------------------------------------
 
 
-def register(registry: ToolRegistry, context: SREContext) -> None:
-    """Register all observability tools."""
+def register(
+    registry: ToolRegistry,
+    context: SREContext,
+) -> None:
+    """Register the observability tools with the given registry."""
     del context
 
     registry.register(
@@ -363,20 +439,6 @@ def register(registry: ToolRegistry, context: SREContext) -> None:
             input_model=QueryOpenObserveInput,
             output_model=QueryOpenObserveOutput,
             handler=_query_openobserve,
-            risk_tier=0,
-        )
-    )
-
-    registry.register(
-        Tool(
-            name="get_postgres_stats",
-            description=(
-                "Get PostgreSQL client-backend connection counts, "
-                "max_connections, utilisation, and current database size in MiB."
-            ),
-            input_model=GetPostgresStatsInput,
-            output_model=GetPostgresStatsOutput,
-            handler=_get_postgres_stats,
             risk_tier=0,
         )
     )

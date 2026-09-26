@@ -69,7 +69,12 @@ def _make_registry_with_tools(
 
 
 def _make_context() -> SREContext:
-    return SREContext(db_session=AsyncMock())  # type: ignore[arg-type]
+    """SREContext with no external clients.
+
+    Tools that require pg_pool/valkey_client/k8s_client will raise
+    ToolExecutionError, which is what the safety tests expect.
+    """
+    return SREContext()
 
 
 def _proposed(
