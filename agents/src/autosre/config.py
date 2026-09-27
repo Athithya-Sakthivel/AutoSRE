@@ -352,8 +352,8 @@ class SafetyConfig(BaseSettings):
 class SlackConfig(BaseSettings):
     """Slack integration credentials, split by transport.
 
-    Socket Mode:  bot_token + app_token. No signing_secret required.
-    HTTP mode:    bot_token + signing_secret. No app_token required.
+    Socket Mode:  bot_token + app_token.
+    HTTP mode:    bot_token + signing_secret.
 
     The `mode` field selects which credential set is validated.
     """
@@ -373,7 +373,6 @@ class SlackConfig(BaseSettings):
 
     @property
     def is_enabled(self) -> bool:
-        """True when the selected transport has all required credentials."""
         if self.bot_token is None:
             return False
         if self.mode == "socket":
@@ -382,7 +381,6 @@ class SlackConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_mode_credentials(self) -> SlackConfig:
-        """Reject half-configured states that would fail at runtime."""
         if self.bot_token is None:
             return self
 
@@ -390,6 +388,11 @@ class SlackConfig(BaseSettings):
             raise ValueError("Slack mode=socket requires bot_token and app_token")
         if self.mode == "http" and self.signing_secret is None:
             raise ValueError("Slack mode=http requires bot_token and signing_secret")
+        if not self.approver_user_ids:
+            raise ValueError(
+                "Slack is enabled but approver_user_ids is empty; "
+                "an unrestricted approval channel is unsafe"
+            )
         return self
 
 

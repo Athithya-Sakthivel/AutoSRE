@@ -17,6 +17,7 @@ Startup opens resources in this order:
    11. GraphContext (aggregates 1, 8, 9, 10)
    12. Compiled graph
    13. LangGraphRunner (aggregates 12, 6, 7, 11)
+   14. Slack integration (optional; failures are non-fatal)
 
 Shutdown unwinds in reverse via AsyncExitStack. Telemetry is registered
 first so it is torn down last, capturing traces of every other shutdown.
@@ -37,19 +38,36 @@ Every resource that a route needs is stored on `app.state`:
     executor            SafeExecutor
     runner              LangGraphRunner
     checkpointer        AsyncPostgresSaver
+    slack_client        SlackClient | None
+    slack_handler       SlackHandler | None
+    slack_socket        SlackSocketMode | None
+    slack_listener      ApprovalListener | None
+
+## Slack integration
+
+Slack is enabled only when `settings.slack.is_enabled` is True, which
+requires the credential set matching `settings.slack.mode`:
+
+    mode="socket"   bot_token + app_token
+    mode="http"     bot_token + signing_secret
+
+When enabled, the lifespan starts:
+
+    SlackClient         HTTP client for post/update messages
+    SlackHandler        Verifies inbound interactions; dispatches approvals
+    ApprovalListener    Polls for HITL-pending incidents; posts to Slack
+    SlackSocketMode     WebSocket transport for interactions (socket mode only)
+
+Socket Mode startup is fail-soft: if the WebSocket cannot connect, the
+listener still posts approval requests to Slack. Operators can approve
+via the UI (`POST /incidents/{id}/approve`); the socket only carries
+the button clicks. Losing the socket degrades, not kills.
 
 ## Static file serving
 
 When `ui/dist` exists, SPA assets and index.html are served for any path
 that is not a reserved API prefix. The reservation list must stay in
-sync with the routers registered below. A missing or incomplete
-`ui/dist` degrades gracefully to API-only mode.
-
-## Version
-
-Single source of truth is `autosre.__version__`. If the package is
-imported without that attribute (e.g., before the first patch), the
-fallback is `"0.0.0+unknown"` and a warning is logged at startup.
+sync with the routers registered below.
 """
 
 from __future__ import annotations
@@ -87,8 +105,8 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# Path prefixes that must never fall through to the SPA fallback. Keep
-# in sync with the routers registered in create_app().
+# Path prefixes that must never fall through to the SPA fallback. Keep in
+# sync with the routers registered in create_app().
 _RESERVED_PREFIXES: tuple[str, ...] = (
     "healthz",
     "readyz",
@@ -103,8 +121,6 @@ _RESERVED_PREFIXES: tuple[str, ...] = (
     "redoc",
 )
 
-# Default CORS origins for local development. Override with
-# AUTOSRE_CORS_ORIGINS as a comma-separated list.
 _DEFAULT_CORS_ORIGINS: tuple[str, ...] = (
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -119,9 +135,9 @@ _DEFAULT_CORS_ORIGINS: tuple[str, ...] = (
 def _resolve_cors_origins() -> list[str]:
     """Return the list of allowed CORS origins.
 
-    Reads AUTOSRE_CORS_ORIGINS (comma-separated) or falls back to the
-    local development defaults. Wildcard origin "*" is never returned
-    because allow_credentials=True is incompatible with it.
+    Reads AUTOSRE_CORS_ORIGINS (comma-separated) or falls back to the local
+    development defaults. Wildcard origin "*" is never returned because
+    allow_credentials=True is incompatible with it.
     """
     raw = os.getenv("AUTOSRE_CORS_ORIGINS", "").strip()
     if not raw:
@@ -146,26 +162,25 @@ def _resolve_cors_origins() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Open every resource at startup, close in reverse at shutdown.
+    """Open every resource at startup; close in reverse at shutdown.
 
     Telemetry is registered first so its shutdown callback runs last,
-    capturing traces from every other cleanup. This ordering is
-    deliberate; do not reorder without understanding the tradeoff.
+    capturing traces from every other cleanup.
     """
     settings: Settings = app.state.settings
 
     async with AsyncExitStack() as stack:
-        # ----------------------------------------------------------
+        # ==============================================================
         # 1. Telemetry — registered first so it shuts down last.
-        # ----------------------------------------------------------
+        # ==============================================================
         shutdown_telemetry = init_telemetry(settings)
         stack.callback(shutdown_telemetry)
         instrument_fastapi(app)
         logger.info("OpenTelemetry initialized and FastAPI instrumented")
 
-        # ----------------------------------------------------------
+        # ==============================================================
         # 2. Postgres diagnostic pool.
-        # ----------------------------------------------------------
+        # ==============================================================
         raw_dsn = settings.postgres.raw_dsn
         pg_pool = AsyncConnectionPool(
             conninfo=raw_dsn,
@@ -177,9 +192,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await pg_pool.open()
         logger.info("Postgres diagnostic pool opened (min=2 max=10)")
 
-        # ----------------------------------------------------------
+        # ==============================================================
         # 3. Valkey client.
-        # ----------------------------------------------------------
+        # ==============================================================
         valkey_client = Redis(
             host=os.getenv("AUTOSRE_VALKEY__HOST", "localhost"),
             port=int(os.getenv("AUTOSRE_VALKEY__PORT", "6379")),
@@ -190,16 +205,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         stack.push_async_callback(valkey_client.aclose)
         logger.info("Valkey client created")
 
-        # ----------------------------------------------------------
+        # ==============================================================
         # 4. OpenObserve client.
-        # ----------------------------------------------------------
+        # ==============================================================
         o11y_client = OpenObserveClient(settings)
         stack.push_async_callback(o11y_client.close)
         logger.info("OpenObserve client created")
 
-        # ----------------------------------------------------------
+        # ==============================================================
         # 5. K8s client (optional; failure is non-fatal).
-        # ----------------------------------------------------------
+        # ==============================================================
         k8s_client_instance = None
         try:
             import kr8s.asyncio
@@ -213,17 +228,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 exc,
             )
 
-        # ----------------------------------------------------------
+        # ==============================================================
         # 6. LangGraph AsyncPostgresSaver.
-        # ----------------------------------------------------------
+        # ==============================================================
         os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
         checkpointer = await stack.enter_async_context(AsyncPostgresSaver.from_conn_string(raw_dsn))
         await checkpointer.setup()
         logger.info("LangGraph AsyncPostgresSaver initialized and setup")
 
-        # ----------------------------------------------------------
+        # ==============================================================
         # 7. SREContext.
-        # ----------------------------------------------------------
+        # ==============================================================
         llm_router = TokenVelocityRouter(settings.llm, threshold_tokens=6000)
 
         sre_context = SREContext(
@@ -237,29 +252,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         logger.info("SREContext assembled")
 
-        # ----------------------------------------------------------
+        # ==============================================================
         # 8. Tool registry.
-        # ----------------------------------------------------------
+        # ==============================================================
         registry = build_default_registry(settings, sre_context)
         logger.info("Tool registry built with %d tools", len(registry.list_tools()))
 
-        # ----------------------------------------------------------
+        # ==============================================================
         # 9. Policy engine + SafeExecutor.
-        # ----------------------------------------------------------
+        # ==============================================================
         policy_engine = PolicyEngine(
             max_autonomous_tier=RiskTier.REVERSIBLE_LOW,
         )
         executor = SafeExecutor(registry, policy_engine)
         logger.info("Policy engine and SafeExecutor initialized")
 
-        # ----------------------------------------------------------
+        # ==============================================================
         # 10. Context eviction.
-        # ----------------------------------------------------------
+        # ==============================================================
         context_eviction = ContextEviction()
 
-        # ----------------------------------------------------------
+        # ==============================================================
         # 11. GraphContext.
-        # ----------------------------------------------------------
+        # ==============================================================
         graph_context = GraphContext(
             llm_router=llm_router,
             registry=registry,
@@ -269,15 +284,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         logger.info("GraphContext assembled")
 
-        # ----------------------------------------------------------
+        # ==============================================================
         # 12. Compiled graph.
-        # ----------------------------------------------------------
+        # ==============================================================
         graph = compile_graph(checkpointer=checkpointer)
         logger.info("LangGraph compiled")
 
-        # ----------------------------------------------------------
+        # ==============================================================
         # 13. Runner.
-        # ----------------------------------------------------------
+        # ==============================================================
         runner = LangGraphRunner(
             graph=graph,
             checkpointer=checkpointer,
@@ -285,14 +300,92 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             graph_context=graph_context,
             max_wall_clock_seconds=settings.safety.max_wall_clock_seconds,
         )
+        stack.push_async_callback(runner.shutdown, 30.0)
         logger.info(
             "LangGraphRunner initialized (max_wall_clock_seconds=%d)",
             settings.safety.max_wall_clock_seconds,
         )
 
-        # ----------------------------------------------------------
+        # ==============================================================
+        # 14. Slack integration (optional; failure is non-fatal).
+        #
+        # The Slack client, handler, listener, and socket are constructed
+        # only when settings.slack.is_enabled is True. When disabled, the
+        # corresponding app.state fields are set to None and the
+        # approval flow falls back to the UI.
+        # ==============================================================
+        slack_client = None
+        slack_handler = None
+        slack_socket = None
+        slack_listener = None
+
+        if settings.slack.is_enabled:
+            try:
+                from autosre.slack import (
+                    ApprovalListener,
+                    SlackClient,
+                    SlackHandler,
+                    SlackSocketMode,
+                )
+
+                slack_client = SlackClient(settings.slack)
+                stack.push_async_callback(slack_client.close)
+
+                slack_handler = SlackHandler(
+                    config=settings.slack,
+                    runner=runner,
+                    client=slack_client,
+                    approver_user_ids=settings.slack.approver_user_ids,
+                )
+                stack.push_async_callback(slack_handler.close)
+
+                slack_listener = ApprovalListener(
+                    runner=runner,
+                    slack_client=slack_client,
+                )
+                stack.push_async_callback(slack_listener.stop)
+
+                if settings.slack.mode == "socket":
+                    slack_socket = SlackSocketMode(
+                        config=settings.slack,
+                        handler=slack_handler,
+                        client=slack_client,
+                    )
+                    stack.push_async_callback(slack_socket.stop)
+
+                    # Fail-soft: a socket that cannot connect must not
+                    # prevent the agent from starting. Approvals still
+                    # work via the UI; the listener still posts the
+                    # request so operators know it exists.
+                    try:
+                        await slack_socket.start()
+                    except Exception:
+                        logger.exception(
+                            "Slack Socket Mode failed to start; "
+                            "approval delivery via Slack buttons is "
+                            "disabled. Approve via the UI instead."
+                        )
+                        slack_socket = None
+
+                await slack_listener.start()
+                logger.info(
+                    "Slack integration enabled (mode=%s channel=%s)",
+                    settings.slack.mode,
+                    settings.slack.approval_channel,
+                )
+
+            except Exception:
+                logger.exception("Slack integration failed to initialize; continuing without Slack")
+                slack_client = None
+                slack_handler = None
+                slack_socket = None
+                slack_listener = None
+        else:
+            logger.info("Slack integration disabled (set AUTOSRE_SLACK__BOT_TOKEN to enable)")
+
+        # ==============================================================
         # Expose on app.state.
-        # ----------------------------------------------------------
+        # ==============================================================
         app.state.pg_pool = pg_pool
         app.state.valkey_client = valkey_client
         app.state.openobserve_client = o11y_client
@@ -302,16 +395,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.executor = executor
         app.state.runner = runner
         app.state.checkpointer = checkpointer
+        app.state.slack_client = slack_client
+        app.state.slack_handler = slack_handler
+        app.state.slack_socket = slack_socket
+        app.state.slack_listener = slack_listener
 
-        # ----------------------------------------------------------
+        # ==============================================================
         # Admin secret posture. Warn if unset so operators know the
         # kill switch is disabled.
-        # ----------------------------------------------------------
+        # ==============================================================
         admin_secret = getattr(getattr(settings, "admin", None), "secret", None)
         if admin_secret is None:
             logger.warning(
-                "Admin endpoints are disabled: AUTOSRE_ADMIN__SECRET is unset. "
-                "Set it to enable /admin/pause, /admin/resume, /admin/status."
+                "Admin endpoints are disabled: AUTOSRE_ADMIN__SECRET is "
+                "unset. Set it to enable /admin/pause, /admin/resume, "
+                "/admin/status."
             )
 
         logger.info("AutoSRE agent ready to receive alerts")
@@ -343,16 +441,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    # ---------------------------------------------------------------
-    # Application state seeding (lifespan overwrites some of these).
-    # ---------------------------------------------------------------
+    # Seed application state before the lifespan runs so routes and
+    # middleware can rely on these fields even during early requests.
     app.state.settings = settings
     app.state.paused = False
     app.state.pause_reason = None
 
-    # ---------------------------------------------------------------
     # CORS.
-    # ---------------------------------------------------------------
     cors_origins = _resolve_cors_origins()
     app.add_middleware(
         CORSMiddleware,
@@ -363,17 +458,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     logger.info("CORS origins: %s", cors_origins)
 
-    # ---------------------------------------------------------------
-    # Routers. Order matters only for path-shadowing; the reserved
-    # prefix list in _RESERVED_PREFIXES must be a superset of every
-    # path these routers serve.
-    # ---------------------------------------------------------------
+    # Routers. Order matters only for path-shadowing; the reserved prefix
+    # list in _RESERVED_PREFIXES must be a superset of every path these
+    # routers serve.
     app.include_router(router)
     app.include_router(webhook_router)
 
-    # ---------------------------------------------------------------
+    # Slack HTTP interactivity routes are only mounted when the
+    # configured transport is HTTP. Socket Mode delivers interactions
+    # over the WebSocket, so exposing HTTP routes would be dead surface.
+    if settings.slack.is_enabled and settings.slack.mode == "http":
+        from autosre.api.slack_routes import slack_router
+
+        app.include_router(slack_router)
+        logger.info("Slack HTTP interactivity routes mounted at /slack/*")
+    elif settings.slack.is_enabled:
+        logger.info(
+            "Slack mode=%s: HTTP interactivity routes not mounted",
+            settings.slack.mode,
+        )
+
     # SPA serving.
-    # ---------------------------------------------------------------
     _mount_spa_if_available(app)
 
     return app
@@ -396,7 +501,6 @@ def _is_reserved_path(full_path: str) -> bool:
     for prefix in _RESERVED_PREFIXES:
         if full_path == prefix or full_path.startswith(prefix + "/"):
             return True
-        # Support multi-segment prefixes like "api/" already ending in "/".
         if prefix.endswith("/") and full_path.startswith(prefix):
             return True
     return False
@@ -432,12 +536,7 @@ def _mount_spa_if_available(app: FastAPI) -> None:
 
     @app.get("/{full_path:path}")
     async def spa_fallback(full_path: str) -> FileResponse:
-        """Serve the SPA index for any non-API path.
-
-        Reserved prefixes are guarded so that a missing route under
-        /incidents, /metrics, /admin, etc. does not accidentally return
-        HTML to an API client.
-        """
+        """Serve the SPA index for any non-API path."""
         if _is_reserved_path(full_path):
             raise HTTPException(status_code=404, detail="Not found")
         return FileResponse(str(index_html))
@@ -446,12 +545,12 @@ def _mount_spa_if_available(app: FastAPI) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Entrypoint shim
+# Diagnostics
 # ---------------------------------------------------------------------------
 
 
 def _iter_registered_paths(app: FastAPI) -> Iterable[str]:
-    """Yield every registered route path for logging/diagnostics."""
+    """Yield every registered route path."""
     for route in app.routes:
         path = getattr(route, "path", None)
         if isinstance(path, str):

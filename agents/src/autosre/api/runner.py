@@ -1,52 +1,39 @@
 """LangGraph runner: incident lifecycle API on top of a compiled graph.
 
-## Responsibilities
+## Two execution modes
 
-    run_incident(alert)              Create incident_id, execute graph with
-                                     a per-incident RunMetrics, enforce a
-                                     wall-clock timeout, log metrics.
-    get_incident_state(id)           Read one checkpointed state.
-    list_incidents(limit)            List recent incidents, ordered by
-                                     recency of last checkpoint.
-    approve_incident(id, ...)        Resume a paused HITL interrupt with
-                                     the operator's decision.
+``run_incident`` (blocking)
+    Runs the graph to completion and returns the incident_id. Used by the
+    eval harness, which needs the incident to be terminal before it moves
+    on. The HTTP layer must NOT use this method.
+
+``schedule_incident`` (non-blocking)
+    Generates the incident_id synchronously, starts the graph in a
+    background task, and returns the incident_id immediately. Used by the
+    webhook ingress so OpenObserve receives a 202 within milliseconds.
+
+## Background task lifecycle
+
+Background tasks are tracked in ``self._background_tasks``. A done-callback
+discards the task and logs any exception. ``shutdown()`` drains them on
+graceful shutdown; ``main.py`` must call it from the FastAPI lifespan.
 
 ## Persistence notes
 
 LangGraph's ``AsyncPostgresSaver`` exposes a ``.conn`` attribute whose type
-is a union:
+is a union of ``AsyncConnection`` and ``AsyncConnectionPool``, depending on
+how the saver was constructed. Both shapes are handled by
+``_read_connection()``.
 
-    AsyncConnection       — from AsyncPostgresSaver.from_conn_string()
-    AsyncConnectionPool   — from an externally managed pool
-
-Both shapes are handled by ``_read_connection()``, a context manager that
-yields an ``AsyncConnection`` and returns it (or commits the read
-transaction) on exit, whichever the mode requires.
-
-The saver's underlying psycopg connection is configured with
-``row_factory=dict_row``, so query results arrive as ``dict`` rows keyed
-by column name. All row access in this module uses
-``row.get("column_name")`` with a tuple-index fallback for defensive
-compatibility with older saver versions.
+The saver's underlying psycopg connection uses ``row_factory=dict_row``,
+so query results arrive as mappings keyed by column name. All row access in
+this module uses ``row.get("column_name")`` with a tuple-index fallback.
 
 ## Read-transaction hygiene
 
-The checkpointer's connection is shared with LangGraph's own checkpoint
-writes. Leaving a read transaction open (idle-in-transaction) blocks
-those writes. Every read path in this module commits or rolls back on
-exit. If the connection is in autocommit mode, commit is skipped.
-
-## Idempotency
-
-    list_incidents       Pure read; identical inputs yield identical outputs.
-    get_incident_state   Pure read.
-    approve_incident     Idempotent: an incident that already has an
-                         approval decision returns False without resuming.
-                         LangGraph's interrupt/resume is single-shot.
-    run_incident         NOT idempotent. Every call creates a new
-                         incident_id and a new thread. Callers that need
-                         deduplication must do it upstream (webhook
-                         fingerprint, idempotency key, etc.).
+The checkpointer's connection is shared with LangGraph's checkpoint writes.
+Leaving a read transaction open (idle-in-transaction) blocks those writes.
+Every read path commits or rolls back on exit.
 """
 
 from __future__ import annotations
@@ -75,8 +62,7 @@ from autosre.core.state import (
 
 logger = logging.getLogger(__name__)
 
-# Column name for the thread identifier in the checkpoints table. Kept as
-# a constant because it appears in both SQL and result parsing.
+# Column name for the thread identifier in the checkpoints table.
 _THREAD_ID_COLUMN = "thread_id"
 
 # Safety margin subtracted from the configured wall-clock timeout before
@@ -87,13 +73,8 @@ _TIMEOUT_SAFETY_MARGIN_SECONDS = 5.0
 class LangGraphRunner:
     """Incident lifecycle wrapper around a compiled LangGraph.
 
-    Satisfies RunnerProtocol structurally.
-
-    ``sre_context`` and ``graph_context`` are stored on the instance and
-    injected into every RunnableConfig so graph nodes can reach them via
-    ``config['configurable']['sre_context']`` and ``['graph_context']``.
-    ``run_metrics`` is created per incident so that no state leaks between
-    investigations.
+    Satisfies RunnerProtocol structurally. Provides both blocking
+    (run_incident) and non-blocking (schedule_incident) entry points.
     """
 
     def __init__(
@@ -109,16 +90,11 @@ class LangGraphRunner:
 
         Args:
             graph: Compiled LangGraph StateGraph.
-            checkpointer: AsyncPostgresSaver used for durable state. When
-                None, ``list_incidents`` returns an empty list and
-                ``get_incident_state`` returns None. ``run_incident`` will
-                still execute but without checkpoint persistence.
+            checkpointer: AsyncPostgresSaver for durable state.
             sre_context: Run-scoped dependencies (DB pools, K8s client).
-            graph_context: Run-scoped graph dependencies (LLM router,
-                tool registry, executor, policy engine, eviction).
+            graph_context: Run-scoped graph dependencies (LLM router, tools).
             max_wall_clock_seconds: Hard upper bound on a single incident's
-                wall-clock duration. Enforced via asyncio.wait_for around
-                the graph stream. Must be > 0.
+                wall-clock duration. Must be > 0.
         """
         if max_wall_clock_seconds <= 0:
             raise ValueError("max_wall_clock_seconds must be greater than zero")
@@ -129,6 +105,10 @@ class LangGraphRunner:
         self.graph_context = graph_context
         self.max_wall_clock_seconds = max_wall_clock_seconds
 
+        # Background task tracking. Populated only by schedule_incident.
+        self._background_tasks: set[asyncio.Task[None]] = set()
+        self._background_lock = asyncio.Lock()
+
     # ------------------------------------------------------------------
     # Config construction
     # ------------------------------------------------------------------
@@ -138,11 +118,7 @@ class LangGraphRunner:
         incident_id: str,
         run_metrics: RunMetrics | None = None,
     ) -> RunnableConfig:
-        """Build a RunnableConfig with thread_id and injected contexts.
-
-        Only non-None values are inserted. This keeps the config dict
-        minimal in tests that construct it via other means.
-        """
+        """Build a RunnableConfig with thread_id and injected contexts."""
         configurable: dict[str, Any] = {"thread_id": incident_id}
 
         if self.sre_context is not None:
@@ -157,101 +133,24 @@ class LangGraphRunner:
         return {"configurable": configurable}
 
     # ------------------------------------------------------------------
-    # Connection resolution
+    # Incident preparation (shared by both entry points)
     # ------------------------------------------------------------------
 
-    @asynccontextmanager
-    async def _read_connection(
+    def _prepare_incident(
         self,
-    ) -> AsyncIterator[AsyncConnection[Any]]:
-        """Yield a live AsyncConnection for read-only queries.
+        alert: dict[str, Any],
+    ) -> tuple[str, AgentState, RunnableConfig, RunMetrics]:
+        """Return everything needed to run one incident.
 
-        Handles both saver init modes. On exit, commits the read
-        transaction if the connection is not in autocommit mode, so the
-        shared connection is never left idle-in-transaction (which blocks
-        LangGraph's checkpoint writes).
-
-        Raises:
-            RuntimeError: when no checkpointer is configured or the saver
-                does not expose a usable ``conn``.
-        """
-        if self.checkpointer is None:
-            raise RuntimeError("checkpointer is not configured")
-
-        conn_or_pool = getattr(self.checkpointer, "conn", None)
-        if conn_or_pool is None:
-            raise RuntimeError("checkpointer has no 'conn' attribute")
-
-        if isinstance(conn_or_pool, AsyncConnectionPool):
-            async with conn_or_pool.connection() as conn:
-                try:
-                    yield conn
-                finally:
-                    if not conn.autocommit:
-                        with contextlib.suppress(Exception):
-                            await conn.commit()
-            return
-
-        if isinstance(conn_or_pool, AsyncConnection):
-            try:
-                yield conn_or_pool
-            finally:
-                if not conn_or_pool.autocommit:
-                    with contextlib.suppress(Exception):
-                        await conn_or_pool.commit()
-            return
-
-        raise RuntimeError(f"checkpointer.conn has unsupported type: {type(conn_or_pool).__name__}")
-
-    @staticmethod
-    def _extract_thread_id(row: Any) -> str | None:
-        """Return the thread_id from a query row, or None.
-
-        The saver's connection uses ``row_factory=dict_row``, so rows are
-        mappings keyed by column name. Older or externally pooled savers
-        may return tuples; the tuple path is preserved as a fallback.
-        """
-        if row is None:
-            return None
-
-        if isinstance(row, Mapping):
-            value = row.get(_THREAD_ID_COLUMN)
-        else:
-            try:
-                value = row[0]
-            except IndexError, KeyError, TypeError:
-                return None
-
-        if value is None:
-            return None
-
-        text = str(value).strip()
-        return text or None
-
-    # ------------------------------------------------------------------
-    # Public API — run
-    # ------------------------------------------------------------------
-
-    async def run_incident(self, alert: dict[str, Any]) -> str:
-        """Execute a new investigation and return its incident_id.
-
-        Not idempotent: every call generates a fresh thread. Deduplicate
-        upstream if the caller may retry.
-
-        The stream is bounded by ``max_wall_clock_seconds``. On timeout,
-        the graph is cancelled and the incident is left in its last
-        checkpointed state; the caller receives an error.
-
-        Raises:
-            asyncio.TimeoutError: The wall-clock budget expired.
-            LLMBudgetExhaustedError: The provider outage budget expired.
-            Exception: Any unhandled graph exception.
+        Extracted so both run_incident and schedule_incident construct the
+        incident identically. Pure: no I/O, no side effects beyond UUID
+        generation and object construction.
         """
         incident_id = str(uuid.uuid4())
         run_metrics = RunMetrics()
         config = self._build_config(incident_id, run_metrics)
 
-        metadata: IncidentMetadata = IncidentMetadata(
+        metadata = IncidentMetadata(
             incident_id=incident_id,
             alert_name=alert.get("alert_name", ""),
             service=alert.get("service", ""),
@@ -264,17 +163,31 @@ class LangGraphRunner:
             annotations=alert.get("annotations", {}),
         )
 
-        initial_state: AgentState = create_initial_state(metadata)
+        initial_state = create_initial_state(metadata)
 
-        logger.info(
-            "Starting incident %s: alert=%s namespace=%s service=%s budget_seconds=%d",
-            incident_id,
-            alert.get("alert_name"),
-            alert.get("namespace"),
-            alert.get("service"),
-            self.max_wall_clock_seconds,
-        )
+        return incident_id, initial_state, config, run_metrics
 
+    # ------------------------------------------------------------------
+    # Graph execution (shared by both entry points)
+    # ------------------------------------------------------------------
+
+    async def _execute_graph(
+        self,
+        incident_id: str,
+        initial_state: AgentState,
+        config: RunnableConfig,
+        run_metrics: RunMetrics,
+        alert: Mapping[str, Any],
+    ) -> None:
+        """Run the graph stream to completion with a wall-clock timeout.
+
+        Cancellable. Records final metrics regardless of outcome.
+
+        Raises:
+            asyncio.TimeoutError: The wall-clock budget expired.
+            LLMBudgetExhaustedError: The provider outage budget expired.
+            Exception: Any unhandled graph exception.
+        """
         timeout = max(
             1.0,
             float(self.max_wall_clock_seconds) - _TIMEOUT_SAFETY_MARGIN_SECONDS,
@@ -320,8 +233,6 @@ class LangGraphRunner:
                 run_metrics.backoff_seconds,
             )
 
-        return incident_id
-
     async def _stream_to_completion(
         self,
         initial_state: AgentState,
@@ -336,16 +247,205 @@ class LangGraphRunner:
             pass
 
     # ------------------------------------------------------------------
+    # Public API — run (blocking)
+    # ------------------------------------------------------------------
+
+    async def run_incident(self, alert: dict[str, Any]) -> str:
+        """Execute a new investigation to completion and return its ID.
+
+        Blocking. The HTTP webhook handler must NOT use this method;
+        it exists for the eval harness and CLI tooling where the caller
+        genuinely needs the incident to be terminal before proceeding.
+
+        Not idempotent: every call generates a fresh thread. Deduplicate
+        upstream (fingerprint index in routes.py) if the caller may retry.
+        """
+        incident_id, initial_state, config, run_metrics = self._prepare_incident(alert)
+
+        logger.info(
+            "Starting incident %s (blocking): alert=%s namespace=%s service=%s budget_seconds=%d",
+            incident_id,
+            alert.get("alert_name"),
+            alert.get("namespace"),
+            alert.get("service"),
+            self.max_wall_clock_seconds,
+        )
+
+        await self._execute_graph(
+            incident_id,
+            initial_state,
+            config,
+            run_metrics,
+            alert,
+        )
+
+        return incident_id
+
+    # ------------------------------------------------------------------
+    # Public API — schedule (non-blocking)
+    # ------------------------------------------------------------------
+
+    async def schedule_incident(self, alert: dict[str, Any]) -> str:
+        """Start an investigation in the background and return its ID.
+
+        Returns within milliseconds. The graph runs in an asyncio task
+        tracked by the runner; failures are logged via the done-callback.
+        Deduplicate upstream (fingerprint index in routes.py) if the
+        caller may retry.
+        """
+        incident_id, initial_state, config, run_metrics = self._prepare_incident(alert)
+
+        logger.info(
+            "Scheduling incident %s (background): alert=%s namespace=%s service=%s",
+            incident_id,
+            alert.get("alert_name"),
+            alert.get("namespace"),
+            alert.get("service"),
+        )
+
+        task = asyncio.create_task(
+            self._execute_graph(
+                incident_id,
+                initial_state,
+                config,
+                run_metrics,
+                alert,
+            ),
+            name=f"autosre-incident-{incident_id}",
+        )
+
+        async with self._background_lock:
+            self._background_tasks.add(task)
+
+        task.add_done_callback(self._on_background_task_done)
+
+        return incident_id
+
+    def _on_background_task_done(self, task: asyncio.Task[None]) -> None:
+        """Discard the task and log any exception it raised.
+
+        Called by asyncio on task completion. Never raises; a raise here
+        would be swallowed by the event loop's default exception handler
+        with less context than we have.
+        """
+        self._background_tasks.discard(task)
+
+        if task.cancelled():
+            return
+
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "Background incident task failed: %s",
+                exc,
+                exc_info=exc,
+            )
+
+    async def shutdown(self, timeout: float = 30.0) -> None:
+        """Drain background tasks. Called from the FastAPI lifespan.
+
+        Waits up to ``timeout`` seconds for in-flight incidents to
+        finish; cancels the remainder. Safe to call when no tasks are
+        pending.
+
+        Args:
+            timeout: Maximum seconds to wait before cancelling.
+        """
+        if timeout <= 0:
+            raise ValueError("timeout must be greater than zero")
+
+        async with self._background_lock:
+            pending = list(self._background_tasks)
+
+        if not pending:
+            return
+
+        logger.info(
+            "Draining %d background incident task(s) (timeout=%.0fs)",
+            len(pending),
+            timeout,
+        )
+
+        done, still_pending = await asyncio.wait(pending, timeout=timeout)
+
+        for task in still_pending:
+            task.cancel()
+
+        if still_pending:
+            await asyncio.gather(*still_pending, return_exceptions=True)
+            logger.warning(
+                "Cancelled %d background task(s) after %.0fs timeout",
+                len(still_pending),
+                timeout,
+            )
+
+        if done:
+            logger.info("Background tasks completed: %d", len(done))
+
+    # ------------------------------------------------------------------
     # Public API — read
     # ------------------------------------------------------------------
 
-    async def get_incident_state(self, incident_id: str) -> Any | None:
-        """Return the latest checkpointed state for an incident, or None.
+    @asynccontextmanager
+    async def _read_connection(
+        self,
+    ) -> AsyncIterator[AsyncConnection[Any]]:
+        """Yield a live AsyncConnection for read-only queries.
 
-        Returns None for a missing incident rather than raising, because
-        the API layer translates "not found" into a 404 and this method is
-        used in polling loops.
+        Handles both saver init modes. On exit, commits the read
+        transaction if the connection is not in autocommit mode, so the
+        shared connection is never left idle-in-transaction.
         """
+        if self.checkpointer is None:
+            raise RuntimeError("checkpointer is not configured")
+
+        conn_or_pool = getattr(self.checkpointer, "conn", None)
+        if conn_or_pool is None:
+            raise RuntimeError("checkpointer has no 'conn' attribute")
+
+        if isinstance(conn_or_pool, AsyncConnectionPool):
+            async with conn_or_pool.connection() as conn:
+                try:
+                    yield conn
+                finally:
+                    if not conn.autocommit:
+                        with contextlib.suppress(Exception):
+                            await conn.commit()
+            return
+
+        if isinstance(conn_or_pool, AsyncConnection):
+            try:
+                yield conn_or_pool
+            finally:
+                if not conn_or_pool.autocommit:
+                    with contextlib.suppress(Exception):
+                        await conn_or_pool.commit()
+            return
+
+        raise RuntimeError(f"checkpointer.conn has unsupported type: {type(conn_or_pool).__name__}")
+
+    @staticmethod
+    def _extract_thread_id(row: Any) -> str | None:
+        """Return the thread_id from a query row, or None."""
+        if row is None:
+            return None
+
+        if isinstance(row, Mapping):
+            value = row.get(_THREAD_ID_COLUMN)
+        else:
+            try:
+                value = row[0]
+            except IndexError, KeyError, TypeError:
+                return None
+
+        if value is None:
+            return None
+
+        text = str(value).strip()
+        return text or None
+
+    async def get_incident_state(self, incident_id: str) -> Any | None:
+        """Return the latest checkpointed state for an incident, or None."""
         if not incident_id:
             return None
 
@@ -358,18 +458,7 @@ class LangGraphRunner:
             return None
 
     async def list_incidents(self, limit: int = 100) -> list[tuple[str, Any]]:
-        """Return recent incidents ordered by last checkpoint recency.
-
-        Ordering uses ``MAX(checkpoint_id)`` per thread. thread_id is a
-        random UUID and its lexicographic order carries no signal.
-
-        Args:
-            limit: Upper bound on returned incidents. Must be > 0.
-
-        Returns:
-            List of (incident_id, state_snapshot) tuples. Empty when no
-            checkpointer is configured or the query fails.
-        """
+        """Return recent incidents ordered by last checkpoint recency."""
         if limit <= 0:
             raise ValueError("limit must be greater than zero")
 
@@ -440,17 +529,7 @@ class LangGraphRunner:
         """Resume a paused graph with the operator's approval decision.
 
         Idempotent: an incident that already has an ``approval_granted``
-        value returns False without resuming. A second Slack or UI click
-        therefore cannot double-resume the graph.
-
-        Uses ``Command(resume={"approved": ..., "comment": ...})`` which
-        is the LangGraph 1.x contract. Do not substitute
-        ``aupdate_state()`` — it modifies channels without resuming.
-
-        Returns:
-            True if the graph was resumed.
-            False if the incident is missing, does not require approval,
-            already has a decision, or the resume raised.
+        value returns False without resuming.
         """
         if not incident_id:
             logger.warning("approve_incident called with empty incident_id")

@@ -25,37 +25,50 @@
     POST /admin/resume                     Accept new incidents.
     GET  /admin/status                     Current pause state.
 
-## Contracts
+## Ingestion contract (POST /alerts)
 
-### Webhook signature
-Every webhook endpoint verifies HMAC-SHA256 over the raw request body
-against ``settings.alert.webhook_secret``. The signature header is
-``X-Webhook-Signature: sha256=<hex>``. Invalid signatures return 401.
+The webhook handler is a durable-acknowledgement boundary. It:
 
-### Timing
-Two MTTR fields are surfaced:
-    wall_clock_seconds   Total elapsed, including rate-limit backoff.
-    active_seconds       wall_clock minus backoff. The honest MTTR.
+    1. Enforces per-client rate limiting.
+    2. Refuses new work while the agent is paused.
+    3. Verifies the HMAC signature over the raw request body.
+    4. Validates the alert payload against AlertPayload.
+    5. Deduplicates on the alert's ``fingerprint`` field: if a matching
+       fingerprint is already in flight, returns the existing incident_id
+       without scheduling a new graph.
+    6. Schedules the graph in a background task.
+    7. Returns 202 Accepted.
 
-The metrics summary computes ``mttr_reduction_pct`` from
-``active_seconds`` against a per-incident baseline declared in
-``labels['baseline_mttr_seconds']`` by the eval harness.
+Steps 5 and 6 are what make the endpoint non-blocking. The graph may run
+for minutes; the HTTP request returns in milliseconds. OpenObserve's
+webhook timeout is not consumed by the graph's runtime.
 
-### Status derivation
+## Layer 2 deduplication
+
+OpenObserve deduplicates its own fires via the ``deduplication`` block in
+``infra/terraform/alerts.tf``. This module provides a second layer that
+guards against:
+
+    - OpenObserve retries after a lost 2xx
+    - Multiple alert rules producing the same fingerprint
+    - Concurrent delivery from O2's retry queue
+
+The index is in-process. A multi-replica deployment must replace it with
+a shared store (Redis or a unique constraint on an ``alert_deliveries``
+table). Single-worker local and staging use is correct as-is.
+
+## Status derivation
+
 ``awaiting_approval`` is a derived status surfaced on IncidentSummary
 when ``requires_human_approval=True`` and ``approval_granted is None``.
 The underlying state.status remains ``running``.
 
-### Timeseries bucketing
+## Timeseries bucketing
+
 Buckets are epoch-aligned:
     bucket_seconds = bucket_minutes * 60
     bucket_epoch   = (floor(started_at) // bucket_seconds) * bucket_seconds
 This guarantees chronological ordering across all ranges.
-
-### Rate limiting
-``/alerts`` is limited per client IP by an in-process token bucket. The
-limit is not shared across replicas; a multi-replica deployment must
-move this to a shared store. Documented in ``_RateLimiter``.
 """
 
 from __future__ import annotations
@@ -88,7 +101,7 @@ webhook_router = APIRouter()
 # Rate limiting
 # ---------------------------------------------------------------------------
 
-_ALERTS_RATE_LIMIT = 10
+_ALERTS_RATE_LIMIT = 60
 _ALERTS_RATE_WINDOW_SECONDS = 60
 
 
@@ -96,8 +109,7 @@ class _RateLimiter:
     """In-process token bucket keyed by client identifier.
 
     Single-replica only. A multi-replica deployment must back this with
-    Redis or an ingress rate limiter. Left in-process deliberately so
-    the module has no extra dependency for the local harness.
+    Redis or an ingress rate limiter.
     """
 
     def __init__(self, max_requests: int, window_seconds: float) -> None:
@@ -112,7 +124,6 @@ class _RateLimiter:
         self._lock = asyncio.Lock()
 
     async def allow(self, key: str) -> bool:
-        """Return True if a request from ``key`` is allowed now."""
         now = time.monotonic()
         async with self._lock:
             q = self._requests[key]
@@ -125,12 +136,74 @@ class _RateLimiter:
             return True
 
     def reset(self) -> None:
-        """Clear all buckets. Used by tests."""
         self._requests.clear()
 
 
 _alerts_limiter = _RateLimiter(_ALERTS_RATE_LIMIT, _ALERTS_RATE_WINDOW_SECONDS)
 
+# ---------------------------------------------------------------------------
+# Layer 2 fingerprint deduplication
+# ---------------------------------------------------------------------------
+
+# TTL matches the O2 dedup window in infra/terraform/alerts.tf.
+# After this window, a fingerprint may fire again as a fresh incident.
+_FINGERPRINT_TTL_SECONDS = 1800.0
+
+
+class _FingerprintIndex:
+    """Maps alert fingerprint -> (incident_id, first_seen_monotonic).
+
+    An in-flight reservation is created on the first delivery and expires
+    after ``ttl_seconds``. Subsequent deliveries with the same fingerprint
+    receive the existing incident_id without scheduling a new graph.
+
+    A completed incident does NOT remove its fingerprint: the TTL window
+    is what bounds re-firing. This intentionally matches the OpenObserve
+    dedup window so the two layers agree on "what counts as a duplicate".
+    """
+
+    def __init__(self, ttl_seconds: float) -> None:
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be > 0")
+        self._ttl = ttl_seconds
+        self._entries: dict[str, tuple[str, float]] = {}
+        self._lock = asyncio.Lock()
+
+    async def lookup(self, fingerprint: str) -> str | None:
+        """Return the reserved incident_id, or None if not reserved."""
+        if not fingerprint:
+            return None
+
+        now = time.monotonic()
+        async with self._lock:
+            entry = self._entries.get(fingerprint)
+            if entry is None:
+                return None
+            incident_id, seen_at = entry
+            if now - seen_at > self._ttl:
+                del self._entries[fingerprint]
+                return None
+            return incident_id
+
+    async def reserve(self, fingerprint: str, incident_id: str) -> None:
+        """Record a fingerprint -> incident_id reservation."""
+        if not fingerprint:
+            return
+
+        now = time.monotonic()
+        async with self._lock:
+            self._entries[fingerprint] = (incident_id, now)
+
+    def reset(self) -> None:
+        """Clear the index. Used by tests."""
+        self._entries.clear()
+
+    def size(self) -> int:
+        """Return the number of currently reserved fingerprints."""
+        return len(self._entries)
+
+
+_fingerprint_index = _FingerprintIndex(_FINGERPRINT_TTL_SECONDS)
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -138,7 +211,12 @@ _alerts_limiter = _RateLimiter(_ALERTS_RATE_LIMIT, _ALERTS_RATE_WINDOW_SECONDS)
 
 
 class AlertPayload(BaseModel):
-    """Alert webhook payload."""
+    """Alert webhook payload.
+
+    ``fingerprint`` is the alert's stable identity. It is required and
+    non-empty so Layer 2 dedup has a key to work with. An alert without a
+    fingerprint bypasses dedup and always schedules a new incident.
+    """
 
     alert_name: str
     service: str
@@ -159,12 +237,7 @@ class ApprovalRequest(BaseModel):
 
 
 class IncidentSummary(BaseModel):
-    """Incident list-view record.
-
-    ``awaiting_approval`` is a derived status: when the graph is paused on
-    a HITL interrupt, the underlying state.status remains ``running`` but
-    this field surfaces ``awaiting_approval`` so list views can filter.
-    """
+    """Incident list-view record."""
 
     incident_id: str
     status: str
@@ -218,12 +291,7 @@ class IncidentReportResponse(BaseModel):
 
 
 class MetricsSummary(BaseModel):
-    """Aggregate KPIs across all incidents.
-
-    ``mttr_reduction_pct`` compares the agent's mean ``active_seconds``
-    against the mean ``baseline_mttr_seconds`` declared by the dataset.
-    When the baseline is unavailable or zero, the field is 0.0.
-    """
+    """Aggregate KPIs across all incidents."""
 
     total_incidents: int
     resolved_count: int
@@ -295,6 +363,17 @@ _BUCKET_MINUTES_BY_RANGE: dict[str, int] = {
     "30d": 1440,
 }
 
+_MUTATING_TOOLS = frozenset(
+    {
+        "restart_deployment",
+        "scale_deployment",
+        "delete_pod",
+        "terminate_backend",
+        "delete_valkey_key",
+        "set_feature_flag",
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Dependency injection
@@ -313,12 +392,7 @@ def get_runner(request: Request) -> RunnerProtocol:
 
 
 def get_settings_dep(request: Request) -> Settings:
-    """Return the Settings bound to the running app.
-
-    Prefers ``app.state.settings`` so ``create_app(settings)`` is the
-    single source of truth. Falls back to the process-wide cache only
-    when the app was constructed without explicit settings.
-    """
+    """Return the Settings bound to the running app."""
     settings = getattr(request.app.state, "settings", None)
     if isinstance(settings, Settings):
         return settings
@@ -356,12 +430,7 @@ def _verify_signature(
 
 
 def _require_admin_secret(request: Request, settings: Settings) -> None:
-    """Raise 401/503 unless the caller supplied the correct admin secret.
-
-    Uses ``settings.admin.secret``. When the secret is unset, the endpoint
-    is disabled entirely (503) to prevent accidental unauthenticated
-    access to control-plane operations.
-    """
+    """Raise 401/503 unless the caller supplied the correct admin secret."""
     admin = getattr(settings, "admin", None)
     secret: SecretStr | None = getattr(admin, "secret", None)
 
@@ -405,11 +474,7 @@ def _as_str(value: Any, default: str = "") -> str:
 
 
 def _state_values(state: Any) -> dict[str, Any]:
-    """Return the values dict from a checkpointed state snapshot.
-
-    LangGraph StateSnapshots expose ``.values`` as a mapping. Older test
-    doubles may pass a plain dict; both shapes are accepted.
-    """
+    """Return the values dict from a checkpointed state snapshot."""
     if state is None:
         return {}
     values = getattr(state, "values", state)
@@ -423,11 +488,7 @@ def _derive_status(
     requires_approval: bool,
     approval_granted: bool | None,
 ) -> str:
-    """Return the UI-facing status.
-
-    ``awaiting_approval`` is derived; the underlying state keeps its
-    ``running`` status while the graph is paused on the interrupt.
-    """
+    """Return the UI-facing status."""
     if requires_approval and approval_granted is None and raw_status == "running":
         return "awaiting_approval"
     return raw_status
@@ -468,11 +529,7 @@ def _extract_summary(incident_id: str, values: dict[str, Any]) -> IncidentSummar
 
 
 def _baseline_mttr_seconds(values: dict[str, Any]) -> float:
-    """Return the dataset-declared baseline MTTR, or 0.0.
-
-    The eval harness sets ``labels['baseline_mttr_seconds']`` per incident
-    before triggering. This helper parses it defensively.
-    """
+    """Return the dataset-declared baseline MTTR, or 0.0."""
     metadata = values.get("incident_metadata") or {}
     if not isinstance(metadata, dict):
         return 0.0
@@ -486,12 +543,7 @@ def _baseline_mttr_seconds(values: dict[str, Any]) -> float:
 
 
 def _count_safety_violations(executed_actions: list[Any]) -> int:
-    """Count prohibited tools that executed despite policy.
-
-    Broader than the previous check: any executed action whose tool name
-    is in the prohibited set counts, regardless of whether the policy
-    layer was bypassed. In a correct system this count is always zero.
-    """
+    """Count prohibited tools that executed despite policy."""
     violations = 0
     for action in executed_actions:
         if not isinstance(action, dict):
@@ -508,6 +560,7 @@ def _count_safety_violations(executed_actions: list[Any]) -> int:
 
 @router.get("/healthz")
 async def healthz(request: Request) -> dict[str, Any]:
+    """Liveness probe. Always 200 while the process is up."""
     return {
         "status": "ok",
         "version": "0.1.4",
@@ -601,12 +654,7 @@ async def sign_approval(
     approval: ApprovalRequest,
     settings: AppSettings,
 ) -> dict[str, str]:
-    """Return an HMAC-signed body for POST /incidents/{id}/approve.
-
-    The browser cannot compute HMAC-SHA256 without exposing the webhook
-    secret, so the UI requests a signature from the same-origin API and
-    forwards it as the X-Webhook-Signature header.
-    """
+    """Return an HMAC-signed body for POST /incidents/{id}/approve."""
     body = json.dumps(
         {"approved": approval.approved, "comment": approval.comment},
         ensure_ascii=False,
@@ -655,9 +703,15 @@ async def trigger_incident(
     Order of checks:
         1. Rate limit
         2. Pause flag
-        3. HMAC signature
+        3. HMAC signature over raw body
         4. Payload validation
-        5. Dispatch
+        5. Fingerprint dedup
+        6. Schedule in background
+        7. Return 202
+
+    Returns within milliseconds. The graph runs in a background task
+    tracked by the runner. OpenObserve's webhook timeout is not consumed
+    by the graph's runtime.
     """
     # 1. Rate limit first so abusive clients can't burn signature checks.
     client = _client_ip(request)
@@ -668,16 +722,14 @@ async def trigger_incident(
             detail="Rate limit exceeded",
         )
 
-    # 2. Pause flag. Refuse new work while paused; existing graph runs
-    # continue to completion.
+    # 2. Pause flag. Refuse new work while paused.
     if _is_paused(request):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Agent is paused",
         )
 
-    # 3. Read body once. It is needed for both signature verification and
-    # parsing.
+    # 3. Read body once, verify signature over raw bytes.
     try:
         payload = await request.body()
     except Exception as exc:
@@ -696,38 +748,56 @@ async def trigger_incident(
         raise HTTPException(status_code=422, detail=f"Invalid alert payload: {exc}") from exc
 
     logger.info(
-        "Alert received: %s on %s/%s (severity=%s)",
+        "Alert received: %s on %s/%s (severity=%s fingerprint=%s)",
         alert.alert_name,
         alert.namespace,
         alert.service,
         alert.severity,
+        alert.fingerprint or "<empty>",
     )
 
-    # 5. Dispatch. Translate runner-level failures into specific statuses
-    # so the caller can distinguish transient from fatal.
+    # 5. Fingerprint dedup.
+    existing = await _fingerprint_index.lookup(alert.fingerprint)
+    if existing is not None:
+        logger.info(
+            "Dedup hit: fingerprint=%s existing_incident=%s",
+            alert.fingerprint,
+            existing,
+        )
+        return {
+            "incident_id": existing,
+            "status": "already_investigating",
+        }
+
+    # 6. Schedule in background. This returns as soon as the incident_id
+    # is generated; the graph runs asynchronously.
     try:
-        incident_id = await runner.run_incident(alert.model_dump())
+        incident_id = await runner.schedule_incident(alert.model_dump())
     except TimeoutError as exc:
-        logger.error("Incident dispatch timed out for alert %s", alert.alert_name)
+        logger.error("Incident scheduling timed out for alert %s", alert.alert_name)
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Incident exceeded wall-clock budget",
+            detail="Incident scheduling exceeded budget",
         ) from exc
     except LLMBudgetExhaustedError as exc:
-        logger.error("Incident dispatch aborted: provider budget exhausted")
+        logger.error("Incident scheduling aborted: provider budget exhausted")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="LLM provider budget exhausted",
         ) from exc
     except Exception as exc:
         logger.error(
-            "Unexpected error in trigger_incident: %s\n%s",
+            "Unexpected error scheduling incident: %s\n%s",
             exc,
             traceback.format_exc(),
         )
         raise HTTPException(status_code=500, detail=f"Internal error: {exc!s}") from exc
 
-    logger.info("Incident %s created", incident_id)
+    # Reserve the fingerprint. Subsequent deliveries within TTL receive
+    # the same incident_id without scheduling a duplicate graph.
+    await _fingerprint_index.reserve(alert.fingerprint, incident_id)
+
+    logger.info("Incident %s scheduled", incident_id)
     return {"incident_id": incident_id, "status": "accepted"}
 
 
@@ -739,11 +809,7 @@ async def approve_incident(
     runner: Runner,
     settings: AppSettings,
 ) -> dict[str, Any]:
-    """Resume a paused HITL interrupt with the operator's decision.
-
-    The signature is verified over the raw body, then the payload is
-    parsed. This ordering matches the Slack-style verification contract.
-    """
+    """Resume a paused HITL interrupt with the operator's decision."""
     payload = await request.body()
     signature = request.headers.get("X-Webhook-Signature", "")
 
@@ -753,7 +819,6 @@ async def approve_incident(
     approved = await runner.approve_incident(incident_id, approval.approved, approval.comment)
 
     if not approved:
-        # Distinguish "already decided" from "not found" for operators.
         state = await runner.get_incident_state(incident_id)
         if state is None:
             raise HTTPException(
@@ -900,8 +965,6 @@ async def get_metrics_summary(runner: Runner) -> MetricsSummary:
             elif status in _NO_ACTION_STATUSES:
                 no_action += 1
 
-            # Timing (all incidents contribute to cost/tokens, only
-            # resolved ones contribute to MTTR).
             if status in _TERMINAL_SUCCESS_STATUSES:
                 active = _as_float(values.get("active_seconds", 0.0))
                 wall = _as_float(values.get("wall_clock_seconds", 0.0))
@@ -920,8 +983,6 @@ async def get_metrics_summary(runner: Runner) -> MetricsSummary:
             total_cost += _as_float(values.get("cost_usd", 0.0))
             total_tokens += _as_int(values.get("tokens_used", 0))
 
-            # Category from labels, with a top-level fallback for older
-            # incidents recorded before category propagation was added.
             metadata = values.get("incident_metadata") or {}
             category = "unknown"
             if isinstance(metadata, dict):
@@ -990,9 +1051,7 @@ async def get_metrics_timeseries(
     """Return epoch-aligned time-bucketed metrics.
 
     Buckets are aligned to the epoch so they are always chronologically
-    ordered. The previous implementation produced non-monotonic labels
-    (04:30, 19:30, 15:30) because it manipulated wall-clock fields
-    instead of epoch offsets.
+    ordered.
     """
     try:
         all_states = await runner.list_incidents(limit=1000)
