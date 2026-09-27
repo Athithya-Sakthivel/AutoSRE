@@ -45,6 +45,12 @@ temp.md
 output.txt
 temp.txt
 
+.terraform/
+tfplan
+*.tfstate
+*.tfstate.backup
+crash.log
+
 node_modules/
 dist/
 .vite/
