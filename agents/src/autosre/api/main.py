@@ -2,72 +2,54 @@
 
 ## Lifespan
 
-Startup opens resources in this order:
+Startup opens resources in order. Shutdown unwinds in reverse via
+AsyncExitStack. Telemetry is registered first so it is torn down last.
 
     1. Telemetry (OTel TracerProvider + instrumentors)
-    2. Postgres connection pool (diagnostic tools)
-    3. Valkey client (cache diagnostics)
-    4. OpenObserve client (log/metric queries)
+    2. Postgres connection pool
+    3. Valkey client
+    4. OpenObserve client
     5. K8s client (optional; failures are non-fatal)
-    6. LangGraph AsyncPostgresSaver (state persistence)
-    7. SREContext (aggregates 2-5)
+    6. LangGraph AsyncPostgresSaver
+    7. SREContext
     8. Tool registry
     9. Policy engine + SafeExecutor
-   10. Context eviction middleware
-   11. GraphContext (aggregates 1, 8, 9, 10)
+   10. Context eviction
+   11. GraphContext
    12. Compiled graph
-   13. LangGraphRunner (aggregates 12, 6, 7, 11)
+   13. LangGraphRunner
    14. Slack integration (optional; failures are non-fatal)
-
-Shutdown unwinds in reverse via AsyncExitStack. Telemetry is registered
-first so it is torn down last, capturing traces of every other shutdown.
-
-## Application state
-
-Every resource that a route needs is stored on `app.state`:
-
-    settings            Explicit Settings object (never the cache)
-    paused              Boolean; True blocks new /alerts dispatches
-    pause_reason        Optional reason string surfaced by /admin/status
-    pg_pool             psycopg AsyncConnectionPool
-    valkey_client       redis.asyncio.Redis
-    openobserve_client  OpenObserveClient
-    sre_context         SREContext
-    registry            ToolRegistry
-    policy_engine       PolicyEngine
-    executor            SafeExecutor
-    runner              LangGraphRunner
-    checkpointer        AsyncPostgresSaver
-    slack_client        SlackClient | None
-    slack_handler       SlackHandler | None
-    slack_socket        SlackSocketMode | None
-    slack_listener      ApprovalListener | None
 
 ## Slack integration
 
-Slack is enabled only when `settings.slack.is_enabled` is True, which
-requires the credential set matching `settings.slack.mode`:
+Slack is enabled only when ``settings.slack.is_enabled`` is True, which
+requires the credential set matching ``settings.slack.mode``:
 
     mode="socket"   bot_token + app_token
     mode="http"     bot_token + signing_secret
 
-When enabled, the lifespan starts:
+When enabled, the lifespan constructs:
 
-    SlackClient         HTTP client for post/update messages
+    SlackClient         HTTP client for post_message / update_message
     SlackHandler        Verifies inbound interactions; dispatches approvals
     ApprovalListener    Polls for HITL-pending incidents; posts to Slack
-    SlackSocketMode     WebSocket transport for interactions (socket mode only)
+    SlackSocketMode     WebSocket transport for interactions (socket mode)
 
 Socket Mode startup is fail-soft: if the WebSocket cannot connect, the
 listener still posts approval requests to Slack. Operators can approve
-via the UI (`POST /incidents/{id}/approve`); the socket only carries
-the button clicks. Losing the socket degrades, not kills.
+via the UI; the socket only carries button clicks. Losing the socket
+degrades, not kills.
+
+Every Slack constructor is wrapped in try/except so a Slack config error
+does not prevent the agent from starting. When Slack fails to initialize,
+``app.state.slack_*`` are set to None and the approval flow falls back
+to the UI.
 
 ## Static file serving
 
-When `ui/dist` exists, SPA assets and index.html are served for any path
-that is not a reserved API prefix. The reservation list must stay in
-sync with the routers registered below.
+When ``ui/dist`` exists, SPA assets and index.html are served for any
+path that is not a reserved API prefix. The reservation list must stay
+in sync with the routers registered below.
 """
 
 from __future__ import annotations
@@ -135,9 +117,9 @@ _DEFAULT_CORS_ORIGINS: tuple[str, ...] = (
 def _resolve_cors_origins() -> list[str]:
     """Return the list of allowed CORS origins.
 
-    Reads AUTOSRE_CORS_ORIGINS (comma-separated) or falls back to the local
-    development defaults. Wildcard origin "*" is never returned because
-    allow_credentials=True is incompatible with it.
+    Reads AUTOSRE_CORS_ORIGINS (comma-separated) or falls back to the
+    local development defaults. Wildcard origin "*" is never returned
+    because allow_credentials=True is incompatible with it.
     """
     raw = os.getenv("AUTOSRE_CORS_ORIGINS", "").strip()
     if not raw:
@@ -156,17 +138,146 @@ def _resolve_cors_origins() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Slack lifecycle helpers
+# ---------------------------------------------------------------------------
+
+
+async def _start_slack(
+    app: FastAPI,
+    stack: AsyncExitStack,
+    settings: Settings,
+    runner: LangGraphRunner,
+) -> None:
+    """Construct and start the Slack integration when enabled.
+
+    Every failure path is caught and logged; the agent starts regardless.
+    The four components are pushed onto the exit stack in reverse
+    shutdown order:
+
+        socket.stop   -> listener.stop   -> handler.close   -> client.close
+
+    Registration order is the reverse of construction order because
+    AsyncExitStack runs callbacks in LIFO order.
+    """
+    # Seed None defaults so app.state always has the attributes.
+    app.state.slack_client = None
+    app.state.slack_handler = None
+    app.state.slack_socket = None
+    app.state.slack_listener = None
+
+    if not settings.slack.is_enabled:
+        logger.info("Slack integration disabled (set AUTOSRE_SLACK__BOT_TOKEN to enable)")
+        return
+
+    try:
+        from autosre.slack import (
+            ApprovalListener,
+            SlackClient,
+            SlackHandler,
+            SlackSocketMode,
+        )
+    except Exception:
+        logger.exception("Slack package failed to import; continuing without Slack")
+        return
+
+    try:
+        slack_client = SlackClient(settings.slack)
+    except Exception:
+        logger.exception("SlackClient construction failed; continuing without Slack")
+        return
+
+    stack.push_async_callback(slack_client.close)
+
+    try:
+        slack_handler = SlackHandler(
+            config=settings.slack,
+            runner=runner,
+            client=slack_client,
+            approver_user_ids=settings.slack.approver_user_ids,
+        )
+    except Exception:
+        logger.exception("SlackHandler construction failed; continuing without Slack")
+        return
+
+    stack.push_async_callback(slack_handler.close)
+
+    try:
+        slack_listener = ApprovalListener(
+            runner=runner,
+            slack_client=slack_client,
+        )
+    except Exception:
+        logger.exception("ApprovalListener construction failed; continuing without Slack")
+        return
+
+    stack.push_async_callback(slack_listener.stop)
+
+    slack_socket = None
+
+    if settings.slack.mode == "socket":
+        try:
+            slack_socket = SlackSocketMode(
+                config=settings.slack,
+                handler=slack_handler,
+                client=slack_client,
+            )
+        except Exception:
+            logger.exception(
+                "SlackSocketMode construction failed; "
+                "button clicks will not be delivered. "
+                "Approve via the UI instead."
+            )
+            slack_socket = None
+
+        if slack_socket is not None:
+            stack.push_async_callback(slack_socket.stop)
+
+            try:
+                await slack_socket.start()
+            except Exception:
+                logger.exception(
+                    "Slack Socket Mode failed to connect; "
+                    "button clicks will not be delivered. "
+                    "Approve via the UI instead."
+                )
+                slack_socket = None
+
+    # The listener polls for HITL-pending incidents and posts them to
+    # Slack. It runs regardless of socket availability: the request
+    # still reaches the channel; only the callback path degrades.
+    try:
+        await slack_listener.start()
+    except Exception:
+        logger.exception(
+            "ApprovalListener failed to start; Slack approval requests will not be sent"
+        )
+        app.state.slack_client = slack_client
+        app.state.slack_handler = slack_handler
+        app.state.slack_listener = None
+        app.state.slack_socket = slack_socket
+        return
+
+    app.state.slack_client = slack_client
+    app.state.slack_handler = slack_handler
+    app.state.slack_listener = slack_listener
+    app.state.slack_socket = slack_socket
+
+    logger.info(
+        "Slack integration enabled (mode=%s channel=%s socket=%s)",
+        settings.slack.mode,
+        settings.slack.approval_channel,
+        "connected" if slack_socket is not None else "unavailable",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Open every resource at startup; close in reverse at shutdown.
-
-    Telemetry is registered first so its shutdown callback runs last,
-    capturing traces from every other cleanup.
-    """
+    """Open every resource at startup; close in reverse at shutdown."""
     settings: Settings = app.state.settings
 
     async with AsyncExitStack() as stack:
@@ -307,81 +418,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
 
         # ==============================================================
-        # 14. Slack integration (optional; failure is non-fatal).
-        #
-        # The Slack client, handler, listener, and socket are constructed
-        # only when settings.slack.is_enabled is True. When disabled, the
-        # corresponding app.state fields are set to None and the
-        # approval flow falls back to the UI.
+        # 14. Slack (optional).
         # ==============================================================
-        slack_client = None
-        slack_handler = None
-        slack_socket = None
-        slack_listener = None
-
-        if settings.slack.is_enabled:
-            try:
-                from autosre.slack import (
-                    ApprovalListener,
-                    SlackClient,
-                    SlackHandler,
-                    SlackSocketMode,
-                )
-
-                slack_client = SlackClient(settings.slack)
-                stack.push_async_callback(slack_client.close)
-
-                slack_handler = SlackHandler(
-                    config=settings.slack,
-                    runner=runner,
-                    client=slack_client,
-                    approver_user_ids=settings.slack.approver_user_ids,
-                )
-                stack.push_async_callback(slack_handler.close)
-
-                slack_listener = ApprovalListener(
-                    runner=runner,
-                    slack_client=slack_client,
-                )
-                stack.push_async_callback(slack_listener.stop)
-
-                if settings.slack.mode == "socket":
-                    slack_socket = SlackSocketMode(
-                        config=settings.slack,
-                        handler=slack_handler,
-                        client=slack_client,
-                    )
-                    stack.push_async_callback(slack_socket.stop)
-
-                    # Fail-soft: a socket that cannot connect must not
-                    # prevent the agent from starting. Approvals still
-                    # work via the UI; the listener still posts the
-                    # request so operators know it exists.
-                    try:
-                        await slack_socket.start()
-                    except Exception:
-                        logger.exception(
-                            "Slack Socket Mode failed to start; "
-                            "approval delivery via Slack buttons is "
-                            "disabled. Approve via the UI instead."
-                        )
-                        slack_socket = None
-
-                await slack_listener.start()
-                logger.info(
-                    "Slack integration enabled (mode=%s channel=%s)",
-                    settings.slack.mode,
-                    settings.slack.approval_channel,
-                )
-
-            except Exception:
-                logger.exception("Slack integration failed to initialize; continuing without Slack")
-                slack_client = None
-                slack_handler = None
-                slack_socket = None
-                slack_listener = None
-        else:
-            logger.info("Slack integration disabled (set AUTOSRE_SLACK__BOT_TOKEN to enable)")
+        await _start_slack(app, stack, settings, runner)
 
         # ==============================================================
         # Expose on app.state.
@@ -395,15 +434,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.executor = executor
         app.state.runner = runner
         app.state.checkpointer = checkpointer
-        app.state.slack_client = slack_client
-        app.state.slack_handler = slack_handler
-        app.state.slack_socket = slack_socket
-        app.state.slack_listener = slack_listener
 
-        # ==============================================================
         # Admin secret posture. Warn if unset so operators know the
         # kill switch is disabled.
-        # ==============================================================
         admin_secret = getattr(getattr(settings, "admin", None), "secret", None)
         if admin_secret is None:
             logger.warning(
@@ -441,11 +474,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Seed application state before the lifespan runs so routes and
-    # middleware can rely on these fields even during early requests.
+    # Seed application state before the lifespan runs.
     app.state.settings = settings
     app.state.paused = False
     app.state.pause_reason = None
+    app.state.slack_client = None
+    app.state.slack_handler = None
+    app.state.slack_socket = None
+    app.state.slack_listener = None
 
     # CORS.
     cors_origins = _resolve_cors_origins()
@@ -458,20 +494,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     logger.info("CORS origins: %s", cors_origins)
 
-    # Routers. Order matters only for path-shadowing; the reserved prefix
-    # list in _RESERVED_PREFIXES must be a superset of every path these
-    # routers serve.
+    # Routers.
     app.include_router(router)
     app.include_router(webhook_router)
 
-    # Slack HTTP interactivity routes are only mounted when the
-    # configured transport is HTTP. Socket Mode delivers interactions
-    # over the WebSocket, so exposing HTTP routes would be dead surface.
+    # Slack HTTP interactivity routes are only mounted when the configured
+    # transport is HTTP. Socket Mode delivers interactions over the
+    # WebSocket, so exposing HTTP routes would be dead surface.
+    # Slack HTTP interactivity routes are only mounted when the configured
+    # transport is HTTP. Socket Mode delivers interactions over the
+    # WebSocket, so exposing HTTP routes would be dead surface.
+    #
+    # Note: the router lives at autosre.slack.slack_routes, not
+    # autosre.api.slack_routes. The api/ package contains only the
+    # HTTP surface for the agent, not per-integration routers.
     if settings.slack.is_enabled and settings.slack.mode == "http":
-        from autosre.api.slack_routes import slack_router
+        try:
+            from autosre.slack.slack_routes import slack_router
 
-        app.include_router(slack_router)
-        logger.info("Slack HTTP interactivity routes mounted at /slack/*")
+            app.include_router(slack_router)
+            logger.info("Slack HTTP interactivity routes mounted at /slack/*")
+        except Exception:
+            logger.exception("Failed to mount Slack HTTP routes; approvals fall back to the UI")
     elif settings.slack.is_enabled:
         logger.info(
             "Slack mode=%s: HTTP interactivity routes not mounted",

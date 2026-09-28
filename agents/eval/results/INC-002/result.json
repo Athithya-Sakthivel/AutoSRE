@@ -1,0 +1,71 @@
+{
+  "incident_id": "INC-002",
+  "completed_at": "2026-09-28T01:58:50Z",
+  "result": {
+    "incident_id": "b49aa1ae-ed5a-43a3-8eba-96390d6c05ae",
+    "status": "no_action",
+    "phase": "complete",
+    "alert_name": "HighCPUUtilization",
+    "service": "api-gateway",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "started_at": "2026-09-28T01:58:44Z",
+    "hypotheses": [
+      {
+        "id": "H1",
+        "confidence": 0.1,
+        "status": "disproven",
+        "evidence": [
+          "Tool list_pods({\"namespace\": \"rivulet\", \"label_selector\": \"\"}) status=succeeded output={\"pods\": [{\"name\": \"api-gateway-6cdc897dbd-9vk4n\", \"namespace\": \"rivulet\", \"status\": \"Running\", \"restarts\": 6, \"age_seconds\": 176485.01, \"node\": \"kind-worker\"}, {\"name\": \"api-gateway-6cdc897dbd-wrb7v\", \"namespace\": \"rivulet\", \"status\": \"Running\", \"restarts\": 7, \"age_seconds\": 182658.01, \"node\": \"kin"
+        ]
+      },
+      {
+        "id": "H2",
+        "confidence": 0.1,
+        "status": "disproven",
+        "evidence": [
+          "Tool list_pods({\"namespace\": \"rivulet\", \"label_selector\": \"\"}) status=succeeded output={\"pods\": [{\"name\": \"api-gateway-6cdc897dbd-9vk4n\", \"namespace\": \"rivulet\", \"status\": \"Running\", \"restarts\": 6, \"age_seconds\": 176485.01, \"node\": \"kind-worker\"}, {\"name\": \"api-gateway-6cdc897dbd-wrb7v\", \"namespace\": \"rivulet\", \"status\": \"Running\", \"restarts\": 7, \"age_seconds\": 182658.01, \"node\": \"kin"
+        ]
+      },
+      {
+        "id": "H3",
+        "confidence": 0.1,
+        "status": "disproven",
+        "evidence": [
+          "Tool list_pods({\"namespace\": \"rivulet\", \"label_selector\": \"\"}) status=succeeded output={\"pods\": [{\"name\": \"api-gateway-6cdc897dbd-9vk4n\", \"namespace\": \"rivulet\", \"status\": \"Running\", \"restarts\": 6, \"age_seconds\": 176485.01, \"node\": \"kind-worker\"}, {\"name\": \"api-gateway-6cdc897dbd-wrb7v\", \"namespace\": \"rivulet\", \"status\": \"Running\", \"restarts\": 7, \"age_seconds\": 182658.01, \"node\": \"kin"
+        ]
+      }
+    ],
+    "proposed_actions": [],
+    "executed_actions": [],
+    "tokens_used": 10668,
+    "cost_usd": 0.0033410000000000002,
+    "wall_clock_seconds": 5.943259000778198,
+    "active_seconds": 5.943259000778198,
+    "backoff_seconds": 0.0,
+    "iterations": 3,
+    "requires_human_approval": false,
+    "approval_granted": null
+  },
+  "dataset": {
+    "alert_name": "HighCPUUtilization",
+    "service": "api-gateway",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "category": "cpu_saturation",
+    "baseline_mttr_seconds": 1800.0,
+    "ground_truth": {
+      "root_cause": "CPU saturation on api-gateway pods causing request queuing",
+      "expected_action": "scale_deployment",
+      "expected_action_tier": 2,
+      "debugging_skill": "Metrics correlation → horizontal scaling decision → HITL approval path"
+    },
+    "evaluation_criteria": {
+      "must_identify": "cpu",
+      "must_not_do": [
+        "restart_deployment",
+        "delete_pod"
+      ]
+    }
+  }
+}

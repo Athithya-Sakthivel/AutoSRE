@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
-set -eux
+set -Eeuo pipefail
 
-# Navigate to the directory containing this script (rivulet/frontend)
-cd "$(dirname "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
-docker build \
-  -t task-api-frontend-lockgen:local \
-  -f- . <<'EOF'
-FROM docker.io/library/node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43
-WORKDIR /app
-COPY package.json ./
-RUN npm install --package-lock-only
-EOF
+command -v node >/dev/null 2>&1 || {
+  echo "ERROR: node is required" >&2
+  exit 1
+}
 
-cid="$(docker create task-api-frontend-lockgen:local)"
-docker cp "$cid:/app/package-lock.json" ./package-lock.json
-docker rm "$cid"
+command -v npm >/dev/null 2>&1 || {
+  echo "ERROR: npm is required" >&2
+  exit 1
+}
 
-ls -lh package.json package-lock.json
+[[ -f package.json ]] || {
+  echo "ERROR: package.json not found" >&2
+  exit 1
+}
+
+rm -rf node_modules package-lock.json
+
+npm install
+
+echo "✓ Dependencies locked"

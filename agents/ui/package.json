@@ -1,7 +1,7 @@
 {
   "name": "autosre-ui",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "engines": {
     "node": "24.21.0",
@@ -31,10 +31,10 @@
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.1",
     "eslint": "10.11.0",
-    "prettier": "3.9.8",
+    "prettier": "3.9.9",
     "tailwindcss": "4.3.3",
     "typescript": "6.0.3",
     "typescript-eslint": "8.70.1",
-    "vite": "8.3.0"
+    "vite": "8.3.1"
   }
 }

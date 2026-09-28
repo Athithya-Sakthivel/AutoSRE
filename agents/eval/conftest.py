@@ -20,36 +20,38 @@ session against a live agent at ``AGENT_BASE_URL``.
 
 ## Session cache
 
-    The same incident is referenced by every test in a pytest session
-    (test_cost, test_mttr, test_rca_accuracy, test_safety). Without
-    caching, the agent is triggered 4+ times for one incident, burning
-    LLM quota and producing 4x the pod mutations.
+    A module-level ``_session_cache`` keyed by incident_id prevents the
+    same incident from being triggered multiple times across tests in
+    one pytest session. The cache is process-local and safe only for
+    sequential pytest runs.
 
-    A module-level ``_session_cache`` keyed by incident_id prevents this.
-    The cache is process-local and safe only for sequential pytest runs.
-    Do not run the eval under pytest-xdist without a shared store.
+## Chaos injection
 
-## Rate limits
-
-    ``_ALERTS_RATE_LIMIT`` on the agent is 10 requests / 60s per source
-    IP. The eval defaults to 8s between fresh triggers so a full 15-
-    incident run stays below the limit. If a 429 is received anyway, the
-    client backs off exponentially and retries; only after
-    ``_MAX_TRIGGER_RETRIES`` attempts is the incident skipped.
+    Each incident's trigger is executed by shelling out to
+    ``chaos/trigger.sh``, which reads the dataset and applies the
+    mechanism. Reset is called before each trigger to guarantee a known
+    baseline. Both are best-effort: if the chaos toolkit is missing or a
+    trigger fails, the eval still runs, but the incident observes a
+    healthy cluster and the agent correctly reports no_action.
 
 ## Judge
 
-    RCA tests use DeepEval with a Groq-backed LLM judge. The judge is
-    built lazily by a session-scoped fixture so import-time side effects
-    cannot break collection when deepeval is unavailable.
+    RCA tests use DeepEval with an LLM judge. The judge model's prefix
+    selects the LiteLLM adapter:
+
+        openai/<name>   OpenAI adapter, honors base_url override
+        groq/<name>     Native Groq adapter, reads GROQ_API_KEY
+
+    LiteLLM's Groq adapter mishandles model IDs whose model-name portion
+    contains a slash (issue #14807). Prefer slash-free Groq IDs such as
+    ``groq/allam-2-7b`` or ``groq/llama-3.3-70b-versatile``.
 
 ## Status semantics
 
     Terminal statuses: resolved, failed, no_action, blocked.
-    The eval waits for any terminal status. ``awaiting_approval`` is a
-    derived signal (state.status remains ``running`` while the graph is
-    paused on interrupt); the eval auto-approves unless disabled via
-    ``EVAL_AUTO_APPROVE=0``.
+    ``awaiting_approval`` is a derived signal (state.status remains
+    ``running`` while the graph is paused on interrupt); the eval
+    auto-approves unless disabled via ``EVAL_AUTO_APPROVE=0``.
 """
 
 from __future__ import annotations
@@ -61,6 +63,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -76,8 +79,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _EVAL_DIR = Path(__file__).parent
-DATASET_PATH = _EVAL_DIR / "dataset" / "AutoSRE-Dataset-v2.json"
+_AGENTS_DIR = _EVAL_DIR.parent
+DATASET_PATH = _EVAL_DIR / "dataset" / "AutoSRE-Dataset-v3.json"
 RESULTS_DIR = _EVAL_DIR / "results"
+CHAOS_TRIGGER = _AGENTS_DIR / "chaos" / "trigger.sh"
+CHAOS_RESET = _AGENTS_DIR / "chaos" / "reset.sh"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -86,35 +92,22 @@ RESULTS_DIR = _EVAL_DIR / "results"
 AGENT_BASE_URL = os.getenv("AGENT_BASE_URL", "http://localhost:8000")
 AGENT_WEBHOOK_SECRET = os.getenv("ALERT_WEBHOOK_SECRET", "test-secret")
 
-# Default delay between fresh triggers. Chosen so a 15-incident run stays
-# under the agent's 10/min inbound rate limit.
 _DEFAULT_DELAY_SECONDS = 8.0
-
-# Judge model configuration.
-GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-EVAL_JUDGE_MODEL = "openai/gpt-oss-20b"
-
-# Client timeout for trigger and polling. Must exceed the runner's
-# max_wall_clock_seconds (default 600) so a long-running investigation is
-# not killed by the client first.
 _CLIENT_TIMEOUT_SECONDS = 700.0
 
-# Retries on 429 from /alerts.
 _MAX_TRIGGER_RETRIES = 4
 _TRIGGER_RETRY_BASE_SECONDS = 10.0
 
-# Terminal statuses recognized by the client (mirrors state.py).
 _TERMINAL_STATUSES = frozenset({"resolved", "failed", "no_action", "blocked"})
 
-# Tools whose presence in executed_actions counts as a policy violation.
 _PROHIBITED_TOOLS = frozenset({"delete_namespace", "flush_all", "drop_table"})
+
+# Incidents that do not require chaos injection. They test webhook and
+# policy paths only.
+_NO_CHAOS_INCIDENTS = frozenset({"INC-010", "INC-011"})
 
 
 def _parse_delay_seconds() -> float:
-    """Parse EVAL_DELAY_SECONDS defensively.
-
-    A non-numeric value must not crash pytest collection.
-    """
     raw = os.getenv("EVAL_DELAY_SECONDS")
     if raw is None or not raw.strip():
         return _DEFAULT_DELAY_SECONDS
@@ -135,18 +128,18 @@ DELAY_BETWEEN_INCIDENTS = _parse_delay_seconds()
 FORCE_RERUN = os.getenv("EVAL_FORCE_RERUN", "0") == "1"
 AUTO_APPROVE = os.getenv("EVAL_AUTO_APPROVE", "1") != "0"
 
+# Whether to execute chaos triggers. Defaults to enabled when the chaos
+# toolkit exists on disk. Set EVAL_APPLY_CHAOS=0 to disable.
+_APPLY_CHAOS_DEFAULT = CHAOS_TRIGGER.is_file() and CHAOS_RESET.is_file()
+APPLY_CHAOS = os.getenv("EVAL_APPLY_CHAOS", "1" if _APPLY_CHAOS_DEFAULT else "0") == "1"
+
+
 # ---------------------------------------------------------------------------
 # Dataset loading
 # ---------------------------------------------------------------------------
 
 
 def _load_dataset() -> list[dict[str, Any]]:
-    """Load and validate the incident dataset.
-
-    Raises:
-        FileNotFoundError: Dataset file is missing.
-        ValueError: Dataset is malformed or contains duplicate IDs.
-    """
     if not DATASET_PATH.is_file():
         raise FileNotFoundError(f"Dataset not found at {DATASET_PATH}")
 
@@ -184,7 +177,6 @@ _dataset_cache: list[dict[str, Any]] | None = None
 
 
 def _get_dataset() -> list[dict[str, Any]]:
-    """Return the loaded dataset, loading it once on first call."""
     global _dataset_cache
     if _dataset_cache is None:
         _dataset_cache = _load_dataset()
@@ -192,16 +184,10 @@ def _get_dataset() -> list[dict[str, Any]]:
 
 
 def all_incident_ids() -> list[str]:
-    """Return every incident ID in the dataset, ignoring selection."""
     return [inc["id"] for inc in _get_dataset()]
 
 
 def incident_by_id(incident_id: str) -> dict[str, Any]:
-    """Return an incident from the dataset by its ID.
-
-    Raises:
-        KeyError: If the incident does not exist.
-    """
     for incident in _get_dataset():
         if incident["id"] == incident_id:
             return incident
@@ -227,7 +213,6 @@ def save_result(
     *,
     dataset_incident: dict[str, Any] | None = None,
 ) -> Path:
-    """Persist an incident result to disk. Idempotent."""
     result_dir = RESULTS_DIR / incident_id
     result_dir.mkdir(parents=True, exist_ok=True)
 
@@ -260,7 +245,6 @@ def save_result(
 
 
 def load_result(incident_id: str) -> dict[str, Any] | None:
-    """Load a saved result, or return None if missing or malformed."""
     result_file = _result_path(incident_id)
     if not result_file.is_file():
         return None
@@ -284,7 +268,6 @@ def load_result(incident_id: str) -> dict[str, Any] | None:
 
 
 def load_all_results() -> list[dict[str, Any]]:
-    """Load every saved result. Malformed files are skipped with a warning."""
     if not RESULTS_DIR.is_dir():
         return []
 
@@ -317,7 +300,6 @@ def load_all_results() -> list[dict[str, Any]]:
 
 
 def _selected_ids() -> list[str] | None:
-    """Parse EVAL_INCIDENT_IDS. Returns None for "all"."""
     raw = os.getenv("EVAL_INCIDENT_IDS", "").strip()
     if not raw:
         return None
@@ -326,17 +308,6 @@ def _selected_ids() -> list[str] | None:
 
 
 def _runnable_ids() -> list[str]:
-    """Determine which incident IDs to run this session.
-
-    Selection order:
-        1. EVAL_INCIDENT_IDS (or all)
-        2. Remove incidents with a disk result (unless FORCE_RERUN)
-
-    Raises:
-        RuntimeError: If every selected incident already has a result and
-            FORCE_RERUN is not set. Silent empty parametrization would make
-            pytest report "0 tests, pass" — a false green.
-    """
     selected = _selected_ids()
     all_ids = all_incident_ids()
 
@@ -373,39 +344,102 @@ def _runnable_ids() -> list[str]:
 
 
 def incident_ids() -> list[str]:
-    """Return incident IDs selected for this eval run."""
     return _runnable_ids()
 
 
 # ---------------------------------------------------------------------------
-# Session cache (prevents 12x re-trigger)
+# Session cache
 # ---------------------------------------------------------------------------
 
-# Module-level cache mapping incident_id -> result dict. Populated the
-# first time run_incident succeeds for an incident in this session.
-#
-# Process-local. Safe only for sequential pytest runs. Under pytest-xdist
-# each worker has its own cache, which is still correct but inefficient.
 _session_cache: dict[str, dict[str, Any]] = {}
 _session_cache_lock = threading.Lock()
 
 
 def _cache_get(incident_id: str) -> dict[str, Any] | None:
-    """Return the cached result, or None."""
     with _session_cache_lock:
         return _session_cache.get(incident_id)
 
 
 def _cache_put(incident_id: str, result: dict[str, Any]) -> None:
-    """Store the result in the session cache. Idempotent."""
     with _session_cache_lock:
         _session_cache[incident_id] = result
 
 
 def _cache_clear() -> None:
-    """Clear the session cache. Exposed for tests."""
     with _session_cache_lock:
         _session_cache.clear()
+
+
+# ---------------------------------------------------------------------------
+# Chaos injection
+# ---------------------------------------------------------------------------
+
+
+async def _run_chaos_script(script: Path, *args: str) -> bool:
+    """Execute a chaos script. Returns True on exit code 0.
+
+    Never raises: chaos failures are logged and return False so the eval
+    can continue against whatever state the cluster is in.
+    """
+    if not script.is_file():
+        logger.debug("Chaos script not found: %s", script)
+        return False
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "bash",
+            str(script),
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except Exception as exc:
+        logger.warning("Failed to spawn %s: %s", script, exc)
+        return False
+
+    stdout, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        logger.warning(
+            "Chaos script %s %s failed (exit %d): %s",
+            script.name,
+            " ".join(args),
+            proc.returncode,
+            stderr.decode("utf-8", errors="replace").strip(),
+        )
+        return False
+
+    output = stdout.decode("utf-8", errors="replace").strip()
+    if output:
+        for line in output.splitlines():
+            logger.info("chaos: %s", line)
+
+    return True
+
+
+async def _apply_chaos_trigger(incident: dict[str, Any]) -> None:
+    """Apply the incident's trigger. No-op for webhook-only incidents."""
+    if not APPLY_CHAOS:
+        return
+
+    incident_id = incident["id"]
+    if incident_id in _NO_CHAOS_INCIDENTS:
+        return
+
+    ok = await _run_chaos_script(CHAOS_TRIGGER, incident_id)
+    if not ok:
+        logger.warning(
+            "Chaos trigger for %s was not applied. The agent will "
+            "investigate a healthy cluster and may report no_action.",
+            incident_id,
+        )
+
+
+async def _reset_chaos() -> None:
+    """Return the cluster to baseline. Called before each trigger."""
+    if not APPLY_CHAOS:
+        return
+    await _run_chaos_script(CHAOS_RESET)
 
 
 # ---------------------------------------------------------------------------
@@ -413,14 +447,26 @@ def _cache_clear() -> None:
 # ---------------------------------------------------------------------------
 
 
-def compute_aggregate_metrics() -> dict[str, Any]:
-    """Compute aggregate metrics across all saved results.
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        numeric = float(value)
+    except TypeError, ValueError:
+        return default
+    return numeric if math.isfinite(numeric) else default
 
-    MTTR is computed from ``active_seconds`` when available (excludes
-    rate-limit backoff), falling back to ``wall_clock_seconds`` for
-    older results. ``mttr_reduction_pct`` compares the mean active time
-    against the mean baseline declared in the dataset block.
-    """
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except TypeError, ValueError:
+        return default
+
+
+def compute_aggregate_metrics() -> dict[str, Any]:
     results = load_all_results()
 
     if not results:
@@ -477,8 +523,6 @@ def compute_aggregate_metrics() -> dict[str, Any]:
         elif status == "blocked":
             blocked += 1
 
-        # active_seconds is the honest MTTR; fall back to wall for older
-        # results where only wall_clock was recorded.
         active = _safe_float(
             report.get("active_seconds"),
             _safe_float(report.get("wall_clock_seconds"), 0.0),
@@ -551,41 +595,11 @@ def compute_aggregate_metrics() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Value coercion helpers
-# ---------------------------------------------------------------------------
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    if value is None:
-        return default
-    try:
-        numeric = float(value)
-    except TypeError, ValueError:
-        return default
-    return numeric if math.isfinite(numeric) else default
-
-
-def _safe_int(value: Any, default: int = 0) -> int:
-    if value is None or isinstance(value, bool):
-        return default
-    try:
-        return int(value)
-    except TypeError, ValueError:
-        return default
-
-
-# ---------------------------------------------------------------------------
 # Incident context for the RCA judge
 # ---------------------------------------------------------------------------
 
 
 def build_incident_context(incident: dict[str, Any]) -> list[str]:
-    """Return structured context lines for the RCA judge.
-
-    Excludes ``ground_truth`` so the judge does not see the expected
-    answer. Includes ``category`` so the judge has the same classification
-    signal the agent received via labels.
-    """
     context: list[str] = []
 
     for field in (
@@ -608,34 +622,72 @@ def build_incident_context(incident: dict[str, Any]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Judge (lazy)
+# Judge
 # ---------------------------------------------------------------------------
+
+
+def _judge_config() -> tuple[str, str | None, str]:
+    """Return (model, base_url_or_None, api_key) for the DeepEval judge.
+
+    base_url is returned only for models that use the OpenAI adapter
+    (openai/<name>). For groq/<name>, LiteLLM uses its native Groq
+    endpoint and reads GROQ_API_KEY from the environment; passing
+    base_url alongside the Groq adapter would be ignored at best.
+    """
+    from autosre.config import get_settings
+
+    settings = get_settings()
+    judge = settings.eval
+
+    model = judge.judge_model or "groq/allam-2-7b"
+
+    key_secret = judge.judge_api_key or settings.llm.api_key
+    api_key = (
+        key_secret.get_secret_value()
+        if key_secret is not None
+        else os.getenv("AUTOSRE_LLM__API_KEY", "")
+    )
+
+    base_url: str | None = None
+    if model.startswith("openai/"):
+        base_url = judge.judge_base_url or settings.llm.base_url
+
+    return model, base_url, api_key
 
 
 def build_judge() -> Any:
     """Build a DeepEval LiteLLM judge. Returns None when unavailable.
 
-    Never raises: a missing API key or a missing ``deepeval`` install
-    disables RCA tests via the fixture guard, leaving the rest of the
-    suite unaffected.
+    Never raises. Missing API key or missing deepeval disables RCA tests
+    via the fixture guard, leaving the rest of the suite unaffected.
     """
-    api_key = os.getenv("LLM_API_KEY")
+    try:
+        model, base_url, api_key = _judge_config()
+    except Exception as exc:
+        logger.warning("Judge config unavailable: %s", exc)
+        return None
+
     if not api_key:
+        logger.warning("Judge disabled: no API key resolved")
         return None
 
     try:
         from deepeval.models import LiteLLMModel
-
-        return LiteLLMModel(
-            model=EVAL_JUDGE_MODEL,
-            api_key=api_key,
-            base_url=GROQ_BASE_URL,
-            temperature=0.0,
-            generation_kwargs={"max_completion_tokens": 1024},
-        )
     except ImportError:
         logger.warning("deepeval is not installed; RCA tests will skip")
         return None
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "api_key": api_key,
+        "temperature": 0.0,
+        "generation_kwargs": {"max_completion_tokens": 1024},
+    }
+    if base_url is not None:
+        kwargs["base_url"] = base_url
+
+    try:
+        return LiteLLMModel(**kwargs)
     except Exception as exc:
         logger.warning("Failed to build judge: %s", exc)
         return None
@@ -647,7 +699,6 @@ def build_judge() -> Any:
 
 
 def check_server_available() -> bool:
-    """Return True when the AutoSRE health endpoint responds 200."""
     try:
         response = httpx.get(
             f"{AGENT_BASE_URL.rstrip('/')}/healthz",
@@ -663,7 +714,6 @@ class RateLimitError(RuntimeError):
 
 
 def is_rate_limit_error(exc: BaseException) -> bool:
-    """Detect provider/client rate limits by walking the exception chain."""
     current: BaseException | None = exc
     seen: set[int] = set()
 
@@ -687,8 +737,107 @@ def is_rate_limit_error(exc: BaseException) -> bool:
     return False
 
 
+_RETRY_AFTER_RE = re.compile(
+    r"try again in ([\d.]+)s",
+    re.IGNORECASE,
+)
+
+
+def parse_retry_after(error_text: str) -> float | None:
+    """Extract the retry-after hint from a Groq 429 body.
+
+    Groq formats the message as "Please try again in X.Ys". Returns None
+    when the pattern is absent so callers fall back to their own backoff.
+    """
+    match = _RETRY_AFTER_RE.search(error_text)
+    if not match:
+        return None
+
+    try:
+        return float(match.group(1))
+    except TypeError, ValueError:
+        return None
+
+
+async def measure_metric_with_retry(
+    metric: Any,
+    test_case: Any,
+    *,
+    label: str = "judge",
+    max_attempts: int = 6,
+    base_delay: float = 3.0,
+    max_delay: float = 45.0,
+) -> float:
+    """Measure a DeepEval metric with exponential backoff on 429s.
+
+    Retries only on rate-limit errors. Any other exception propagates
+    immediately.
+
+    The delay between attempts is:
+        max(base_delay * 2**attempt, provider_hint + 1s)
+    capped at max_delay. The provider hint comes from Groq's
+    "Please try again in X.Ys" message when present.
+
+    Args:
+        metric: A DeepEval metric with an async ``a_measure`` method.
+        test_case: The DeepEval test case.
+        label: Human-readable identifier for logs.
+        max_attempts: Total attempts before raising RateLimitError.
+        base_delay: First backoff interval, in seconds.
+        max_delay: Upper bound on any single sleep, in seconds.
+
+    Returns:
+        The metric score as a finite float.
+
+    Raises:
+        RateLimitError: After max_attempts, so the caller can skip.
+        Exception: Any non-rate-limit error, propagated unchanged.
+    """
+    if max_attempts <= 0:
+        raise ValueError("max_attempts must be > 0")
+    if base_delay <= 0:
+        raise ValueError("base_delay must be > 0")
+    if max_delay <= 0:
+        raise ValueError("max_delay must be > 0")
+
+    last_error: BaseException | None = None
+
+    for attempt in range(max_attempts):
+        try:
+            score = await metric.a_measure(test_case)
+            numeric = float(score)
+            if not math.isfinite(numeric):
+                raise AssertionError(f"{label}: metric score must be finite, got {numeric}")
+            return numeric
+        except Exception as exc:
+            last_error = exc
+
+            if not is_rate_limit_error(exc):
+                raise
+
+            if attempt == max_attempts - 1:
+                break
+
+            exp_delay = base_delay * (2**attempt)
+            hint = parse_retry_after(str(exc))
+            delay = exp_delay if hint is None else max(exp_delay, hint + 1.0)
+            delay = min(delay, max_delay)
+
+            logger.warning(
+                "%s rate-limited (attempt %d/%d); waiting %.1fs",
+                label,
+                attempt + 1,
+                max_attempts,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+    assert last_error is not None
+    raise RateLimitError(f"{label} rate-limited after {max_attempts} attempts: {last_error}")
+
+
 # ---------------------------------------------------------------------------
-# Rate-limit delay between fresh triggers
+# Rate-limit delay
 # ---------------------------------------------------------------------------
 
 _last_trigger_time: float = 0.0
@@ -696,13 +845,6 @@ _last_trigger_lock = threading.Lock()
 
 
 async def _rate_limit_delay() -> None:
-    """Sleep between fresh triggers. No-op when called within the window.
-
-    Uses ``time.monotonic`` so wall-clock adjustments (NTP, DST) cannot
-    cause a negative interval. Uses a threading lock so it is safe under
-    pytest-xdist's per-worker event loops, though the module globals are
-    per-process and therefore not shared across workers.
-    """
     global _last_trigger_time
 
     if DELAY_BETWEEN_INCIDENTS <= 0:
@@ -743,12 +885,7 @@ class AgentClient:
         self.webhook_secret = webhook_secret
         self.timeout = timeout
 
-    # ------------------------------------------------------------------
-    # Signing and JSON helpers
-    # ------------------------------------------------------------------
-
     def _sign(self, payload: bytes) -> str:
-        """Return the ``sha256=<hex>`` signature header value."""
         digest = hmac.new(
             self.webhook_secret.encode("utf-8"),
             payload,
@@ -758,7 +895,6 @@ class AgentClient:
 
     @staticmethod
     def _json_object(response: httpx.Response) -> dict[str, Any]:
-        """Decode a response as a JSON object."""
         data = response.json()
         if not isinstance(data, dict):
             raise TypeError(f"Expected JSON object, got {type(data).__name__}")
@@ -773,7 +909,6 @@ class AgentClient:
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        """Send an HTTP request and require a JSON-object response."""
         request_timeout = self.timeout if timeout is None else timeout
         if request_timeout <= 0:
             raise TimeoutError("No request time remaining")
@@ -811,21 +946,7 @@ class AgentClient:
         response.raise_for_status()
         return self._json_object(response)
 
-    # ------------------------------------------------------------------
-    # Trigger
-    # ------------------------------------------------------------------
-
     async def trigger_incident(self, incident: dict[str, Any]) -> str:
-        """Trigger an incident via signed webhook and return the incident_id.
-
-        The alert payload includes:
-            labels["eval_id"]               for traceability
-            labels["category"]              for /metrics/summary aggregation
-            labels["baseline_mttr_seconds"] for MTTR reduction computation
-
-        Retries on 429 with exponential backoff, up to
-        ``_MAX_TRIGGER_RETRIES`` attempts. Any other error propagates.
-        """
         incident_id = incident["id"]
 
         description = (
@@ -835,7 +956,6 @@ class AgentClient:
             or ""
         )
 
-        # AlertPayload requires dict[str, str]; coerce everything.
         injected_context = incident.get("injected_context") or {}
         if not isinstance(injected_context, dict):
             injected_context = {"context": str(injected_context)}
@@ -911,26 +1031,17 @@ class AgentClient:
         assert last_error is not None
         raise last_error
 
-    # ------------------------------------------------------------------
-    # Status polling
-    # ------------------------------------------------------------------
-
     async def get_incident_status(
         self,
         incident_id: str,
         *,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        """Return the incident report."""
         return await self._request_json(
             "GET",
             f"/incidents/{incident_id}/report",
             timeout=timeout,
         )
-
-    # ------------------------------------------------------------------
-    # Approval
-    # ------------------------------------------------------------------
 
     async def approve_incident(
         self,
@@ -938,7 +1049,6 @@ class AgentClient:
         approved: bool,
         comment: str = "Auto-approved by eval harness",
     ) -> dict[str, Any]:
-        """Approve or reject an incident via the signed webhook."""
         payload = json.dumps(
             {"approved": approved, "comment": comment},
             ensure_ascii=False,
@@ -957,25 +1067,12 @@ class AgentClient:
             },
         )
 
-    # ------------------------------------------------------------------
-    # Wait for completion
-    # ------------------------------------------------------------------
-
     async def wait_for_completion(
         self,
         incident_id: str,
         poll_interval: float = 3.0,
         auto_approve: bool = AUTO_APPROVE,
     ) -> dict[str, Any]:
-        """Poll until the incident reaches a terminal status or times out.
-
-        Terminal statuses are resolved, failed, no_action, blocked.
-
-        Auto-approval fires once when the report shows
-        ``requires_human_approval=True`` and ``approval_granted is None``.
-        A second decision is not attempted because the runner returns
-        False for already-decided incidents.
-        """
         if poll_interval <= 0:
             raise ValueError("poll_interval must be greater than zero")
 
@@ -1000,7 +1097,6 @@ class AgentClient:
             requires_approval = bool(status.get("requires_human_approval", False))
             approval_granted = status.get("approval_granted")
 
-            # Either a terminal status or phase=="complete" ends the wait.
             if incident_status in _TERMINAL_STATUSES or phase == "complete":
                 return status
 
@@ -1032,7 +1128,7 @@ class AgentClient:
 
 
 # ---------------------------------------------------------------------------
-# Result validation helpers (used by every test file)
+# Result validation helpers
 # ---------------------------------------------------------------------------
 
 
@@ -1040,7 +1136,6 @@ def required_nonnegative_number(
     result: dict[str, Any],
     field: str,
 ) -> float:
-    """Return a required finite, non-negative float from a result dict."""
     if field not in result:
         raise AssertionError(f"Result is missing required field {field!r}")
 
@@ -1060,7 +1155,6 @@ def required_nonnegative_int(
     result: dict[str, Any],
     field: str,
 ) -> int:
-    """Return a required non-negative int from a result dict."""
     if field not in result:
         raise AssertionError(f"Result is missing required field {field!r}")
 
@@ -1081,7 +1175,6 @@ def required_list_of_dicts(
     result: dict[str, Any],
     field: str,
 ) -> list[dict[str, Any]]:
-    """Return a required list-of-dicts from a result dict."""
     if field not in result:
         raise AssertionError(f"Result is missing required field {field!r}")
 
@@ -1100,7 +1193,7 @@ def required_list_of_dicts(
 
 
 # ---------------------------------------------------------------------------
-# Incident runner with caching
+# Incident runner with caching and chaos
 # ---------------------------------------------------------------------------
 
 
@@ -1112,24 +1205,27 @@ async def run_incident(
 ) -> dict[str, Any]:
     """Trigger, wait, persist, and cache one incident's result.
 
-    Cache precedence:
-        1. Session cache (fastest; survives across tests in one process)
-        2. Disk cache (loaded into session cache on hit)
-        3. Fresh trigger + persist + cache
+    Order of operations:
+        1. Session cache
+        2. Disk cache (unless FORCE_RERUN)
+        3. Reset chaos to baseline
+        4. Apply the incident's chaos trigger
+        5. Rate-limit delay
+        6. Trigger the webhook
+        7. Poll for completion
+        8. Save result + populate session cache
 
-    The session cache is the fix for the 12x re-trigger bug: every test
-    that references the same incident reuses the first result instead of
-    launching a new investigation.
+    Chaos steps 3 and 4 are best-effort. If the toolkit is absent or a
+    trigger fails, the eval runs against the healthy cluster and the
+    agent will honestly report no_action.
     """
     incident_id = incident["id"]
 
-    # 1. Session cache.
     cached = _cache_get(incident_id)
     if cached is not None:
         logger.debug("Session cache hit for %s", incident_id)
         return cached
 
-    # 2. Disk cache (unless FORCE_RERUN).
     if not FORCE_RERUN:
         disk_entry = load_result(incident_id)
         if disk_entry is not None:
@@ -1139,7 +1235,8 @@ async def run_incident(
                 logger.debug("Disk cache hit for %s", incident_id)
                 return report
 
-    # 3. Fresh trigger.
+    await _reset_chaos()
+    await _apply_chaos_trigger(incident)
     await _rate_limit_delay()
 
     try:
@@ -1170,13 +1267,11 @@ async def run_incident(
 
 @pytest.fixture(scope="session")
 def dataset() -> list[dict[str, Any]]:
-    """The full incident dataset."""
     return _get_dataset()
 
 
 @pytest.fixture
 def agent_client() -> AgentClient:
-    """Agent HTTP client. Skips the test when the agent is unreachable."""
     if not check_server_available():
         pytest.skip(
             f"AutoSRE agent not available at {AGENT_BASE_URL}. "
@@ -1191,7 +1286,6 @@ def agent_client() -> AgentClient:
 
 @pytest.fixture(scope="session")
 def judge() -> Any:
-    """DeepEval judge, built once per session. None when unavailable."""
     return build_judge()
 
 
@@ -1204,12 +1298,6 @@ def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
-    """Skip eval tests when the agent is unreachable.
-
-    The eval/ directory contains tests that require a live agent. Rather
-    than fail every test with a connection error, mark them skipped with
-    a clear reason.
-    """
     if check_server_available():
         return
 
@@ -1231,8 +1319,6 @@ __all__ = [
     "AgentClient",
     "DATASET_PATH",
     "DELAY_BETWEEN_INCIDENTS",
-    "EVAL_JUDGE_MODEL",
-    "GROQ_BASE_URL",
     "RateLimitError",
     "RESULTS_DIR",
     "all_incident_ids",
@@ -1245,6 +1331,8 @@ __all__ = [
     "is_rate_limit_error",
     "load_all_results",
     "load_result",
+    "measure_metric_with_retry",
+    "parse_retry_after",
     "required_list_of_dicts",
     "required_nonnegative_int",
     "required_nonnegative_number",

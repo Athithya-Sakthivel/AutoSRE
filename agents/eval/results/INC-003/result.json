@@ -1,66 +1,43 @@
 {
   "incident_id": "INC-003",
-  "completed_at": "2026-09-26T07:23:16Z",
+  "completed_at": "2026-09-27T09:59:02Z",
   "result": {
-    "incident_id": "a74f9a91-eb52-4df2-a80a-9d0b603b84e6",
+    "incident_id": "5fd577ab-38f4-408f-911b-d1d3d062d9e5",
     "status": "no_action",
     "phase": "complete",
     "alert_name": "DatabaseConnectionPoolExhausted",
     "service": "api-gateway",
     "namespace": "rivulet",
     "severity": "sev1",
-    "started_at": "2026-09-26T07:23:09Z",
+    "started_at": "2026-09-27T09:58:55Z",
     "hypotheses": [
       {
+        "description": "Five idle-in-transaction connections are holding locks and not being released, causing connection pool exhaustion.",
+        "confidence": 0.1,
         "id": "H1",
-        "confidence": 0.8,
-        "status": "proposed"
+        "status": "contradicted",
+        "evidence": [
+          "Tool get_lock_waits({\"limit\": 25}) status=succeeded output={\"waits\": []}"
+        ]
       },
       {
+        "description": "A blocking transaction (PID 44821) is holding a long-running transaction, preventing other connections from being released and causing exhaustion.",
+        "confidence": 0.1,
         "id": "H2",
-        "confidence": 0.55,
-        "status": "proposed"
-      },
-      {
-        "id": "H3",
-        "confidence": 0.2,
-        "status": "proposed"
+        "status": "contradicted",
+        "evidence": [
+          "Tool get_lock_waits({\"limit\": 25}) status=succeeded output={\"waits\": []}"
+        ]
       }
     ],
-    "proposed_actions": [
-      {
-        "tool_name": "restart_deployment",
-        "tool_args": {
-          "namespace": "rivulet",
-          "name": "my-app",
-          "reason": "Restart deployment to recover from suspected pod failure and apply latest configuration."
-        },
-        "risk_tier": 1,
-        "rationale": "Targeted restart will roll out fresh pods, clearing transient issues and applying any new config changes.",
-        "requires_approval": false
-      }
-    ],
-    "executed_actions": [
-      {
-        "tool_name": "restart_deployment",
-        "tool_args": {
-          "namespace": "rivulet",
-          "name": "my-app",
-          "reason": "Restart deployment to recover from suspected pod failure and apply latest configuration."
-        },
-        "tool_call_id": "eeed7d05c7c943eeb61f4f2bbea36840",
-        "result": {},
-        "success": false,
-        "executed_at": "2026-09-26T07:23:13.089070Z",
-        "verification_passed": null
-      }
-    ],
-    "tokens_used": 8767,
-    "cost_usd": 0.003559,
-    "wall_clock_seconds": 7.18082332611084,
-    "active_seconds": 7.18082332611084,
+    "proposed_actions": [],
+    "executed_actions": [],
+    "tokens_used": 12077,
+    "cost_usd": 0.009664,
+    "wall_clock_seconds": 5.195308685302734,
+    "active_seconds": 5.195308685302734,
     "backoff_seconds": 0.0,
-    "iterations": 1,
+    "iterations": 3,
     "requires_human_approval": false,
     "approval_granted": null
   },

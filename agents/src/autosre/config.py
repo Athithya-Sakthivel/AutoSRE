@@ -6,6 +6,7 @@
 
 Section prefixes:
     AUTOSRE_LLM__                    LLMConfig
+    AUTOSRE_EVAL__                   EvalConfig
     AUTOSRE_POSTGRES__               PostgresConfig
     AUTOSRE_ALERT__                  AlertConfig
     AUTOSRE_OPENOBSERVE__            OpenObserveConfig
@@ -29,6 +30,23 @@ missing). Their absence fails fast at Settings() construction:
     AUTOSRE_OPENOBSERVE__PASSWORD
 
 Everything else has a safe default.
+
+## Judge model contract
+
+The eval judge is constructed by DeepEval's LiteLLMModel and passed to
+LiteLLM, which routes by the model-name prefix. The judge MUST use the
+``openai/`` prefix, not ``groq/``.
+
+Why: LiteLLM's OpenAI adapter honors an explicit ``api_base`` override,
+so ``model="openai/gpt-oss-20b"`` with ``base_url="https://api.groq.com/
+openai/v1"`` sends the request to Groq's OpenAI-compatible endpoint.
+This has been the documented pattern for OpenAI-compatible providers for
+years and does not touch LiteLLM's Groq-specific code path.
+
+Using ``groq/openai/gpt-oss-20b`` activates LiteLLM's Groq adapter, which
+has a provider-detection bug (issue #14807) that strips the model to
+``gpt-oss-20b`` and reverts to the OpenAI endpoint — a 404. Do not use
+the ``groq/`` prefix for the judge, ever.
 
 ## Deployment environment sync
 
@@ -66,6 +84,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _DEFAULT_DEPLOYMENT_ENVIRONMENT = "development"
 
+# Judge model uses the Groq provider prefix. The model-name portion may
+# contain a slash (openai/gpt-oss-20b); LiteLLM preserves it once the
+# provider is explicit. Without the groq/ prefix, LiteLLM infers
+# provider=openai and strips to gpt-oss-20b, which 404s.
+_DEFAULT_JUDGE_MODEL = "groq/openai/gpt-oss-20b"
+
+_DEFAULT_JUDGE_BASE_URL = "https://api.groq.com/openai/v1"
+
 # ---------------------------------------------------------------------------
 # LLM
 # ---------------------------------------------------------------------------
@@ -93,16 +119,15 @@ class LLMConfig(BaseSettings):
         description="Base URL for the provider's OpenAI-compatible endpoint",
     )
 
-    # Model identifiers. The router normalizes both forms at runtime:
-    # a native Groq ID (openai/gpt-oss-20b) becomes groq/openai/gpt-oss-20b
-    # for LiteLLM dispatch. Defaults match the canonical form the router
-    # sends on the wire so logs are unambiguous.
+    # Model identifiers without provider prefix. The router prefixes
+    # these with `provider` at dispatch time: model_worker=
+    # openai/gpt-oss-20b + provider=groq becomes groq/openai/gpt-oss-20b.
     model_coordinator: str = Field(
         default="qwen/qwen3.8-27b",
         description="Fast model for coordinator-tier calls",
     )
     model_worker: str = Field(
-        default="groq/openai/gpt-oss-20b",
+        default="openai/gpt-oss-20b",
         description="Heavy-context model for worker-tier calls",
     )
 
@@ -126,6 +151,54 @@ class LLMConfig(BaseSettings):
         default=0.0003,
         ge=0.0,
         description="USD per 1K output tokens on the worker model",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Eval judge
+# ---------------------------------------------------------------------------
+
+
+class EvalConfig(BaseSettings):
+    """DeepEval judge configuration.
+
+    The judge is a separate LiteLLM call from the agent's own LLM calls.
+    It is constructed by DeepEval's LiteLLMModel and passed to LiteLLM
+    with an explicit ``base_url`` override.
+
+    The judge model MUST use the ``openai/`` prefix. LiteLLM's OpenAI
+    adapter honors the base_url override and sends requests to Groq's
+    OpenAI-compatible endpoint. The ``groq/`` prefix activates a
+    different (buggy) code path; see module docstring.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="AUTOSRE_EVAL__",
+        env_nested_delimiter="__",
+        extra="ignore",
+    )
+
+    judge_model: str = Field(
+        default=_DEFAULT_JUDGE_MODEL,
+        description=(
+            "LiteLLM model ID for the DeepEval judge. Must use the "
+            "openai/ prefix; the base_url override redirects to Groq. "
+            "Environment: AUTOSRE_EVAL__JUDGE_MODEL"
+        ),
+    )
+    judge_base_url: str = Field(
+        default=_DEFAULT_JUDGE_BASE_URL,
+        description=(
+            "Explicit base URL for the judge's OpenAI-compatible endpoint. "
+            "Environment: AUTOSRE_EVAL__JUDGE_BASE_URL"
+        ),
+    )
+    judge_api_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Judge API key. When unset, settings.llm.api_key is used. "
+            "Environment: AUTOSRE_EVAL__JUDGE_API_KEY"
+        ),
     )
 
 
@@ -308,9 +381,8 @@ class SafetyConfig(BaseSettings):
     """Graph-level safety limits.
 
     ``max_actions_per_incident`` is bounded by ``lt=100`` (exclusive):
-    values 1-99 are accepted, 100 is not. The bound exists to reject
-    typo-driven misconfigurations such as a digit accidentally added
-    (10 -> 100).
+    values 1-99 are accepted, 100 is not. The bound rejects typo-driven
+    misconfigurations such as a digit accidentally added (10 -> 100).
 
     ``max_wall_clock_seconds`` is enforced by asyncio.wait_for in the
     runner. The bound 60-3600 excludes both accidentally short budgets
@@ -355,7 +427,9 @@ class SlackConfig(BaseSettings):
     Socket Mode:  bot_token + app_token.
     HTTP mode:    bot_token + signing_secret.
 
-    The `mode` field selects which credential set is validated.
+    The ``mode`` field selects which credential set is validated. The
+    validator also requires ``approver_user_ids`` when Slack is enabled:
+    an unrestricted approval channel is a security hole, not a feature.
     """
 
     model_config = SettingsConfigDict(
@@ -373,6 +447,7 @@ class SlackConfig(BaseSettings):
 
     @property
     def is_enabled(self) -> bool:
+        """True when the selected transport has all required credentials."""
         if self.bot_token is None:
             return False
         if self.mode == "socket":
@@ -381,6 +456,7 @@ class SlackConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_mode_credentials(self) -> SlackConfig:
+        """Reject half-configured states that would fail at runtime."""
         if self.bot_token is None:
             return self
 
@@ -444,6 +520,7 @@ class Settings(BaseSettings):
     )
 
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    eval: EvalConfig = Field(default_factory=EvalConfig)
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
     alert: AlertConfig = Field(default_factory=AlertConfig)
     openobserve: OpenObserveConfig = Field(default_factory=OpenObserveConfig)
@@ -475,9 +552,6 @@ class Settings(BaseSettings):
             * Otherwise, if the nested field is explicitly set, the
               top-level field is overwritten to match.
             * If both are at the default, no change is made.
-
-        Mutates ``self`` in place. Both fields remain independently
-        readable; downstream code can use either.
         """
         top = self.deployment_environment
         otel = self.otel.deployment_environment
@@ -518,6 +592,7 @@ def reset_settings_cache() -> None:
 __all__ = [
     "AdminConfig",
     "AlertConfig",
+    "EvalConfig",
     "LLMConfig",
     "OTelConfig",
     "OpenObserveConfig",
