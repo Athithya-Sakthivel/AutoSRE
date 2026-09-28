@@ -35,8 +35,11 @@ Three independent limits bound the investigation:
                          confidence is below MIN_CONFIDENCE_FOR_ACTION.
 
     stagnation_count     Consecutive hypothesize rounds without progress.
-                         At STAGNATION_LIMIT, hypothesize_node exits with
-                         status=no_action.
+                         At STAGNATION_LIMIT, hypothesize_node exits
+                         UNLESS confidence has climbed to the action
+                         floor; in that case it proceeds to propose.
+                         The floor check is what prevents aborting an
+                         actionable investigation on slow progress.
 
     action_attempts      Total remediation executions across retries.
                          Capped at MAX_ACTION_ATTEMPTS in execute_node and
@@ -48,7 +51,8 @@ Three independent limits bound the investigation:
     resolved      At least one executed action was verified successful.
     failed        Terminated on an error path.
     no_action     Declined to act. Low confidence, budget exhausted,
-                  stagnation, duplicate action, or unknown tool.
+                  stagnation with sub-floor confidence, duplicate action,
+                  or unknown tool.
     blocked       Policy rejected the only viable action.
 
 ## HITL contract (approve_node)
@@ -119,22 +123,18 @@ logger = logging.getLogger(__name__)
 # Private constants
 # ---------------------------------------------------------------------------
 
-# Groq-compatible response format. Only sent on nodes whose prompts do not
-# embed heavily-escaped tool output.
 _JSON_FORMAT = {"type": "json_object"}
 
-# Namespace allowlist mirrors PolicyEngine's default. Kept local because
-# this module does not import the policy engine.
 _ALLOWED_NAMESPACES = frozenset({"rivulet", "sre"})
 
 
 # ---------------------------------------------------------------------------
-# Config extraction helpers
+# Config extraction
 # ---------------------------------------------------------------------------
 
 
 def _get_run_metrics(config: RunnableConfig) -> RunMetrics | None:
-    """Return the per-incident RunMetrics, or None if not present (tests)."""
+    """Return the per-incident RunMetrics, or None if not present."""
     configurable = config.get("configurable")
     if not isinstance(configurable, dict):
         return None
@@ -152,10 +152,7 @@ def _require_sre_context(config: RunnableConfig) -> SREContext | None:
 
 
 def _incident_metadata(state: AgentState) -> IncidentMetadata:
-    """Return the incident metadata, defaulting to an empty dict.
-
-    Never returns None. Callers use ``metadata.get(key, default)``.
-    """
+    """Return the incident metadata, defaulting to an empty dict."""
     md = state.get("incident_metadata")
     if isinstance(md, dict):
         return md
@@ -169,7 +166,7 @@ def _llm_config(graph_context: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Value normalization helpers
+# Value normalization
 # ---------------------------------------------------------------------------
 
 
@@ -187,10 +184,9 @@ def _clamp_namespace(
 ) -> dict[str, Any]:
     """Force tool_args['namespace'] to the incident's namespace.
 
-    Overrides hallucinated namespaces (service name, ``default``,
-    ``production``) that would otherwise waste an investigation round on
-    a policy rejection. The policy layer still rejects anything outside
-    the allowlist.
+    Overrides hallucinated namespaces that would waste an investigation
+    round on a policy rejection. The policy layer still rejects anything
+    outside the allowlist.
     """
     if incident_ns is None:
         return tool_args
@@ -227,8 +223,8 @@ def _build_proposed_action(
 def _coerce_dict_list(value: Any) -> list[dict[str, Any]]:
     """Return a list of dicts from any value; non-dicts are dropped.
 
-    Used for state reads where the field's runtime shape is
-    ``list[dict]`` but the static type is ``object`` (or ``Any``).
+    Used for state reads where the runtime shape is ``list[dict]`` but
+    the static type is ``object`` or ``Any``. Never raises.
     """
     if not isinstance(value, list):
         return []
@@ -236,7 +232,7 @@ def _coerce_dict_list(value: Any) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Usage and cost accumulation
+# Usage and cost
 # ---------------------------------------------------------------------------
 
 
@@ -293,12 +289,7 @@ async def triage_node(
     state: AgentState,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """Generate 2-3 initial hypotheses from alert metadata.
-
-    Uses response_format=json_object because the prompt is short.
-    Falls back to a single generic hypothesis on any error so the
-    investigation proceeds.
-    """
+    """Generate 2-3 initial hypotheses from alert metadata."""
     graph_context = get_graph_context(config)
     llm_router = graph_context.llm_router
     llm_config = _llm_config(graph_context)
@@ -393,11 +384,7 @@ def _normalize_hypotheses_safe(
     raw: Any,
     fallback: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Normalize hypotheses without raising.
-
-    Returns a list of well-formed Hypothesis dicts. On any validation
-    failure, returns the fallback list (deep-copied).
-    """
+    """Normalize hypotheses without raising."""
     from autosre.core.graph_helpers import normalize_hypotheses
 
     try:
@@ -406,10 +393,7 @@ def _normalize_hypotheses_safe(
         logger.warning("Hypothesis normalization failed (%s); using fallback", exc)
         return [dict(h) for h in fallback]
 
-    result: list[dict[str, Any]] = []
-    for h in normalized:
-        result.append(dict(h))
-    return result
+    return [dict(h) for h in normalized]
 
 
 # ---------------------------------------------------------------------------
@@ -421,14 +405,7 @@ async def investigate_node(
     state: AgentState,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """Select and execute one read-only diagnostic tool.
-
-    Decrements iteration_budget on entry (even on early exits) so a
-    misbehaving LLM cannot consume infinite rounds.
-
-    Skips response_format because the prompt embeds prior tool outputs
-    whose escaping breaks Groq's strict JSON validator.
-    """
+    """Select and execute one read-only diagnostic tool."""
     graph_context = get_graph_context(config)
     llm_router = graph_context.llm_router
     executor = graph_context.executor
@@ -440,20 +417,17 @@ async def investigate_node(
     iteration_count = int(state.get("iteration_count", 0) or 0)
     iteration_budget = int(state.get("iteration_budget", 0) or 0)
     executed_actions = _coerce_dict_list(state.get("executed_actions"))
-    incident_ns = _incident_metadata(state).get("namespace")
-    incident_ns = str(incident_ns) if isinstance(incident_ns, str) else None
+    incident_ns_raw = _incident_metadata(state).get("namespace")
+    incident_ns = str(incident_ns_raw) if isinstance(incident_ns_raw, str) else None
 
-    # Guard 1: budget exhausted.
     if iteration_budget <= 0:
         logger.info("Investigation budget exhausted")
         return {"current_phase": PHASE_HYPOTHESIZE}
 
-    # Guard 2: no hypotheses.
     if not hypotheses:
         logger.warning("No hypotheses to investigate")
         return {"current_phase": PHASE_COMPLETE, "status": "failed"}
 
-    # Guard 3: sre_context is mandatory.
     if sre_context is None:
         logger.error("investigate_node: sre_context missing from config")
         return {
@@ -464,7 +438,6 @@ async def investigate_node(
 
     registry = graph_context.registry
 
-    # Only Tier-0 (read-only) tools are eligible.
     read_only_tools = [
         tool for tool in registry.list_tools() if int(tool.risk_tier) == int(RiskTier.OBSERVE)
     ]
@@ -478,7 +451,6 @@ async def investigate_node(
         for tool in read_only_tools
     ]
 
-    # Build the last three prior tool outputs as evidence context.
     previous_outputs: list[str] = []
     for action in executed_actions[-3:]:
         prior_result = action.get("result", {})
@@ -605,10 +577,7 @@ Rules:
 
     except LLMBudgetExhaustedError:
         logger.error("LLM budget exhausted during investigation")
-        return {
-            "current_phase": PHASE_COMPLETE,
-            "status": "failed",
-        }
+        return {"current_phase": PHASE_COMPLETE, "status": "failed"}
 
     except Exception as exc:
         logger.error("Investigate node failed: %s", exc, exc_info=True)
@@ -630,13 +599,20 @@ async def hypothesize_node(
 ) -> dict[str, Any]:
     """Refine hypothesis confidence and decide the next phase.
 
-    Decision tree, in order:
+    Decision tree, evaluated in order:
+
         1. No hypotheses       -> complete / failed
         2. Confidence high     -> propose
-        3. Budget exhausted    -> propose if confidence >= floor, else
-                                  complete / no_action
-        4. Stagnation limit    -> complete / no_action
+        3. Budget exhausted    -> propose if confidence >= action floor,
+                                  else complete / no_action
+        4. Stagnation limit    -> propose if confidence >= action floor,
+                                  else complete / no_action
         5. Otherwise           -> investigate
+
+    The action-floor check at steps 3 and 4 is what prevents aborting an
+    investigation whose confidence has climbed to the actionable threshold
+    but not yet to the high-confidence threshold. Without it, slow but
+    real progress is indistinguishable from no progress.
     """
     graph_context = get_graph_context(config)
     llm_router = graph_context.llm_router
@@ -655,6 +631,9 @@ async def hypothesize_node(
     best_before = top_hypothesis(hypotheses)
     current_confidence = float(best_before.get("confidence", 0.0) or 0.0) if best_before else 0.0
 
+    # -----------------------------------------------------------------
+    # Step 2 — high confidence short-circuit.
+    # -----------------------------------------------------------------
     if current_confidence >= HIGH_CONFIDENCE_THRESHOLD:
         logger.info(
             "Confidence %.2f >= threshold %.2f; proceeding to propose",
@@ -666,19 +645,25 @@ async def hypothesize_node(
             "last_top_confidence": current_confidence,
         }
 
+    # -----------------------------------------------------------------
+    # Step 3 — budget exhausted. Propose if actionable, else no_action.
+    # -----------------------------------------------------------------
     if iteration_budget <= 0:
         if current_confidence >= MIN_CONFIDENCE_FOR_ACTION:
             logger.info(
-                "Budget exhausted at confidence %.2f; proceeding to propose",
+                "Budget exhausted at confidence %.2f >= %.2f; proceeding to propose",
                 current_confidence,
+                MIN_CONFIDENCE_FOR_ACTION,
             )
             return {
                 "current_phase": PHASE_PROPOSE,
                 "last_top_confidence": current_confidence,
             }
+
         logger.info(
-            "Budget exhausted at confidence %.2f; completing with no_action",
+            "Budget exhausted at confidence %.2f < %.2f; completing with no_action",
             current_confidence,
+            MIN_CONFIDENCE_FOR_ACTION,
         )
         return {
             "current_phase": PHASE_COMPLETE,
@@ -744,6 +729,9 @@ Current hypotheses:
             STAGNATION_LIMIT,
         )
 
+        # -------------------------------------------------------------
+        # Post-refinement step 2 — high confidence.
+        # -------------------------------------------------------------
         if new_confidence >= HIGH_CONFIDENCE_THRESHOLD:
             return {
                 "hypotheses": refined,
@@ -753,10 +741,33 @@ Current hypotheses:
                 **usage_update,
             }
 
+        # -------------------------------------------------------------
+        # Post-refinement step 4 — stagnation.
+        #
+        # Critical fix: the floor check runs BEFORE the no_action branch.
+        # A hypothesis that has climbed to MIN_CONFIDENCE_FOR_ACTION is
+        # actionable even if progress was slow. Returning no_action at
+        # this point discards a legitimate investigation.
+        # -------------------------------------------------------------
         if new_stagnation >= STAGNATION_LIMIT:
+            if new_confidence >= MIN_CONFIDENCE_FOR_ACTION:
+                logger.info(
+                    "Stagnation limit reached but confidence %.2f >= %.2f; proceeding to propose",
+                    new_confidence,
+                    MIN_CONFIDENCE_FOR_ACTION,
+                )
+                return {
+                    "hypotheses": refined,
+                    "current_phase": PHASE_PROPOSE,
+                    "last_top_confidence": new_confidence,
+                    "stagnation_count": new_stagnation,
+                    **usage_update,
+                }
+
             logger.info(
-                "Stagnation limit reached at confidence %.2f; completing with no_action",
+                "Stagnation limit reached at confidence %.2f < %.2f; completing with no_action",
                 new_confidence,
+                MIN_CONFIDENCE_FOR_ACTION,
             )
             return {
                 "hypotheses": refined,
@@ -777,10 +788,7 @@ Current hypotheses:
 
     except LLMBudgetExhaustedError:
         logger.error("LLM budget exhausted during hypothesis refinement")
-        return {
-            "current_phase": PHASE_COMPLETE,
-            "status": "failed",
-        }
+        return {"current_phase": PHASE_COMPLETE, "status": "failed"}
 
     except Exception as exc:
         logger.error("Hypothesize node failed: %s", exc, exc_info=True)
@@ -800,16 +808,7 @@ async def propose_node(
     state: AgentState,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """Select a remediation action based on the top hypothesis.
-
-    Enforces three guards before proposing:
-        1. action_attempts < MAX_ACTION_ATTEMPTS
-        2. top confidence >= MIN_CONFIDENCE_FOR_ACTION
-        3. proposed tool is not a duplicate mutation
-
-    Returns status=no_action when the confidence guard fires, so the
-    incident is not falsely marked resolved.
-    """
+    """Select a remediation action based on the top hypothesis."""
     graph_context = get_graph_context(config)
     llm_router = graph_context.llm_router
     llm_config = _llm_config(graph_context)
@@ -818,8 +817,8 @@ async def propose_node(
     hypotheses = _coerce_dict_list(state.get("hypotheses"))
     executed_actions = _coerce_dict_list(state.get("executed_actions"))
     action_attempts = int(state.get("action_attempts", 0) or 0)
-    incident_ns = _incident_metadata(state).get("namespace")
-    incident_ns = str(incident_ns) if isinstance(incident_ns, str) else None
+    incident_ns_raw = _incident_metadata(state).get("namespace")
+    incident_ns = str(incident_ns_raw) if isinstance(incident_ns_raw, str) else None
 
     if action_attempts >= MAX_ACTION_ATTEMPTS:
         logger.info(
@@ -1007,7 +1006,7 @@ Executed actions (DO NOT REPEAT THESE):
 
 
 # ---------------------------------------------------------------------------
-# Node 5 — approve (HITL gate)
+# Node 5 — approve
 # ---------------------------------------------------------------------------
 
 
@@ -1015,13 +1014,7 @@ async def approve_node(
     state: AgentState,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """Pause for human approval of Tier-2+ actions.
-
-    Uses LangGraph's interrupt() to suspend execution. Everything above
-    the interrupt() call must be side-effect free, because it re-executes
-    on resume. All code below interrupt() runs once, after the resume
-    payload has been delivered.
-    """
+    """Pause for human approval of Tier-2+ actions."""
     from langgraph.types import interrupt
 
     proposed_actions = _coerce_dict_list(state.get("proposed_actions"))
@@ -1089,12 +1082,7 @@ async def execute_node(
     state: AgentState,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """Dispatch the last proposed action through the SafeExecutor.
-
-    Enforces the MAX_ACTION_ATTEMPTS cap before dispatch so a replay or
-    retry cannot exceed the configured mutation budget. Increments
-    action_attempts on every successful dispatch.
-    """
+    """Dispatch the last proposed action through the SafeExecutor."""
     graph_context = get_graph_context(config)
     executor = graph_context.executor
     sre_context = _require_sre_context(config)
@@ -1102,8 +1090,8 @@ async def execute_node(
     proposed_actions = _coerce_dict_list(state.get("proposed_actions"))
     executed_actions = _coerce_dict_list(state.get("executed_actions"))
     action_attempts = int(state.get("action_attempts", 0) or 0)
-    incident_id = _incident_metadata(state).get("incident_id")
-    incident_id = str(incident_id) if isinstance(incident_id, str) else None
+    incident_id_raw = _incident_metadata(state).get("incident_id")
+    incident_id = str(incident_id_raw) if isinstance(incident_id_raw, str) else None
 
     if not proposed_actions:
         logger.warning("execute_node called with no proposed actions")
@@ -1176,17 +1164,7 @@ async def verify_node(
     state: AgentState,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """Check whether the last executed action resolved the incident.
-
-    Rules:
-        success=True and verification_passed=True   -> resolved
-        success=True and verification_passed=None   -> Tier-1 implied
-                                                       verification
-        success=True and verification_passed=False  -> retry or fail
-        success=False                               -> retry or fail
-
-    Retry is allowed only when action_attempts < MAX_ACTION_ATTEMPTS.
-    """
+    """Check whether the last executed action resolved the incident."""
     graph_context = get_graph_context(config)
     registry = graph_context.registry
 
@@ -1240,20 +1218,7 @@ async def complete_node(
     state: AgentState,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """Terminal node: compute final timing and derive the terminal status.
-
-    Timing:
-        wall_clock_seconds = time.time() - started_at
-        backoff_seconds    = max(state.backoff_seconds, run_metrics.backoff)
-        active_seconds     = max(0, wall_clock - backoff)
-
-    Status rules:
-        Preserve any status already set to a terminal value.
-        If running and executed_actions is empty  -> no_action
-        If running and any executed action
-        has success=True                          -> resolved
-        Otherwise                                 -> failed
-    """
+    """Terminal node: compute final timing and derive the terminal status."""
     started_at = float(state.get("started_at", 0.0) or 0.0)
 
     if started_at > 0:
@@ -1330,16 +1295,13 @@ _TERMINAL_STATUSES: frozenset[str] = frozenset({"failed", "no_action", "blocked"
 
 
 def route_initial_phase(state: AgentState) -> str:
-    """Return the phase to start (or resume) from."""
     phase = state.get("current_phase", PHASE_TRIAGE)
     return phase if phase in _ALL_PHASES else PHASE_TRIAGE
 
 
 def route_after_hypothesize(state: AgentState) -> str:
-    """Route after hypothesize_node."""
     if state.get("status") in _TERMINAL_STATUSES:
         return PHASE_COMPLETE
-
     phase = state.get("current_phase", PHASE_COMPLETE)
     if phase in (PHASE_INVESTIGATE, PHASE_PROPOSE, PHASE_COMPLETE):
         return phase
@@ -1347,10 +1309,8 @@ def route_after_hypothesize(state: AgentState) -> str:
 
 
 def route_after_propose(state: AgentState) -> str:
-    """Route after propose_node."""
     if state.get("status") in _TERMINAL_STATUSES:
         return PHASE_COMPLETE
-
     phase = state.get("current_phase", PHASE_COMPLETE)
     if phase in (PHASE_APPROVE, PHASE_EXECUTE, PHASE_COMPLETE):
         return phase
@@ -1358,7 +1318,6 @@ def route_after_propose(state: AgentState) -> str:
 
 
 def route_after_approval(state: AgentState) -> str:
-    """Route after approve_node."""
     phase = state.get("current_phase", PHASE_COMPLETE)
     if phase in (PHASE_EXECUTE, PHASE_COMPLETE):
         return phase
@@ -1366,10 +1325,8 @@ def route_after_approval(state: AgentState) -> str:
 
 
 def route_after_verify(state: AgentState) -> str:
-    """Route after verify_node."""
     if state.get("status") in _TERMINAL_STATUSES:
         return PHASE_COMPLETE
-
     phase = state.get("current_phase", PHASE_COMPLETE)
     if phase in (PHASE_PROPOSE, PHASE_COMPLETE):
         return phase

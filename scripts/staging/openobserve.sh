@@ -1,38 +1,28 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# openobserve.sh — OpenObserve lifecycle for AutoSRE
+# AutoSRE — OpenObserve lifecycle
 #
-# Subcommands:
-#   deploy     Deploy/upgrade OpenObserve, then ensure required streams exist.
-#   render     Render values and Helm output; keep work directory.
-#   delete     Remove Helm release; retain PVC and data.
-#   purge      Remove Helm release and PVC (destructive, requires approval).
-#   status     Show current state.
-#   verify     Health, auth, SSRF, and required-stream checks.
-#   logs       Tail OpenObserve pod logs.
-#   rollout    Restart the deployment.
+# Design goals
+# ------------
+# 1. OpenObserve is deployed by Helm.
+# 2. OpenObserve streams are created by FIRST REAL INGESTION, not by creating
+#    empty streams ahead of time. This prevents the empty-stream / missing-schema
+#    race that caused SearchFieldNotFound (20004).
+# 3. This script waits until the required streams exist, contain data, and have
+#    the fields required by the alerting contract.
+# 4. Stream settings are reconciled through the documented /settings API.
+# 5. Terraform/OpenTofu owns alert resources only. Streams never enter TF state.
 #
-# Design
-# ------
-# - Local disk storage only. Single node is sufficient for agent telemetry.
-# - No S3/Azure configuration.
-# - No image pull secret.
-# - openobserve-auth Secret must already exist.
-# - OpenObserve SSRF guard is skipped by default so alert destinations can
-#   target in-cluster Kubernetes services.
-# - REQUIRED STREAMS ARE MANAGED HERE, NOT BY TERRAFORM.
+# Required deployment order
+# -------------------------
+#   1. bash scripts/staging/openobserve.sh deploy
+#   2. deploy/update the OTel gateway so its logs pipeline is routing to the
+#      named OpenObserve streams.
+#   3. bash infra/terraform/run.sh --apply
 #
-# One-shot staging flow:
-#
-#   bash scripts/staging/openobserve.sh deploy
-#   bash infra/terraform/run.sh --apply
-#
-# `deploy` guarantees these streams exist before Terraform creates alerts:
-#
-#   app_logs        logs
-#   postgres_logs   logs
-#   valkey_logs     logs
-#   app_metrics     metrics
+# If O2_WAIT_FOR_INGESTION=true (default), step 1 intentionally fails until
+# the required telemetry is actually arriving. That is a feature: it prevents
+# alert resources from being created against empty streams.
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -47,10 +37,14 @@ O2_NAMESPACE="${O2_NAMESPACE:-openobserve}"
 O2_RELEASE="${O2_RELEASE:-openobserve}"
 O2_CHART_PATH="${O2_CHART_PATH:-infra/k8s/open-observe-minimal}"
 
-O2_IMAGE_REGISTRY="${O2_IMAGE_REGISTRY:-ghcr.io}"
-O2_IMAGE_REPOSITORY="${O2_IMAGE_REPOSITORY:-athithya-sakthivel/openobserve}"
-O2_IMAGE_TAG="${O2_IMAGE_TAG:-v0.92.2}"
-O2_IMAGE_DIGEST="${O2_IMAGE_DIGEST:-sha256:88fb692ac791d3eaff69653a4a4686f1c7eceb9e105491d58d29ac2739560b3b}"
+# Official OSS image location documented by OpenObserve.
+O2_IMAGE_REGISTRY="${O2_IMAGE_REGISTRY:-public.ecr.aws}"
+O2_IMAGE_REPOSITORY="${O2_IMAGE_REPOSITORY:-zinclabs/openobserve}"
+O2_IMAGE_TAG="${O2_IMAGE_TAG:-v1.0.4}"
+# Supply the release digest in production to make the image immutable.
+# Example: sha256:<64 hex chars>
+O2_IMAGE_DIGEST="${O2_IMAGE_DIGEST:-}"
+O2_REQUIRE_IMAGE_DIGEST="${O2_REQUIRE_IMAGE_DIGEST:-false}"
 O2_ALLOW_IMAGE_CHANGE="${O2_ALLOW_IMAGE_CHANGE:-false}"
 
 O2_AUTH_SECRET="${O2_AUTH_SECRET:-openobserve-auth}"
@@ -75,29 +69,46 @@ O2_COMPACT_MAX_FILE_SIZE="${O2_COMPACT_MAX_FILE_SIZE:-256}"
 
 O2_TERMINATION_GRACE="${O2_TERMINATION_GRACE:-120}"
 O2_PRESTOP_SLEEP="${O2_PRESTOP_SLEEP:-10}"
-
-# Correct OpenObserve SSRF setting.
 O2_SKIP_SSRF_CHECKS="${O2_SKIP_SSRF_CHECKS:-true}"
 
-# Local verification/stream-management port.
 O2_VERIFY_LOCAL_PORT="${O2_VERIFY_LOCAL_PORT:-15080}"
-
-# How long to wait for OpenObserve to clear a stale "being deleted" stream.
-O2_STREAM_DELETE_TIMEOUT="${O2_STREAM_DELETE_TIMEOUT:-180}"
+O2_WAIT_FOR_INGESTION="${O2_WAIT_FOR_INGESTION:-false}"
+O2_STREAM_READY_TIMEOUT="${O2_STREAM_READY_TIMEOUT:-300}"
 O2_STREAM_RETRY_INTERVAL="${O2_STREAM_RETRY_INTERVAL:-5}"
 
-HELM_TIMEOUT="${HELM_TIMEOUT:-120s}"
-READY_TIMEOUT="${READY_TIMEOUT:-180}"
+HELM_TIMEOUT="${HELM_TIMEOUT:-180s}"
+READY_TIMEOUT="${READY_TIMEOUT:-240}"
 
 # ------------------------------------------------------------------------------
-# Required streams
+# Required telemetry contract
 # ------------------------------------------------------------------------------
+# These are the fields consumed by the current alert SQL. Keep this list in
+# sync with the Terraform alert definitions. The important rule is that every
+# field used by an alert must exist before Terraform is allowed to create it.
 
-REQUIRED_STREAMS=(
-  "app_logs:logs"
-  "postgres_logs:logs"
-  "valkey_logs:logs"
-  "app_metrics:metrics"
+REQUIRED_STREAMS=(app_logs postgres_logs valkey_logs app_metrics)
+
+declare -A STREAM_TYPES=(
+  [app_logs]="logs"
+  [postgres_logs]="logs"
+  [valkey_logs]="logs"
+  [app_metrics]="metrics"
+)
+
+# Space-separated field lists are deliberate: field names here contain no
+# whitespace. app_logs includes upstream because the current alert SQL selects
+# and groups by it.
+declare -A REQUIRED_FIELDS=(
+  [app_logs]="level message service upstream"
+  [postgres_logs]="state service"
+  [valkey_logs]="message"
+  [app_metrics]="_timestamp"
+)
+
+declare -A FULL_TEXT_FIELDS=(
+  [app_logs]="message"
+  [postgres_logs]="message"
+  [valkey_logs]="message"
 )
 
 # ------------------------------------------------------------------------------
@@ -119,6 +130,8 @@ PRESERVE_WORK_DIR=false
 cleanup() {
   local rc=$?
   set +e
+
+  stop_o2_port_forward || true
 
   if [[ -n "${WORK_DIR}" && -d "${WORK_DIR}" ]]; then
     if [[ "${PRESERVE_WORK_DIR}" == "true" || "${rc}" -ne 0 ]]; then
@@ -152,21 +165,30 @@ preflight_core() {
   require_cmd helm
   require_cmd curl
   require_cmd jq
+  require_cmd base64
+  require_cmd awk
+  require_cmd grep
+  require_cmd sed
 
   kubectl cluster-info >/dev/null 2>&1 \
-    || die "kubectl cannot reach the cluster"
+    || die "kubectl cannot reach the Kubernetes cluster"
 }
 
 preflight_chart() {
   [[ -d "${O2_CHART_PATH}" ]] \
     || die "Chart path does not exist: ${O2_CHART_PATH}"
-
   [[ -f "${O2_CHART_PATH}/Chart.yaml" ]] \
-    || die "Chart missing Chart.yaml"
+    || die "Chart missing Chart.yaml: ${O2_CHART_PATH}/Chart.yaml"
+}
+
+preflight_image() {
+  if [[ "${O2_REQUIRE_IMAGE_DIGEST}" == "true" && -z "${O2_IMAGE_DIGEST}" ]]; then
+    die "O2_REQUIRE_IMAGE_DIGEST=true but O2_IMAGE_DIGEST is empty"
+  fi
 }
 
 # ------------------------------------------------------------------------------
-# Namespace and secrets
+# Namespace / secret helpers
 # ------------------------------------------------------------------------------
 
 ensure_namespace() {
@@ -179,8 +201,8 @@ secret_has_key() {
   local key="$2"
   local value
 
-  kubectl get secret "${secret}" -n "${O2_NAMESPACE}" \
-    >/dev/null 2>&1 || return 1
+  kubectl get secret "${secret}" -n "${O2_NAMESPACE}" >/dev/null 2>&1 \
+    || return 1
 
   value="$(
     kubectl get secret "${secret}" \
@@ -202,7 +224,6 @@ require_secrets() {
 
 read_secret_value() {
   local key="$1"
-
   kubectl get secret "${O2_AUTH_SECRET}" \
     -n "${O2_NAMESPACE}" \
     -o jsonpath="{.data.${key}}" \
@@ -219,21 +240,20 @@ detect_default_storage_class() {
   sc="$(
     kubectl get storageclass \
       -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{"\n"}{end}' \
-      2>/dev/null \
-      | head -n1
+      2>/dev/null | head -n1
   )"
 
   if [[ -z "${sc}" ]]; then
     sc="$(
       kubectl get storageclass \
         -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.beta\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{"\n"}{end}' \
-        2>/dev/null \
-        | head -n1
+        2>/dev/null | head -n1
     )"
   fi
 
+
   if [[ -z "${sc}" ]]; then
-    log_warn "no default StorageClass found; falling back to 'standard'"
+    log_warn "no default StorageClass found; using 'standard'"
     sc="standard"
   fi
 
@@ -241,15 +261,22 @@ detect_default_storage_class() {
 }
 
 # ------------------------------------------------------------------------------
-# Values rendering
+# Helm values / image pinning
 # ------------------------------------------------------------------------------
 
 render_values() {
   local out="$1"
   local sc="$2"
+  local image_block
 
-  cat > "${out}" <<EOF
-# Rendered by openobserve.sh at $(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if [[ -n "${O2_IMAGE_DIGEST}" ]]; then
+    image_block="  digest: \"${O2_IMAGE_DIGEST}\""
+  else
+    image_block="  # digest intentionally unset; set O2_IMAGE_DIGEST for immutable production pinning"
+  fi
+
+  cat > "${out}" <<EOF_VALUES
+# Generated by scripts/staging/openobserve.sh
 
 replicaCount: 1
 
@@ -257,7 +284,7 @@ image:
   registry: "${O2_IMAGE_REGISTRY}"
   repository: "${O2_IMAGE_REPOSITORY}"
   tag: "${O2_IMAGE_TAG}"
-  digest: "${O2_IMAGE_DIGEST}"
+${image_block}
   pullPolicy: IfNotPresent
 
 serviceAccount:
@@ -288,10 +315,11 @@ config:
 
   ZO_HEALTH_CHECK_ENABLED: "true"
   ZO_TELEMETRY: "false"
-
-  # Required for the local Kind alert destination:
-  # autosre-agent.sre.svc.cluster.local
   ZO_SKIP_SSRF_CHECKS: "${O2_SKIP_SSRF_CHECKS}"
+
+  # UDS is deliberately not required for this fix. The telemetry pipeline
+  # establishes a deterministic normalized schema before alert creation.
+  ZO_ALLOW_USER_DEFINED_SCHEMAS: "false"
 
   RUST_LOG: "${O2_LOG_LEVEL}"
 
@@ -338,14 +366,12 @@ probes:
     periodSeconds: 10
     timeoutSeconds: 3
     failureThreshold: 60
-
   readiness:
     enabled: true
     initialDelaySeconds: 5
     periodSeconds: 10
     timeoutSeconds: 3
     failureThreshold: 3
-
   liveness:
     enabled: true
     initialDelaySeconds: 30
@@ -369,83 +395,60 @@ podLabels: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
-
 extraEnv: []
 extraEnvFrom: []
 extraVolumes: []
 extraVolumeMounts: []
-EOF
+EOF_VALUES
 }
 
-# ------------------------------------------------------------------------------
-# Image change protection
-# ------------------------------------------------------------------------------
-
 check_image_change() {
-  if ! kubectl get deployment "${O2_RELEASE}" \
-      -n "${O2_NAMESPACE}" >/dev/null 2>&1; then
+  if ! kubectl get deployment "${O2_RELEASE}" -n "${O2_NAMESPACE}" >/dev/null 2>&1; then
     return 0
   fi
 
-  local current
-  local target
+  local current target
+  current="$(kubectl get deployment "${O2_RELEASE}" -n "${O2_NAMESPACE}" -o jsonpath='{.spec.template.spec.containers[0].image}')"
 
-  current="$(
-    kubectl get deployment "${O2_RELEASE}" \
-      -n "${O2_NAMESPACE}" \
-      -o jsonpath='{.spec.template.spec.containers[0].image}'
-  )"
+  if [[ -n "${O2_IMAGE_DIGEST}" ]]; then
+    target="${O2_IMAGE_REGISTRY}/${O2_IMAGE_REPOSITORY}@${O2_IMAGE_DIGEST}"
+  else
+    target="${O2_IMAGE_REGISTRY}/${O2_IMAGE_REPOSITORY}:${O2_IMAGE_TAG}"
+  fi
 
-  target="${O2_IMAGE_REGISTRY}/${O2_IMAGE_REPOSITORY}@${O2_IMAGE_DIGEST}"
-
-  [[ "${current}" == "${target}" ]] && return 0
+  if [[ "${current}" == "${target}" ]]; then
+    return 0
+  fi
 
   if [[ "${O2_ALLOW_IMAGE_CHANGE}" == "true" ]]; then
     log_warn "image change approved: ${current} -> ${target}"
     return 0
   fi
 
-  die "Image change detected: ${current} -> ${target}
-Re-run with O2_ALLOW_IMAGE_CHANGE=true to proceed."
+  die "Image change detected: ${current} -> ${target}. Set O2_ALLOW_IMAGE_CHANGE=true for an intentional change."
 }
-
-# ------------------------------------------------------------------------------
-# Chart validation
-# ------------------------------------------------------------------------------
 
 validate_chart() {
   local values="$1"
 
-  log_info "helm lint"
+  helm lint "${O2_CHART_PATH}" \
+    --namespace "${O2_NAMESPACE}" \
+    --values "${values}" \
+    --strict \
+    || { PRESERVE_WORK_DIR=true; return 1; }
 
-  if ! helm lint "${O2_CHART_PATH}" \
-      --namespace "${O2_NAMESPACE}" \
-      --values "${values}" \
-      --strict; then
-    PRESERVE_WORK_DIR=true
-    return 1
-  fi
-
-  log_info "helm template"
-
-  if ! helm template "${O2_RELEASE}" "${O2_CHART_PATH}" \
-      --namespace "${O2_NAMESPACE}" \
-      --values "${values}" \
-      >/dev/null \
-      2>"${WORK_DIR}/template.err"; then
-
-    PRESERVE_WORK_DIR=true
-
-    log_error "helm template failed; stderr follows"
-    sed 's/^/  /' "${WORK_DIR}/template.err" >&2 || true
-
-    return 1
-  fi
+  helm template "${O2_RELEASE}" "${O2_CHART_PATH}" \
+    --namespace "${O2_NAMESPACE}" \
+    --values "${values}" \
+    >"${WORK_DIR}/rendered.yaml" \
+    2>"${WORK_DIR}/template.err" \
+    || {
+      PRESERVE_WORK_DIR=true
+      log_error "helm template failed"
+      sed 's/^/  /' "${WORK_DIR}/template.err" >&2 || true
+      return 1
+    }
 }
-
-# ------------------------------------------------------------------------------
-# Helm
-# ------------------------------------------------------------------------------
 
 run_helm_upgrade() {
   local values="$1"
@@ -459,21 +462,13 @@ run_helm_upgrade() {
 }
 
 # ------------------------------------------------------------------------------
-# Pod / service endpoint
-# ------------------------------------------------------------------------------
-
-wait_for_pod() {
-  kubectl rollout status \
-    deployment/"${O2_RELEASE}" \
-    -n "${O2_NAMESPACE}" \
-    --timeout="${READY_TIMEOUT}s"
-}
-
-# ------------------------------------------------------------------------------
-# OpenObserve local API tunnel
+# Port-forward / API
 # ------------------------------------------------------------------------------
 
 O2_PF_PID=""
+O2_API_BASE=""
+O2_API_USER=""
+O2_API_PASSWORD=""
 
 stop_o2_port_forward() {
   if [[ -n "${O2_PF_PID}" ]]; then
@@ -487,7 +482,6 @@ start_o2_port_forward() {
   stop_o2_port_forward
 
   local local_port="${O2_VERIFY_LOCAL_PORT}"
-
   if (echo >/dev/tcp/127.0.0.1/"${local_port}") 2>/dev/null; then
     die "Local port ${local_port} is already in use; set O2_VERIFY_LOCAL_PORT to another port"
   fi
@@ -500,18 +494,15 @@ start_o2_port_forward() {
   O2_PF_PID=$!
 
   local elapsed=0
-
-  while (( elapsed < 20 )); do
+  while (( elapsed < 30 )); do
     if ! kill -0 "${O2_PF_PID}" >/dev/null 2>&1; then
       log_error "port-forward exited unexpectedly"
       sed 's/^/  /' "${WORK_DIR}/port-forward.log" >&2 || true
       return 1
     fi
 
-    if curl -sS \
-      "http://127.0.0.1:${local_port}/healthz" \
-      >/dev/null 2>&1; then
-
+    if curl -fsS --connect-timeout 2 --max-time 3 \
+      "http://127.0.0.1:${local_port}/healthz" >/dev/null 2>&1; then
       return 0
     fi
 
@@ -521,278 +512,225 @@ start_o2_port_forward() {
 
   log_error "OpenObserve port-forward did not become ready"
   sed 's/^/  /' "${WORK_DIR}/port-forward.log" >&2 || true
-
   return 1
 }
 
-# ------------------------------------------------------------------------------
-# OpenObserve API helpers
-# ------------------------------------------------------------------------------
-
-O2_API_BASE=""
-O2_API_USER=""
-O2_API_PASSWORD=""
-
 init_o2_api_credentials() {
   O2_API_BASE="http://127.0.0.1:${O2_VERIFY_LOCAL_PORT}/api/${O2_ORGANIZATION}"
-
   O2_API_USER="$(read_secret_value ZO_ROOT_USER_EMAIL)"
   O2_API_PASSWORD="$(read_secret_value ZO_ROOT_USER_PASSWORD)"
 
-  [[ -n "${O2_API_USER}" ]] \
-    || die "OpenObserve root email resolved to empty value"
-
-  [[ -n "${O2_API_PASSWORD}" ]] \
-    || die "OpenObserve root password resolved to empty value"
+  [[ -n "${O2_API_USER}" ]] || die "OpenObserve root email is empty"
+  [[ -n "${O2_API_PASSWORD}" ]] || die "OpenObserve root password is empty"
 }
 
 o2_curl() {
-  curl \
-    -sS \
+  curl -sS \
     --fail-with-body \
     --retry 2 \
     --connect-timeout 5 \
-    --max-time 20 \
+    --max-time 30 \
     -u "${O2_API_USER}:${O2_API_PASSWORD}" \
     "$@"
 }
 
-o2_stream_exists() {
-  local stream="$1"
-  local type="$2"
+# ------------------------------------------------------------------------------
+# OpenObserve readiness
+# ------------------------------------------------------------------------------
 
-  local json
-
-  json="$(
-    o2_curl \
-      "${O2_API_BASE}/streams?fetchSchema=false&type=${type}" \
-      2>/dev/null \
-      || true
-  )"
-
-  [[ -n "${json}" ]] || return 1
-
-  jq -e \
-    --arg name "${stream}" \
-    '.list // [] | any(.[]; .name == $name)' \
-    <<<"${json}" \
-    >/dev/null 2>&1
+probe_healthz() {
+  curl -fsS --connect-timeout 5 --max-time 10 \
+    "http://127.0.0.1:${O2_VERIFY_LOCAL_PORT}/healthz" >/dev/null
 }
 
-o2_stream_names() {
-  local type="$1"
+get_stream_details() {
+  local stream="$1"
+  local type="$2"
 
   o2_curl \
-    "${O2_API_BASE}/streams?fetchSchema=false&type=${type}" \
-    | jq -r '.list[]?.name'
+    "${O2_API_BASE}/streams/${stream}/schema?type=${type}"
 }
 
-# ------------------------------------------------------------------------------
-# Stream creation
-# ------------------------------------------------------------------------------
-
-create_stream_once() {
+stream_exists() {
   local stream="$1"
   local type="$2"
 
-  local url
-  local response
-  local status
+  get_stream_details "${stream}" "${type}" >/dev/null 2>&1
+}
 
-  url="${O2_API_BASE}/streams/${stream}?type=${type}"
+stream_doc_count() {
+  local stream="$1"
+  local type="$2"
 
-  # OpenObserve's stream-create endpoint accepts a stream definition with
-  # fields/settings. We deliberately leave both empty: these alert streams
-  # only need to exist; schemas can be inferred later from ingestion.
-  response="$(
-    curl \
-      -sS \
-      -o "${WORK_DIR}/stream-create-response.json" \
-      -w '%{http_code}' \
-      -u "${O2_API_USER}:${O2_API_PASSWORD}" \
-      -X POST \
-      -H 'Content-Type: application/json' \
-      "${url}" \
-      --data '{"fields":[],"settings":{}}' \
-      2>/dev/null || true
-  )"
+  get_stream_details "${stream}" "${type}" \
+    | jq -r '.stats.doc_num // 0'
+}
 
-  status="${response}"
+stream_has_field() {
+  local stream="$1"
+  local type="$2"
+  local field="$3"
+  local schema_json="$4"
 
-  case "${status}" in
-    200|201)
-      log_info "stream created: ${stream} (${type})"
-      return 0
-      ;;
+  jq -e \
+    --arg field "${field}" \
+    '.schema // [] | any(.[]; .name == $field)' \
+    <<<"${schema_json}" >/dev/null
+}
 
-    409)
-      if o2_stream_exists "${stream}" "${type}"; then
-        log_info "stream already exists: ${stream} (${type})"
-        return 0
+verify_stream_contract() {
+  local stream="$1"
+  local type="${STREAM_TYPES[${stream}]}"
+  local expected="${REQUIRED_FIELDS[${stream}]}"
+  local json doc_num field
+
+  json="$(get_stream_details "${stream}" "${type}")" \
+    || die "Cannot retrieve stream schema: ${stream} (${type})"
+
+  doc_num="$(jq -r '.stats.doc_num // 0' <<<"${json}")"
+
+  [[ "${doc_num}" =~ ^[0-9]+$ ]] || die "Invalid doc_num for ${stream}: ${doc_num}"
+  (( doc_num > 0 )) || die "Stream ${stream} exists but contains 0 records; log/metric ingestion is not ready"
+
+  for field in ${expected}; do
+    stream_has_field "${stream}" "${type}" "${field}" "${json}" \
+      || die "Stream ${stream} is missing required field '${field}'. Current schema: $(jq -c '.schema // []' <<<"${json}")"
+  done
+
+  log_info "stream ready: ${stream} (${type}), records=${doc_num}"
+}
+
+wait_for_required_streams() {
+  log_info "Waiting for real telemetry to create and populate required OpenObserve streams"
+  log_info "Timeout=${O2_STREAM_READY_TIMEOUT}s; this intentionally blocks alert provisioning until schemas exist"
+
+  local elapsed=0
+  local stream type missing
+
+  while (( elapsed <= O2_STREAM_READY_TIMEOUT )); do
+    missing=()
+
+    for stream in "${REQUIRED_STREAMS[@]}"; do
+      type="${STREAM_TYPES[${stream}]}"
+      if ! stream_exists "${stream}" "${type}"; then
+        missing+=("${stream}")
+        continue
       fi
-      ;;
 
-    400)
-      if grep -qi 'already exists' \
-        "${WORK_DIR}/stream-create-response.json" 2>/dev/null; then
-
-        if o2_stream_exists "${stream}" "${type}"; then
-          log_info "stream already exists: ${stream} (${type})"
-          return 0
+      if [[ "${O2_WAIT_FOR_INGESTION}" == "true" ]]; then
+        if ! verify_stream_contract_silent "${stream}"; then
+          missing+=("${stream}:schema/data")
         fi
       fi
+    done
 
-      if grep -qi 'being deleted' \
-        "${WORK_DIR}/stream-create-response.json" 2>/dev/null; then
+    if (( ${#missing[@]} == 0 )); then
+      log_info "All required streams are populated and schema-ready"
+      return 0
+    fi
 
-        return 2
-      fi
-      ;;
+    log_info "Still waiting: ${missing[*]}"
+    sleep "${O2_STREAM_RETRY_INTERVAL}"
+    elapsed=$((elapsed + O2_STREAM_RETRY_INTERVAL))
+  done
 
-    404)
-      log_error "OpenObserve stream API returned 404 for ${stream}"
-      ;;
-
-    401|403)
-      log_error "OpenObserve rejected stream creation credentials for ${stream}"
-      ;;
-
-    *)
-      log_error "unexpected HTTP ${status} creating stream ${stream}"
-      ;;
-  esac
-
-  if [[ -s "${WORK_DIR}/stream-create-response.json" ]]; then
-    sed 's/^/  /' \
-      "${WORK_DIR}/stream-create-response.json" >&2 || true
-  fi
+  log_error "Required telemetry did not become ready within ${O2_STREAM_READY_TIMEOUT}s"
+  for stream in "${REQUIRED_STREAMS[@]}"; do
+    type="${STREAM_TYPES[${stream}]}"
+    if stream_exists "${stream}" "${type}"; then
+      log_error "--- ${stream} (${type}) ---"
+      get_stream_details "${stream}" "${type}" | jq '{stats, schema, settings}' >&2 || true
+    else
+      log_error "--- ${stream} (${type}) MISSING ---"
+    fi
+  done
 
   return 1
 }
 
-ensure_one_stream() {
+verify_stream_contract_silent() {
   local stream="$1"
-  local type="$2"
+  local type="${STREAM_TYPES[${stream}]}"
+  local expected="${REQUIRED_FIELDS[${stream}]}"
+  local json doc_num field
 
-  if o2_stream_exists "${stream}" "${type}"; then
-    log_info "stream OK: ${stream} (${type})"
-    return 0
-  fi
+  json="$(get_stream_details "${stream}" "${type}" 2>/dev/null)" || return 1
+  doc_num="$(jq -r '.stats.doc_num // 0' <<<"${json}" 2>/dev/null)" || return 1
+  (( doc_num > 0 )) || return 1
 
-  local elapsed=0
-  local rc
-
-  while (( elapsed <= O2_STREAM_DELETE_TIMEOUT )); do
-    if o2_stream_exists "${stream}" "${type}"; then
-      log_info "stream OK: ${stream} (${type})"
-      return 0
-    fi
-
-    set +e
-    create_stream_once "${stream}" "${type}"
-    rc=$?
-    set -e
-
-    if (( rc == 0 )); then
-      return 0
-    fi
-
-    if (( rc == 2 )); then
-      log_warn \
-        "stream ${stream} is marked for deletion; waiting ${O2_STREAM_RETRY_INTERVAL}s before retry"
-
-      sleep "${O2_STREAM_RETRY_INTERVAL}"
-      elapsed=$((elapsed + O2_STREAM_RETRY_INTERVAL))
-      continue
-    fi
-
-    return 1
+  for field in ${expected}; do
+    jq -e --arg field "${field}" \
+      '.schema // [] | any(.[]; .name == $field)' \
+      <<<"${json}" >/dev/null 2>&1 || return 1
   done
 
-  die "stream ${stream} is still marked 'being deleted' after ${O2_STREAM_DELETE_TIMEOUT}s"
-}
-
-ensure_required_streams() {
-  log_info "ensuring required OpenObserve streams"
-
-  start_o2_port_forward \
-    || die "could not establish OpenObserve port-forward"
-
-  init_o2_api_credentials
-
-  local item
-  local stream
-  local type
-
-  for item in "${REQUIRED_STREAMS[@]}"; do
-    stream="${item%%:*}"
-    type="${item##*:}"
-
-    ensure_one_stream "${stream}" "${type}" \
-      || die "failed to ensure stream ${stream} (${type})"
-  done
-
-  log_info "all required OpenObserve streams are ready"
+  return 0
 }
 
 # ------------------------------------------------------------------------------
-# Health / configuration verification
+# Stream settings
 # ------------------------------------------------------------------------------
 
-probe_healthz() {
-  local local_port="${O2_VERIFY_LOCAL_PORT}"
+reconcile_stream_settings() {
+  local stream type fulltext body response status
 
-  curl \
-    -sf \
-    "http://127.0.0.1:${local_port}/healthz" \
-    >/dev/null
+  for stream in "app_logs" "postgres_logs" "valkey_logs"; do
+    type="logs"
+    fulltext="${FULL_TEXT_FIELDS[${stream}]}"
+    body="$(jq -n \
+      --argjson retention "${O2_RETENTION_DAYS}" \
+      --arg fulltext "${fulltext}" \
+      '{data_retention:$retention, full_text_search_keys:[$fulltext]}')"
+
+    response="${WORK_DIR}/settings-${stream}.json"
+    status="$(curl -sS \
+      -o "${response}" \
+      -w '%{http_code}' \
+      --connect-timeout 5 \
+      --max-time 30 \
+      -u "${O2_API_USER}:${O2_API_PASSWORD}" \
+      -X POST \
+      -H 'Content-Type: application/json' \
+      "${O2_API_BASE}/streams/${stream}/settings" \
+      --data "${body}" \
+      2>/dev/null || true)"
+
+    case "${status}" in
+      200|201)
+        log_info "stream settings reconciled: ${stream} full_text=${fulltext} retention=${O2_RETENTION_DAYS}d"
+        ;;
+      401|403)
+        die "OpenObserve rejected settings update for ${stream} (HTTP ${status})"
+        ;;
+      *)
+        log_error "Failed to reconcile settings for ${stream} (HTTP ${status})"
+        sed 's/^/  /' "${response}" >&2 || true
+        return 1
+        ;;
+    esac
+  done
 }
+
+# ------------------------------------------------------------------------------
+# SSRF verification
+# ------------------------------------------------------------------------------
 
 verify_ssrf_config() {
-  local pod
+  local pod skip_ssrf
 
-  pod="$(
-    kubectl get pods \
-      -n "${O2_NAMESPACE}" \
-      -l "app.kubernetes.io/instance=${O2_RELEASE}" \
-      -o jsonpath='{.items[0].metadata.name}'
-  )"
+  pod="$(kubectl get pods -n "${O2_NAMESPACE}" \
+    -l "app.kubernetes.io/instance=${O2_RELEASE}" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [[ -n "${pod}" ]] || die "No OpenObserve pod found"
 
-  [[ -n "${pod}" ]] \
-    || die "no OpenObserve pod found"
+  skip_ssrf="$(kubectl get pod "${pod}" -n "${O2_NAMESPACE}" \
+    -o jsonpath='{range .spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' \
+    | awk -F= '$1=="ZO_SKIP_SSRF_CHECKS" {print $2}' | head -n1)"
 
-  local skip_ssrf
+  [[ "${skip_ssrf}" == "${O2_SKIP_SSRF_CHECKS}" ]] \
+    || die "ZO_SKIP_SSRF_CHECKS='${skip_ssrf}', expected '${O2_SKIP_SSRF_CHECKS}'"
 
-  skip_ssrf="$(
-    kubectl get pod "${pod}" \
-      -n "${O2_NAMESPACE}" \
-      -o jsonpath='{range .spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' \
-      | awk -F= '$1=="ZO_SKIP_SSRF_CHECKS" {print $2}'
-  )"
-
-  [[ "${skip_ssrf}" == "true" ]] \
-    || die "ZO_SKIP_SSRF_CHECKS is '${skip_ssrf}', expected 'true'"
-
-  log_info "SSRF guard disabled OK"
-}
-
-verify_required_streams() {
-  init_o2_api_credentials
-
-  local item
-  local stream
-  local type
-
-  for item in "${REQUIRED_STREAMS[@]}"; do
-    stream="${item%%:*}"
-    type="${item##*:}"
-
-    if o2_stream_exists "${stream}" "${type}"; then
-      log_info "stream OK: ${stream} (${type})"
-    else
-      die "required stream missing: ${stream} (${type})"
-    fi
-  done
+  log_info "SSRF configuration OK (${skip_ssrf})"
 }
 
 # ------------------------------------------------------------------------------
@@ -800,32 +738,28 @@ verify_required_streams() {
 # ------------------------------------------------------------------------------
 
 collect_diagnostics() {
-  log_error "collecting diagnostics for release ${O2_RELEASE}"
+  log_error "===== OpenObserve diagnostics ====="
 
-  log_error "--- helm status ---"
-  helm status "${O2_RELEASE}" \
-    -n "${O2_NAMESPACE}" \
-    2>&1 | sed 's/^/  /' || true
+  log_error "--- Helm ---"
+  helm status "${O2_RELEASE}" -n "${O2_NAMESPACE}" 2>&1 | sed 's/^/  /' || true
 
-  log_error "--- pods ---"
-  kubectl -n "${O2_NAMESPACE}" \
-    get pods -o wide \
-    2>&1 | sed 's/^/  /' || true
+  log_error "--- Pods ---"
+  kubectl -n "${O2_NAMESPACE}" get pods -o wide 2>&1 | sed 's/^/  /' || true
 
-  log_error "--- deployment ---"
-  kubectl -n "${O2_NAMESPACE}" \
-    get deployment "${O2_RELEASE}" -o wide \
-    2>&1 | sed 's/^/  /' || true
+  log_error "--- Deployment ---"
+  kubectl -n "${O2_NAMESPACE}" get deployment "${O2_RELEASE}" -o wide 2>&1 | sed 's/^/  /' || true
 
-  log_error "--- pvc ---"
-  kubectl -n "${O2_NAMESPACE}" \
-    get pvc \
-    2>&1 | sed 's/^/  /' || true
+  log_error "--- PVC ---"
+  kubectl -n "${O2_NAMESPACE}" get pvc 2>&1 | sed 's/^/  /' || true
 
-  log_error "--- events ---"
-  kubectl -n "${O2_NAMESPACE}" \
-    get events --sort-by=.lastTimestamp \
-    2>&1 | tail -n 30 | sed 's/^/  /' || true
+  log_error "--- Events ---"
+  kubectl -n "${O2_NAMESPACE}" get events --sort-by=.lastTimestamp 2>&1 | tail -n 40 | sed 's/^/  /' || true
+
+  if [[ -n "${O2_PF_PID}" ]]; then
+    log_error "--- OpenObserve stream listing ---"
+    o2_curl "${O2_API_BASE}/streams?fetchSchema=true&type=logs" 2>&1 | sed 's/^/  /' || true
+    o2_curl "${O2_API_BASE}/streams?fetchSchema=true&type=metrics" 2>&1 | sed 's/^/  /' || true
+  fi
 }
 
 # ------------------------------------------------------------------------------
@@ -834,369 +768,238 @@ collect_diagnostics() {
 
 cmd_deploy() {
   init_work_dir
-
   preflight_core
   preflight_chart
-
+  preflight_image
   ensure_namespace
   require_secrets
   check_image_change
 
-  local sc
+  local sc values
   sc="$(detect_default_storage_class)"
-  log_info "default StorageClass: ${sc}"
+  values="${WORK_DIR}/values.yaml"
 
-  local values="${WORK_DIR}/values.yaml"
-
-  log_info "rendering values -> ${values}"
+  log_info "Rendering Helm values"
   render_values "${values}" "${sc}"
 
-  validate_chart "${values}" \
-    || die "chart validation failed"
+  log_info "Validating Helm chart"
+  validate_chart "${values}" || die "Helm chart validation failed; workdir=${WORK_DIR}"
 
-  log_info "applying OpenObserve release"
+  log_info "Deploying OpenObserve ${O2_IMAGE_TAG}"
+  run_helm_upgrade "${values}" \
+    || { PRESERVE_WORK_DIR=true; collect_diagnostics; die "Helm upgrade failed"; }
 
-  if ! run_helm_upgrade "${values}"; then
-    PRESERVE_WORK_DIR=true
-    collect_diagnostics
-    die "helm upgrade failed"
+  kubectl rollout status \
+    deployment/"${O2_RELEASE}" \
+    -n "${O2_NAMESPACE}" \
+    --timeout="${READY_TIMEOUT}s" \
+    || { PRESERVE_WORK_DIR=true; collect_diagnostics; die "OpenObserve deployment did not become ready"; }
+
+  start_o2_port_forward \
+    || { PRESERVE_WORK_DIR=true; collect_diagnostics; die "Could not establish OpenObserve port-forward"; }
+  init_o2_api_credentials
+  probe_healthz || die "OpenObserve /healthz failed"
+  verify_ssrf_config
+
+  # Critical fix: do not create empty streams. The OTel gateway's explicit
+  # stream-name routing creates them on the first real record.
+  if [[ "${O2_WAIT_FOR_INGESTION}" == "true" ]]; then
+    wait_for_required_streams \
+      || { PRESERVE_WORK_DIR=true; collect_diagnostics; die "Telemetry streams are not ready"; }
+
+    reconcile_stream_settings \
+      || { PRESERVE_WORK_DIR=true; collect_diagnostics; die "Stream settings reconciliation failed"; }
+  else
+    log_info "OpenObserve deployed. Stream readiness is deferred to openobserve.sh verify / terraform run.sh."
   fi
 
-  log_info \
-    "waiting for deployment rollout (timeout=${READY_TIMEOUT}s)"
-
-  if ! wait_for_pod; then
-    PRESERVE_WORK_DIR=true
-    collect_diagnostics
-    die "deployment did not become ready"
-  fi
-
-  log_info "deploy complete"
-
-  # The critical addition:
-  # create/adopt streams before Terraform creates alerts.
-  ensure_required_streams
-
-  stop_o2_port_forward
-
-  log_info "OpenObserve deployment and stream reconciliation complete"
+  log_info "OpenObserve deployment complete"
 }
 
 cmd_render() {
   init_work_dir
   preflight_core
   preflight_chart
-
+  preflight_image
   PRESERVE_WORK_DIR=true
 
-  local sc
+  local sc values
   sc="$(detect_default_storage_class)"
-
-  local values="${WORK_DIR}/values.yaml"
-
+  values="${WORK_DIR}/values.yaml"
   render_values "${values}" "${sc}"
 
-  printf '\n===== values.yaml =====\n' >&2
+  echo "===== values.yaml =====" >&2
   cat "${values}" >&2
-
-  printf '\n===== helm template =====\n' >&2
-
+  echo "===== helm template =====" >&2
   helm template "${O2_RELEASE}" "${O2_CHART_PATH}" \
     --namespace "${O2_NAMESPACE}" \
-    --values "${values}" \
-    >&2
-}
-
-cmd_delete() {
-  preflight_core
-
-  log_info \
-    "removing Helm release ${O2_RELEASE} (PVC retained)"
-
-  helm uninstall "${O2_RELEASE}" \
-    -n "${O2_NAMESPACE}" \
-    2>/dev/null || true
-
-  log_info \
-    "release removed; PVC ${O2_RELEASE}-data retained"
-}
-
-cmd_purge() {
-  preflight_core
-
-  read -r -p \
-    "This deletes the PVC and all OpenObserve data. Type 'yes' to confirm: " \
-    ans
-
-  [[ "${ans}" == "yes" ]] \
-    || die "cancelled"
-
-  cmd_delete
-
-  kubectl delete pvc \
-    "${O2_RELEASE}-data" \
-    -n "${O2_NAMESPACE}" \
-    --ignore-not-found
-
-  log_info "purge complete"
-}
-
-cmd_status() {
-  preflight_core
-
-  echo "=== Helm release ==="
-  helm list -n "${O2_NAMESPACE}" 2>/dev/null || true
-
-  echo
-  echo "=== Deployment ==="
-  kubectl get deployment \
-    -n "${O2_NAMESPACE}" \
-    -o wide \
-    2>/dev/null || true
-
-  echo
-  echo "=== Pods ==="
-  kubectl get pods \
-    -n "${O2_NAMESPACE}" \
-    -o wide \
-    2>/dev/null || true
-
-  echo
-  echo "=== PVC ==="
-  kubectl get pvc \
-    -n "${O2_NAMESPACE}" \
-    2>/dev/null || true
-
-  echo
-  echo "=== Service ==="
-  kubectl get svc \
-    -n "${O2_NAMESPACE}" \
-    2>/dev/null || true
+    --values "${values}"
 }
 
 cmd_verify() {
   init_work_dir
-
   preflight_core
   ensure_namespace
   require_secrets
+  preflight_image
 
   kubectl rollout status \
     deployment/"${O2_RELEASE}" \
     -n "${O2_NAMESPACE}" \
     --timeout="${READY_TIMEOUT}s" >/dev/null \
-    || die "deployment not ready"
+    || die "OpenObserve deployment is not ready"
 
-  log_info "deployment OK"
+  local pvc_phase image
+  pvc_phase="$(kubectl get pvc "${O2_RELEASE}-data" -n "${O2_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  [[ "${pvc_phase}" == "Bound" ]] || die "PVC phase='${pvc_phase}', expected Bound"
 
-  local pvc_phase
+  image="$(kubectl get deployment "${O2_RELEASE}" -n "${O2_NAMESPACE}" -o jsonpath='{.spec.template.spec.containers[0].image}')"
+  if [[ -n "${O2_IMAGE_DIGEST}" ]]; then
+    [[ "${image}" == *"@${O2_IMAGE_DIGEST}"* ]] || die "Unexpected image: ${image}"
+  else
+    [[ "${image}" == "${O2_IMAGE_REGISTRY}/${O2_IMAGE_REPOSITORY}:${O2_IMAGE_TAG}" ]] \
+      || die "Unexpected image: ${image}"
+  fi
 
-  pvc_phase="$(
-    kubectl get pvc \
-      "${O2_RELEASE}-data" \
-      -n "${O2_NAMESPACE}" \
-      -o jsonpath='{.status.phase}' \
-      2>/dev/null || true
-  )"
-
-  [[ "${pvc_phase}" == "Bound" ]] \
-    || die "PVC phase '${pvc_phase}', expected Bound"
-
-  log_info "PVC OK"
-
-  local image
-
-  image="$(
-    kubectl get deployment "${O2_RELEASE}" \
-      -n "${O2_NAMESPACE}" \
-      -o jsonpath='{.spec.template.spec.containers[0].image}'
-  )"
-
-  [[ "${image}" == *"${O2_IMAGE_DIGEST}"* ]] \
-    || die "image is not pinned to expected digest: ${image}"
-
-  log_info "image OK"
-
+  start_o2_port_forward || die "Could not establish OpenObserve port-forward"
+  init_o2_api_credentials
+  probe_healthz || die "/healthz failed"
   verify_ssrf_config
 
-  start_o2_port_forward \
-    || die "could not establish OpenObserve port-forward"
+  wait_for_required_streams \
+    || { PRESERVE_WORK_DIR=true; collect_diagnostics; die "OpenObserve stream/schema contract failed"; }
+  reconcile_stream_settings \
+    || die "Stream settings verification/reconciliation failed"
 
-  init_o2_api_credentials
+  log_info "OpenObserve verification passed"
+}
 
-  probe_healthz \
-    || die "/healthz check failed"
-
-  log_info "health OK"
-
-  verify_required_streams
-
-  stop_o2_port_forward
-
-  log_info "all OpenObserve checks passed"
+cmd_status() {
+  preflight_core
+  echo "=== Helm ==="
+  helm list -n "${O2_NAMESPACE}" 2>/dev/null || true
+  echo
+  echo "=== Deployment ==="
+  kubectl get deployment -n "${O2_NAMESPACE}" -o wide 2>/dev/null || true
+  echo
+  echo "=== Pods ==="
+  kubectl get pods -n "${O2_NAMESPACE}" -o wide 2>/dev/null || true
+  echo
+  echo "=== PVC ==="
+  kubectl get pvc -n "${O2_NAMESPACE}" 2>/dev/null || true
+  echo
+  echo "=== Service ==="
+  kubectl get svc -n "${O2_NAMESPACE}" 2>/dev/null || true
 }
 
 cmd_logs() {
   preflight_core
-
   kubectl logs \
     -n "${O2_NAMESPACE}" \
     -l "app.kubernetes.io/instance=${O2_RELEASE}" \
-    --tail=200 \
+    --tail=300 \
     -f \
     "$@"
 }
 
 cmd_rollout() {
+  init_work_dir
+  preflight_core
+  preflight_image
+  require_secrets
+
+  kubectl rollout restart deployment/"${O2_RELEASE}" -n "${O2_NAMESPACE}"
+  kubectl rollout status deployment/"${O2_RELEASE}" -n "${O2_NAMESPACE}" --timeout="${READY_TIMEOUT}s"
+
+  start_o2_port_forward || die "Could not establish OpenObserve port-forward"
+  init_o2_api_credentials
+  probe_healthz || die "/healthz failed after rollout"
+
+  # Existing data means streams survive the restart. Verify the same readiness
+  # contract and reconcile settings after every rollout.
+  wait_for_required_streams \
+    || { PRESERVE_WORK_DIR=true; collect_diagnostics; die "Streams/schema not ready after rollout"; }
+  reconcile_stream_settings || die "Stream settings reconciliation failed"
+
+  log_info "OpenObserve rollout verified"
+}
+
+cmd_delete() {
+  preflight_core
+  log_info "Uninstalling Helm release ${O2_RELEASE}; PVC is retained"
+  helm uninstall "${O2_RELEASE}" -n "${O2_NAMESPACE}" 2>/dev/null || true
+  log_info "Helm release removed; PVC retained"
+}
+
+cmd_purge() {
   preflight_core
 
-  kubectl rollout restart \
-    deployment/"${O2_RELEASE}" \
-    -n "${O2_NAMESPACE}"
+  read -r -p "This deletes the OpenObserve PVC and all stored data. Type 'yes': " answer
+  [[ "${answer}" == "yes" ]] || die "cancelled"
 
-  kubectl rollout status \
-    deployment/"${O2_RELEASE}" \
-    -n "${O2_NAMESPACE}" \
-    --timeout="${READY_TIMEOUT}s"
-
-  log_info "rollout complete"
-
-  # Keep stream existence guaranteed after restart as well.
-  init_work_dir
-  ensure_required_streams
-  stop_o2_port_forward
+  helm uninstall "${O2_RELEASE}" -n "${O2_NAMESPACE}" 2>/dev/null || true
+  kubectl delete pvc "${O2_RELEASE}-data" -n "${O2_NAMESPACE}" --ignore-not-found
+  log_info "OpenObserve release and PVC purged"
 }
 
 # ------------------------------------------------------------------------------
-# Usage
+# Usage / dispatch
 # ------------------------------------------------------------------------------
 
 usage() {
-  cat <<EOF
+  cat <<'EOF_USAGE'
 openobserve.sh — OpenObserve lifecycle for AutoSRE
 
 Usage:
-  $(basename "$0") <command>
+  bash scripts/staging/openobserve.sh deploy
+  bash scripts/staging/openobserve.sh verify
+  bash scripts/staging/openobserve.sh render
+  bash scripts/staging/openobserve.sh status
+  bash scripts/staging/openobserve.sh logs [kubectl logs args]
+  bash scripts/staging/openobserve.sh rollout
+  bash scripts/staging/openobserve.sh delete
+  bash scripts/staging/openobserve.sh purge
 
-Commands:
-  deploy
-      Deploy/upgrade OpenObserve and ensure all required streams exist.
+Important:
+  This script DOES NOT create empty alert streams.
+  The OTel gateway must route real telemetry using OpenObserve's stream-name
+  header. OpenObserve then creates the streams on first ingestion.
 
-  render
-      Render Helm values and template output.
+  deploy/verify intentionally wait until the required streams contain records
+  and have the alert-required fields. Terraform alert creation must come after
+  this gate passes.
 
-  delete
-      Remove the Helm release but retain the PVC.
-
-  purge
-      Remove the Helm release and PVC.
-
-  status
-      Show Helm/deployment/pod/PVC/service state.
-
-  verify
-      Verify deployment, image, SSRF configuration, health, and streams.
-
-  logs [args]
-      Tail OpenObserve logs.
-
-  rollout
-      Restart OpenObserve and re-ensure required streams.
-
-Required streams:
-  app_logs        logs
-  postgres_logs   logs
-  valkey_logs     logs
-  app_metrics     metrics
-
-Environment overrides:
-  O2_NAMESPACE
-      default: openobserve
-
-  O2_RELEASE
-      default: openobserve
-
-  O2_ORGANIZATION
-      default: default
-
-  O2_AUTH_SECRET
-      default: openobserve-auth
-
-  O2_SKIP_SSRF_CHECKS
-      default: true
-
-  O2_VERIFY_LOCAL_PORT
-      default: 15080
-
-  O2_STREAM_DELETE_TIMEOUT
-      default: 180 seconds
-
-  O2_STREAM_RETRY_INTERVAL
-      default: 5 seconds
-
-  HELM_TIMEOUT
-      default: 120s
-
-  READY_TIMEOUT
-      default: 180s
-EOF
+Key environment overrides:
+  O2_NAMESPACE                default: openobserve
+  O2_RELEASE                  default: openobserve
+  O2_ORGANIZATION             default: default
+  O2_AUTH_SECRET              default: openobserve-auth
+  O2_IMAGE_REGISTRY            default: public.ecr.aws
+  O2_IMAGE_REPOSITORY          default: zinclabs/openobserve
+  O2_IMAGE_TAG                 default: v1.0.4
+  O2_IMAGE_DIGEST              default: empty (set for immutable pinning)
+  O2_REQUIRE_IMAGE_DIGEST      default: false
+  O2_ALLOW_IMAGE_CHANGE        default: false
+  O2_WAIT_FOR_INGESTION        default: false (set true to make deploy block on real telemetry)
+  O2_STREAM_READY_TIMEOUT      default: 300 seconds
+  O2_STREAM_RETRY_INTERVAL     default: 5 seconds
+  O2_SKIP_SSRF_CHECKS          default: true
+EOF_USAGE
 }
 
-# ------------------------------------------------------------------------------
-# Dispatch
-# ------------------------------------------------------------------------------
-
 main() {
-  [[ $# -ge 1 ]] \
-    || {
-      usage
-      exit 2
-    }
-
-  local cmd="$1"
-
+  local cmd="${1:-}"
   case "${cmd}" in
-    deploy)
-      cmd_deploy
-      ;;
-
-    render)
-      cmd_render
-      ;;
-
-    delete)
-      cmd_delete
-      ;;
-
-    purge)
-      cmd_purge
-      ;;
-
-    status)
-      cmd_status
-      ;;
-
-    verify)
-      cmd_verify
-      ;;
-
-    logs)
-      shift
-      cmd_logs "$@"
-      ;;
-
-    rollout)
-      cmd_rollout
-      ;;
-
-    help|--help|-h)
-      usage
-      ;;
-
-    *)
-      usage
-      exit 2
-      ;;
+    deploy)  cmd_deploy ;;
+    verify)  cmd_verify ;;
+    render)  cmd_render ;;
+    status)  cmd_status ;;
+    logs)    shift; cmd_logs "$@" ;;
+    rollout) cmd_rollout ;;
+    delete)  cmd_delete ;;
+    purge)   cmd_purge ;;
+    help|--help|-h) usage ;;
+    *) usage; exit 2 ;;
   esac
 }
 

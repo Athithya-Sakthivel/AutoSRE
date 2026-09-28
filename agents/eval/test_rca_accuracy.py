@@ -11,10 +11,11 @@ import pytest
 
 from eval.conftest import (
     AgentClient,
+    RateLimitError,
     build_incident_context,
     incident_by_id,
     incident_ids,
-    is_rate_limit_error,
+    measure_metric_with_retry,
     run_incident,
 )
 
@@ -94,19 +95,24 @@ async def _measure_metric(
     test_case: Any,
     incident_id: str,
 ) -> float:
-    """Measure a DeepEval metric asynchronously."""
+    """Measure a DeepEval metric with retry on 429s.
+
+    Delegates to ``measure_metric_with_retry`` which handles exponential
+    backoff and honors Groq's retry-after hint. Skips the test only
+    after the retry budget is exhausted so a transient blip never fails
+    the suite.
+
+    Non-rate-limit errors propagate: a genuinely broken metric or a
+    malformed test case must fail loudly.
+    """
     try:
-        score = await metric.a_measure(test_case)
-    except Exception as exc:
-        if is_rate_limit_error(exc):
-            pytest.skip(f"Judge rate-limited on {incident_id}: {exc}")
-        raise
-
-    numeric = float(score)
-
-    assert isfinite(numeric), f"Incident {incident_id}: metric score must be finite"
-
-    return numeric
+        return await measure_metric_with_retry(
+            metric,
+            test_case,
+            label=f"judge[{incident_id}]",
+        )
+    except RateLimitError as exc:
+        pytest.skip(str(exc))
 
 
 @pytest.mark.parametrize(

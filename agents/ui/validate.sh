@@ -1,25 +1,30 @@
 #!/usr/bin/env bash
-# validate.sh — AutoSRE UI lint + typecheck + build gate.
-#
-# Fails fast on any step. Run this before committing UI changes.
+set -Eeuo pipefail
 
-set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
-cd "$(dirname "$0")"
+[[ -d node_modules ]] || {
+  echo "ERROR: node_modules is missing. Run agents/ui/lock-versions.sh first." >&2
+  exit 1
+}
 
-echo "Auto-formatting UI files…"
+echo "==> Formatting..."
 npm run format
 
-echo "Running pre-commit hooks…"
-cd /workspace
-pre-commit run eslint-agents-ui --files "$(find agents/ui/src -name '*.ts' -o -name '*.tsx')" || true
-pre-commit run prettier-agents-ui --files "$(find agents/ui/src -name '*.ts' -o -name '*.tsx')" || true
-cd /workspace/agents/ui
-
-echo "Type checking…"
+echo "==> Type checking..."
 npm run typecheck
 
-echo "Building…"
+echo "==> Linting..."
+npm run lint
+
+echo "==> Building..."
 npm run build
+
+echo "==> Running pre-commit ESLint..."
+cd "$REPO_ROOT"
+pre-commit run eslint-agents-ui --all-files
+
+echo "==> Running pre-commit Prettier..."
+pre-commit run prettier-agents-ui --all-files
 
 echo "✓ All checks passed"

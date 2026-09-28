@@ -117,7 +117,13 @@ STAGNATION_LIMIT: int = 2
 MAX_ACTION_ATTEMPTS: int = 2
 MIN_CONFIDENCE_FOR_ACTION: float = 0.70
 HIGH_CONFIDENCE_THRESHOLD: float = 0.75
-MIN_CONFIDENCE_IMPROVEMENT: float = 0.15
+
+# Minimum improvement to count as progress between hypothesize rounds.
+# Groq's smaller models advance 0.05-0.10 per round when evidence is
+# accumulating. 0.15 was too aggressive: real progress got classified as
+# stagnation, and the graph aborted before proposing an actionable
+# hypothesis.
+MIN_CONFIDENCE_IMPROVEMENT: float = 0.05
 
 # ---------------------------------------------------------------------------
 # Run-scoped mutable metrics

@@ -2,37 +2,50 @@
 # lock-versions.sh — Regenerate uv.lock and sync the venv.
 #
 # Usage:
-#   bash lock-versions.sh                # lock + sync
-#   bash lock-versions.sh --upgrade      # upgrade all deps, then sync
+#   bash agents/lock-versions.sh
+#   bash agents/lock-versions.sh --upgrade
 
-#!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+
+# Always run from the directory containing this script
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
 UV_VERSION="0.12.18"
 export UV_LINK_MODE=copy
 
-# Install uv only if missing or wrong version
-if ! command -v uv >/dev/null || [[ "$(uv --version | awk '{print $2}')" != "$UV_VERSION" ]]; then
-    curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" \
-      | env UV_UNMANAGED_INSTALL=/usr/local/bin sh
+# Ensure pyproject.toml exists
+[[ -f pyproject.toml ]] || {
+  echo "ERROR: pyproject.toml not found in $SCRIPT_DIR" >&2
+  exit 1
+}
+
+# Install pinned uv if missing or wrong version
+if ! command -v uv >/dev/null 2>&1 \
+  || [[ "$(uv --version | awk '{print $2}')" != "$UV_VERSION" ]]; then
+  echo "Installing uv $UV_VERSION..."
+  curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" \
+    | env UV_UNMANAGED_INSTALL=/usr/local/bin sh
 fi
 
-# Ensure venv exists on Python 3.14
-[[ -d .venv ]] || uv venv --python 3.14
-
-# Ensure venv exists on Python 3.14
+# Create the virtual environment if needed
 if [[ ! -d .venv ]]; then
-    uv venv --python 3.14
+  echo "Creating Python 3.14 virtual environment..."
+  uv venv --python 3.14
 fi
 
-# Lock (with optional upgrade flag)
+# Regenerate lockfile
 if [[ "${1:-}" == "--upgrade" ]]; then
-    uv lock --upgrade
+  echo "Upgrading dependencies..."
+  uv lock --upgrade
 else
-    uv lock
+  echo "Regenerating lockfile..."
+  uv lock
 fi
 
-# Sync runtime + dev deps into the venv
+# Sync runtime + development dependencies
+echo "Syncing environment..."
 uv sync --extra dev
 
-echo "Done. Run 'bash ci.sh' to verify."
+echo "✓ Dependencies locked and virtual environment synced"
+echo "Activate with: source $SCRIPT_DIR/.venv/bin/activate"

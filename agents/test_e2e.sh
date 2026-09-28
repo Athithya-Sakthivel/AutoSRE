@@ -6,29 +6,51 @@
 # Modes
 # -----
 #   --run           (default) Interactive. Starts agent + UI, streams logs,
-#                   prints URIs, blocks until Ctrl+C. Requires a running
-#                   Kind cluster with Rivulet deployed.
+#                   prints URIs, blocks until Ctrl+C. Requires Kind.
 #
-#   --test-locally  Full local harness. Runs static checks, unit and
-#                   integration tests, then starts agent + UI, runs the
-#                   eval suite, prints metrics, and verifies every contract.
-#                   Requires a running Kind cluster. Non-interactive.
+#   --test-locally  Full local harness. Static checks, unit and integration
+#                   tests, then agent + UI, eval suite, metrics, and
+#                   contract verification. Requires Kind. Non-interactive.
 #
-#   --ci            Headless. Runs static checks, eval static checks, and
-#                   unit + integration tests. Does NOT touch Kubernetes,
+#   --ci            Headless. Static checks, eval static checks, and unit
+#                   + integration tests only. Does NOT touch Kubernetes,
 #                   does NOT start the agent, does NOT run the eval suite.
-#                   Suitable for GitHub Actions with Testcontainers.
+#                   Suitable for GitHub Actions.
 #
 # Usage
 # -----
 #   bash test_e2e.sh
 #   bash test_e2e.sh --test-locally
+#   bash test_e2e.sh --test-locally --incident-id=INC-003
 #   bash test_e2e.sh --ci
 #
 # Environment
 # -----------
 #   LLM_API_KEY              Required for --run and --test-locally.
+#                            Mapped to AUTOSRE_LLM__API_KEY below.
 #   AUTOSRE_ADMIN__SECRET    Optional; harness generates one if unset.
+#
+# Slack (optional)
+# ----------------
+#   When AUTOSRE_SLACK__BOT_TOKEN is set, the agent starts the Slack
+#   client, handler, listener, and (in socket mode) the Socket Mode
+#   connection. Otherwise Slack is disabled.
+#
+#   Socket mode (default):
+#     export AUTOSRE_SLACK__BOT_TOKEN="xoxb-..."
+#     export AUTOSRE_SLACK__APP_TOKEN="xapp-..."
+#     export AUTOSRE_SLACK__APPROVAL_CHANNEL="C0123456789"
+#     export AUTOSRE_SLACK__APPROVER_USER_IDS='["U0123456789"]'
+#
+#   HTTP mode:
+#     export AUTOSRE_SLACK__MODE=http
+#     export AUTOSRE_SLACK__BOT_TOKEN="xoxb-..."
+#     export AUTOSRE_SLACK__SIGNING_SECRET="..."
+#
+#   The harness exports Slack vars ONLY when AUTOSRE_SLACK__BOT_TOKEN is
+#   non-empty. Empty-string exports would trigger Settings() validation
+#   and fail startup.
+#
 #
 # Strong defaults for --test-locally (override via env)
 # -----------------------------------------------------
@@ -53,9 +75,10 @@ IFS=$'\n\t'
 # -----------------------------------------------------------------------------
 
 MODE="run"
+INCIDENT_ID=""
 
 usage() {
-    sed -n '2,46p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,72p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -63,6 +86,7 @@ while [[ $# -gt 0 ]]; do
         --run)           MODE="run"; shift ;;
         --test-locally)  MODE="test-locally"; shift ;;
         --ci)            MODE="ci"; shift ;;
+        --incident-id=*) INCIDENT_ID="${1#*=}"; shift ;;
         -h|--help)       usage; exit 0 ;;
         *)
             printf 'Unknown argument: %s\n\n' "$1" >&2
@@ -71,6 +95,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "$INCIDENT_ID" && "$MODE" == "run" ]]; then
+    MODE="test-locally"
+fi
+
+if [[ -n "$INCIDENT_ID" && "$MODE" == "ci" ]]; then
+    printf '%s\n' "--incident-id is not valid in --ci mode" >&2
+    exit 2
+fi
 
 # -----------------------------------------------------------------------------
 # Paths and constants
@@ -97,13 +130,71 @@ PORT_FORWARDS=(
 
 mkdir -p "$PF_LOG_DIR"
 
-# Strong defaults for the eval, only consumed by --test-locally.
+# -----------------------------------------------------------------------------
+# LLM provider configuration
+# -----------------------------------------------------------------------------
+
+export AUTOSRE_LLM__PROVIDER="${AUTOSRE_LLM__PROVIDER:-groq}"
+export AUTOSRE_LLM__BASE_URL="${AUTOSRE_LLM__BASE_URL:-https://api.groq.com/openai/v1}"
+export AUTOSRE_LLM__MODEL_COORDINATOR="${AUTOSRE_LLM__MODEL_COORDINATOR:-qwen/qwen3.8-27b}"
+export AUTOSRE_LLM__MODEL_WORKER="${AUTOSRE_LLM__MODEL_WORKER:-openai/gpt-oss-20b}"
+export AUTOSRE_LLM__API_KEY="${AUTOSRE_LLM__API_KEY:-${LLM_API_KEY:-}}"
+
+export AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR:-0.0008}"
+export AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR:-0.004}"
+export AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER:-0.000075}"
+export AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER:-0.0003}"
+
+# -----------------------------------------------------------------------------
+# Eval judge configuration
+# -----------------------------------------------------------------------------
+# The judge uses the openai/ prefix with an explicit base_url override.
+# LiteLLM's OpenAI adapter honors base_url and routes the request to
+# Groq's OpenAI-compatible endpoint. This avoids LiteLLM's Groq-specific
+# adapter and its provider-detection bug (issue #14807).
+# The API key is read from settings by eval/conftest.py.
+
+export AUTOSRE_EVAL__JUDGE_MODEL="${AUTOSRE_EVAL__JUDGE_MODEL:-groq/openai/gpt-oss-20b}"
+export AUTOSRE_EVAL__JUDGE_BASE_URL="${AUTOSRE_EVAL__JUDGE_BASE_URL:-$AUTOSRE_LLM__BASE_URL}"
+export AUTOSRE_EVAL__JUDGE_API_KEY="${AUTOSRE_EVAL__JUDGE_API_KEY:-$AUTOSRE_LLM__API_KEY}"
+
+# The Groq adapter reads GROQ_API_KEY from the environment. The agent's
+# own LLM calls do not need this because TokenVelocityRouter passes
+# api_key explicitly; the judge does because DeepEval's LiteLLMModel
+# routes through LiteLLM's native Groq provider.
+export GROQ_API_KEY="${GROQ_API_KEY:-$AUTOSRE_LLM__API_KEY}"
+
+# -----------------------------------------------------------------------------
+# Slack configuration (optional, opt-in by bot token presence)
+# -----------------------------------------------------------------------------
+
+SLACK_ENABLED=false
+if [[ -n "${AUTOSRE_SLACK__BOT_TOKEN:-}" ]]; then
+    SLACK_ENABLED=true
+    export AUTOSRE_SLACK__MODE="${AUTOSRE_SLACK__MODE:-socket}"
+    export AUTOSRE_SLACK__BOT_TOKEN
+    export AUTOSRE_SLACK__APPROVAL_CHANNEL="${AUTOSRE_SLACK__APPROVAL_CHANNEL:-}"
+    export AUTOSRE_SLACK__APPROVER_USER_IDS="${AUTOSRE_SLACK__APPROVER_USER_IDS:-[]}"
+
+    if [[ "$AUTOSRE_SLACK__MODE" == "socket" ]]; then
+        export AUTOSRE_SLACK__APP_TOKEN="${AUTOSRE_SLACK__APP_TOKEN:-}"
+    else
+        export AUTOSRE_SLACK__SIGNING_SECRET="${AUTOSRE_SLACK__SIGNING_SECRET:-}"
+    fi
+fi
+
+# Strong defaults for --test-locally. Only consumed by the eval suite.
 : "${EVAL_FORCE_RERUN:=1}"
 : "${EVAL_INCIDENT_IDS:=INC-003}"
 : "${EVAL_DELAY_SECONDS:=10}"
+
+if [[ -n "$INCIDENT_ID" ]]; then
+    EVAL_INCIDENT_IDS="$INCIDENT_ID"
+    EVAL_FORCE_RERUN="1"
+fi
+
 export EVAL_FORCE_RERUN EVAL_INCIDENT_IDS EVAL_DELAY_SECONDS
 
-# Deterministic admin secret for the gate. Operators can override.
 ADMIN_SECRET="harness-admin-$(date +%s)"
 
 # -----------------------------------------------------------------------------
@@ -116,7 +207,7 @@ C_YELLOW=$'\033[1;33m'
 C_BLUE=$'\033[0;34m'
 C_CYAN=$'\033[0;36m'
 C_BOLD=$'\033[1m'
-C_DIM=$'\033[2m'          # <- defined here; was missing
+C_DIM=$'\033[2m'
 C_RESET=$'\033[0m'
 
 log()    { printf '%s==>%s %s\n' "${C_BLUE}" "${C_RESET}" "$*" >&2; }
@@ -132,11 +223,6 @@ fail() {
 
 # -----------------------------------------------------------------------------
 # Process tracking and cleanup
-#
-# Unchanged from the working version. Do not modify:
-#   - $! is captured immediately after the inline `kubectl ... &`
-#   - cleanup kills UI -> agent -> port-forwards in that order
-#   - SIGINT and SIGTERM set SHUTDOWN; the main loop decides
 # -----------------------------------------------------------------------------
 
 SHUTDOWN=false
@@ -218,14 +304,12 @@ require_cmd() {
 }
 
 stream_log() {
-    # Args: LOG_PATH PREFIX WATCH_PID
     local log_path=$1 prefix=$2 pid=$3
     tail -n +1 -F --pid="$pid" "$log_path" 2>/dev/null \
         | sed -u "s/^/[${prefix}] /" >&2 &
     echo $!
 }
 
-# Tee all output to file AND terminal.
 exec > >(tee -a "$OUTPUT_FILE") 2>&1
 
 # -----------------------------------------------------------------------------
@@ -242,7 +326,7 @@ echo "============================================================"
 echo ""
 
 # =============================================================================
-# PHASE 1 — Setup (all modes)
+# PHASE 1 — Setup
 # =============================================================================
 
 header "PHASE 1: Setup"
@@ -277,12 +361,27 @@ if [[ "$MODE" != "ci" ]]; then
     pass "UI dependencies present"
 fi
 
+if [[ "$MODE" != "ci" && -z "${AUTOSRE_LLM__API_KEY:-}" ]]; then
+    fail "AUTOSRE_LLM__API_KEY (or LLM_API_KEY) is not set" 1
+fi
+if [[ "$MODE" != "ci" ]]; then
+    pass "LLM API key present"
+fi
+
+log "LLM provider:   $AUTOSRE_LLM__PROVIDER"
+log "Coordinator:    $AUTOSRE_LLM__MODEL_COORDINATOR"
+log "Worker:         $AUTOSRE_LLM__MODEL_WORKER"
+if [[ "$MODE" != "run" ]]; then
+    log "Judge model:    $AUTOSRE_EVAL__JUDGE_MODEL"
+fi
+if [[ "$SLACK_ENABLED" == "true" ]]; then
+    log "Slack:          enabled (mode=$AUTOSRE_SLACK__MODE)"
+else
+    log "Slack:          disabled"
+fi
+
 # =============================================================================
 # PHASE 2 — Infrastructure + port-forwards (NOT in --ci)
-#
-# The port-forward startup is INLINE. kubectl is backgrounded in the current
-# shell and its PID captured immediately via $!. The cleanup function kills
-# each PID. Do not wrap this in a function or command substitution.
 # =============================================================================
 
 if [[ "$MODE" != "ci" ]]; then
@@ -345,6 +444,10 @@ fi
 # =============================================================================
 # PHASE 3 — Static checks (all modes except --run)
 # =============================================================================
+
+log "mypy (eval)…"
+MYPYPATH=src mypy eval/ || fail "mypy eval/ failed" 3
+pass "eval/ type checking clean"
 
 if [[ "$MODE" != "run" ]]; then
     header "PHASE 3: Static Checks"
@@ -455,9 +558,6 @@ fi
 
 # =============================================================================
 # PHASE 4 — Unit & integration tests (all modes except --run)
-#
-# CI mode relies on env vars supplied by the calling workflow. Local mode
-# uses safe placeholder defaults that only satisfy Settings construction.
 # =============================================================================
 
 if [[ "$MODE" != "run" ]]; then
@@ -485,7 +585,6 @@ fi
 if [[ "$MODE" != "ci" ]]; then
     header "PHASE 5: Start AutoSRE agent"
 
-    # Re-verify port-forwards before touching the DB.
     for entry in "${PORT_FORWARDS[@]}"; do
         IFS=':' read -r local_port _ _ _ <<< "$entry"
         if ! (echo >/dev/tcp/"$AGENT_HOST"/"$local_port") 2>/dev/null; then
@@ -535,12 +634,6 @@ if [[ "$MODE" != "ci" ]]; then
     export AUTOSRE_OTEL__SERVICE_NAME="autosre-agent"
     export AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT="evaluation"
     export AUTOSRE_DEPLOYMENT_ENVIRONMENT="evaluation"
-
-    export AUTOSRE_LLM__API_KEY="${LLM_API_KEY:-}"
-    export AUTOSRE_LLM__BASE_URL="https://api.groq.com/openai/v1"
-    export AUTOSRE_LLM__PROVIDER="groq"
-    export AUTOSRE_LLM__MODEL_COORDINATOR="qwen/qwen3.8-27b"
-    export AUTOSRE_LLM__MODEL_WORKER="openai/gpt-oss-20b"
 
     export AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS="1"
     export AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT="10"
@@ -674,59 +767,9 @@ fi
 # =============================================================================
 # PHASE 8 — Aggregate metrics (test-locally only)
 # =============================================================================
-
 if [[ "$MODE" == "test-locally" ]]; then
     header "PHASE 8: Aggregate Metrics"
-
-    python - <<'PY'
-import sys
-sys.path.insert(0, ".")
-from eval.conftest import compute_aggregate_metrics
-
-m = compute_aggregate_metrics()
-
-print()
-print("=========================================")
-print("  EVALUATION RESULTS")
-print("=========================================")
-print(f"  Total incidents:      {m['total_incidents']}")
-print(f"  Resolved:             {m['resolved_count']}")
-print(f"  No action:            {m['no_action_count']}")
-print(f"  Failed:               {m['failed_count']}")
-print()
-print(f"  Avg active MTTR:      {m['avg_mttr_seconds']}s")
-print(f"  Avg wall clock:       {m['avg_wall_clock_seconds']}s")
-print(f"  Avg backoff:          {m['avg_backoff_seconds']}s")
-print(f"  Baseline MTTR:        {m['baseline_mttr_seconds']}s")
-print(f"  MTTR reduction:       {m['mttr_reduction_pct']}%")
-print()
-print(f"  Total cost:           ${m['total_cost_usd']:.4f}")
-print(f"  Avg cost/incident:    ${m['avg_cost_usd']:.4f}")
-print(f"  Total tokens:         {m['total_tokens']:,}")
-print(f"  Avg tokens:           {m['avg_tokens']:,}")
-print(f"  Safety violations:    {m['safety_violations']}")
-print()
-
-if m["per_incident"]:
-    print(f"  {'ID':<10} {'Status':<12} {'Active':>8} {'Wall':>8} {'Backoff':>8} {'Cost':>10}")
-    print(f"  {'─'*10} {'─'*12} {'─'*8} {'─'*8} {'─'*8} {'─'*10}")
-    for inc in m["per_incident"]:
-        st = inc["status"]
-        badge = ("✓ " if st == "resolved"
-                 else "○ " if st == "no_action"
-                 else "✗ " if st == "failed"
-                 else "? ") + st
-        print(
-            f"  {inc['incident_id']:<10} {badge:<12} "
-            f"{inc['mttr_seconds']:>7.1f}s "
-            f"{inc['wall_clock_seconds']:>7.1f}s "
-            f"{inc['backoff_seconds']:>7.1f}s "
-            f"${inc['cost_usd']:>9.4f}"
-        )
-    print()
-print("=========================================")
-PY
-
+    python eval/print_metrics.py || warn "Metrics print failed"
     pass "Metrics printed"
 else
     header "PHASE 8: Aggregate Metrics (skipped — $MODE mode)"
@@ -836,25 +879,38 @@ assert wall + 1 >= active + backoff, (
 
 executed = r.get("executed_actions") or []
 
+_MUTATING_TOOLS = {
+    "restart_deployment", "scale_deployment", "delete_pod",
+    "terminate_backend", "delete_valkey_key", "set_feature_flag",
+}
+
 if r["status"] == "resolved":
     assert isinstance(executed, list) and executed, (
         f"{iid}: status=resolved but no executed actions"
     )
-    assert any(a.get("success") for a in executed), (
-        f"{iid}: status=resolved but no action succeeded"
+    mutations = [
+        a for a in executed
+        if isinstance(a, dict) and a.get("tool_name") in _MUTATING_TOOLS
+    ]
+    assert mutations, (
+        f"{iid}: status=resolved but no mutating action executed"
+    )
+    assert any(a.get("success") for a in mutations), (
+        f"{iid}: status=resolved but no mutation succeeded"
     )
 
 if r["status"] == "no_action":
-    assert not executed, (
-        f"{iid}: status=no_action but {len(executed)} actions executed"
+    mutations = [
+        a for a in executed
+        if isinstance(a, dict) and a.get("tool_name") in _MUTATING_TOOLS
+    ]
+    assert not mutations, (
+        f"{iid}: status=no_action but {len(mutations)} mutating actions "
+        f"executed: {[a.get('tool_name') for a in mutations]}"
     )
 
-mutating = {
-    "restart_deployment", "scale_deployment", "delete_pod",
-    "terminate_backend", "delete_valkey_key", "set_feature_flag",
-}
 names = [a.get("tool_name") for a in executed if isinstance(a, dict)]
-for tool in mutating:
+for tool in _MUTATING_TOOLS:
     count = names.count(tool)
     assert count <= 1, f"{iid}: mutating tool {tool} executed {count} times"
 
@@ -897,7 +953,6 @@ PY
 else
     header "PHASE 9: Contract Verification (skipped — $MODE mode)"
 fi
-
 # =============================================================================
 # PHASE 10 — Interactive banner (run mode only)
 # =============================================================================
@@ -925,6 +980,8 @@ if [[ "$MODE" == "run" ]]; then
     curl -X POST http://$AGENT_HOST:$AGENT_PORT/admin/pause  -H "X-Admin-Secret: $AUTOSRE_ADMIN__SECRET"
     curl -X POST http://$AGENT_HOST:$AGENT_PORT/admin/resume -H "X-Admin-Secret: $AUTOSRE_ADMIN__SECRET"
     curl      http://$AGENT_HOST:$AGENT_PORT/admin/status  -H "X-Admin-Secret: $AUTOSRE_ADMIN__SECRET"
+
+  ${C_DIM}Slack:${C_RESET}   $([[ "$SLACK_ENABLED" == "true" ]] && echo "enabled (mode=$AUTOSRE_SLACK__MODE)" || echo "disabled")
 
   ${C_BOLD}Press Ctrl+C to stop.${C_RESET}
 

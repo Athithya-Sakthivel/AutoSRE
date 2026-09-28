@@ -1,21 +1,19 @@
 """Protocol contract for LangGraph runner implementations.
 
-This module defines the interface that main.py, routes.py, and tests depend
-on. Both LangGraphRunner and any test doubles must satisfy this Protocol.
+This module defines the interface that routes.py and the eval harness
+depend on. Both LangGraphRunner and any test doubles must satisfy this
+Protocol structurally.
 
-This uses Python's structural subtyping via typing.Protocol. Any class with
-matching method signatures automatically implements this Protocol without
-explicit inheritance.
+The Protocol defines six methods for incident lifecycle management:
 
-The Protocol defines 4 methods for incident lifecycle management:
+    run_incident(alert)                Trigger and block until complete
+    schedule_incident(alert)           Trigger and return immediately
+    get_incident_state(incident_id)    Retrieve current state
+    list_incidents(limit)              List all incidents
+    approve_incident(id, ...)          Resume a paused HITL interrupt
+    shutdown(timeout)                  Drain background tasks
 
-- run_incident(alert): Trigger a new incident investigation
-- get_incident_state(incident_id): Retrieve current state of an incident
-- list_incidents(limit): List all incidents from the checkpointer
-- approve_incident(incident_id, approved, comment): Approve or reject a
-  pending Tier-2+ action
-
-The concrete implementation is LangGraphRunner in src/autosre/api/runner.py.
+The concrete implementation is LangGraphRunner in api/runner.py.
 """
 
 from __future__ import annotations
@@ -27,7 +25,19 @@ class RunnerProtocol(Protocol):
     """Contract for incident lifecycle operations."""
 
     async def run_incident(self, alert: dict[str, Any]) -> str:
-        """Trigger a new incident investigation."""
+        """Execute an investigation to completion; return the incident_id.
+
+        Blocking. The HTTP webhook handler MUST NOT use this method;
+        use ``schedule_incident`` instead.
+        """
+        ...
+
+    async def schedule_incident(self, alert: dict[str, Any]) -> str:
+        """Start an investigation in the background; return the incident_id.
+
+        Non-blocking. Returns within milliseconds. The graph runs in a
+        task tracked by the runner.
+        """
         ...
 
     async def get_incident_state(self, incident_id: str) -> Any | None:
@@ -45,4 +55,8 @@ class RunnerProtocol(Protocol):
         comment: str = "",
     ) -> bool:
         """Approve or reject a pending Tier-2+ action."""
+        ...
+
+    async def shutdown(self, timeout: float = 30.0) -> None:
+        """Drain background tasks. Called from the FastAPI lifespan."""
         ...

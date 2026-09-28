@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
@@ -13,8 +13,13 @@ command -v npm >/dev/null 2>&1 || {
   exit 1
 }
 
+[[ -f package.json ]] || {
+  echo "ERROR: package.json not found" >&2
+  exit 1
+}
+
 rm -rf node_modules package-lock.json
+
 npm install
-npm ci
 
 echo "✓ Dependencies locked"

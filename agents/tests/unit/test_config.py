@@ -68,7 +68,7 @@ class TestLLMConfig:
         assert config.base_url == "https://api.groq.com/openai/v1"
         assert config.provider == "groq"
         assert config.model_coordinator == "qwen/qwen3.8-27b"
-        assert config.model_worker == "groq/openai/gpt-oss-20b"
+        assert config.model_worker == "openai/gpt-oss-20b"
 
     def test_fails_without_api_key(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
@@ -269,7 +269,15 @@ class TestSafetyConfig:
 
 # ---------------------------------------------------------------------------
 # SlackConfig
+#
+# The validator requires approver_user_ids when Slack is enabled. Passing
+# credentials alone is a misconfiguration: an unrestricted approval
+# channel is a security hole. Every enabled-path test passes an explicit
+# approver, and the tests that expect rejection use the missing-credential
+# path which fires before the approver check.
 # ---------------------------------------------------------------------------
+
+_TEST_APPROVERS = {"U0123456789"}
 
 
 class TestSlackConfig:
@@ -278,6 +286,7 @@ class TestSlackConfig:
         assert config.bot_token is None
         assert config.app_token is None
         assert config.signing_secret is None
+        assert config.approver_user_ids == set()
         assert config.is_enabled is False
 
     def test_socket_mode_enabled_with_both_tokens(self) -> None:
@@ -285,24 +294,50 @@ class TestSlackConfig:
             mode="socket",
             bot_token="xoxb-test",
             app_token="xapp-test",
+            approval_channel="C0123456789",
+            approver_user_ids=_TEST_APPROVERS,
         )
         assert config.is_enabled is True
+        assert config.mode == "socket"
+        assert config.approver_user_ids == _TEST_APPROVERS
 
     def test_http_mode_enabled_with_token_and_secret(self) -> None:
         config = SlackConfig(
             mode="http",
             bot_token="xoxb-test",
             signing_secret="sig-test",
+            approval_channel="C0123456789",
+            approver_user_ids=_TEST_APPROVERS,
         )
         assert config.is_enabled is True
+        assert config.mode == "http"
 
     def test_socket_mode_rejects_missing_app_token(self) -> None:
+        """Socket mode without an app token is invalid."""
         with pytest.raises(ValidationError, match="mode=socket"):
-            SlackConfig(mode="socket", bot_token="xoxb-test")
+            SlackConfig(
+                mode="socket",
+                bot_token="xoxb-test",
+                approver_user_ids=_TEST_APPROVERS,
+            )
 
     def test_http_mode_rejects_missing_signing_secret(self) -> None:
+        """HTTP mode without a signing secret is invalid."""
         with pytest.raises(ValidationError, match="mode=http"):
-            SlackConfig(mode="http", bot_token="xoxb-test")
+            SlackConfig(
+                mode="http",
+                bot_token="xoxb-test",
+                approver_user_ids=_TEST_APPROVERS,
+            )
+
+    def test_enabled_without_approvers_is_rejected(self) -> None:
+        """Enabling Slack without an approver allowlist is a misconfiguration."""
+        with pytest.raises(ValidationError, match="approver_user_ids"):
+            SlackConfig(
+                mode="socket",
+                bot_token="xoxb-test",
+                app_token="xapp-test",
+            )
 
     def test_empty_config_is_valid_and_disabled(self) -> None:
         config = SlackConfig()
@@ -344,3 +379,72 @@ class TestSettings:
         assert settings.llm.api_key.get_secret_value() == "test-key"
         assert settings.postgres.password.get_secret_value() == "pg-pass"
         assert settings.alert.webhook_secret.get_secret_value() == "webhook-secret"
+        assert settings.openobserve.email == "admin@test.com"
+
+    def test_fails_on_missing_llm_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AUTOSRE_POSTGRES__PASSWORD", "pg-pass")
+        monkeypatch.setenv("AUTOSRE_ALERT__WEBHOOK_SECRET", "secret")
+        monkeypatch.setenv("AUTOSRE_OPENOBSERVE__EMAIL", "a@b.com")
+        monkeypatch.setenv("AUTOSRE_OPENOBSERVE__PASSWORD", "pass")
+        # AUTOSRE_LLM__API_KEY deliberately unset.
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_fails_on_missing_postgres_password(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AUTOSRE_LLM__API_KEY", "key")
+        monkeypatch.setenv("AUTOSRE_ALERT__WEBHOOK_SECRET", "secret")
+        monkeypatch.setenv("AUTOSRE_OPENOBSERVE__EMAIL", "a@b.com")
+        monkeypatch.setenv("AUTOSRE_OPENOBSERVE__PASSWORD", "pass")
+        # AUTOSRE_POSTGRES__PASSWORD deliberately unset.
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_deployment_environment_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._set_minimum_env(monkeypatch)
+        settings = Settings()
+        assert settings.deployment_environment == "development"
+        assert settings.otel.deployment_environment == "development"
+
+    def test_deployment_environment_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._set_minimum_env(monkeypatch)
+        monkeypatch.setenv("AUTOSRE_DEPLOYMENT_ENVIRONMENT", "staging")
+        settings = Settings()
+        assert settings.deployment_environment == "staging"
+        assert settings.otel.deployment_environment == "staging"
+
+    def test_nested_env_delimiter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`AUTOSRE_LLM__MODEL_COORDINATOR` maps to settings.llm.model_coordinator."""
+        self._set_minimum_env(monkeypatch)
+        monkeypatch.setenv("AUTOSRE_LLM__MODEL_COORDINATOR", "custom/model")
+        settings = Settings()
+        assert settings.llm.model_coordinator == "custom/model"
+
+    def test_otel_headers_property_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._set_minimum_env(monkeypatch)
+        monkeypatch.setenv(
+            "AUTOSRE_OTEL__EXPORTER_HEADERS",
+            "Authorization=Bearer abc,X-Key=xyz",
+        )
+        settings = Settings()
+        assert settings.otel.parsed_headers == {
+            "Authorization": "Bearer abc",
+            "X-Key": "xyz",
+        }
+
+    def test_safety_defaults_propagate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._set_minimum_env(monkeypatch)
+        settings = Settings()
+        assert settings.safety.max_risk_tier_autonomous == 1
+        assert settings.safety.max_actions_per_incident == 10
+        assert settings.safety.max_wall_clock_seconds == 600
+
+    def test_slack_disabled_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._set_minimum_env(monkeypatch)
+        settings = Settings()
+        assert settings.slack.is_enabled is False
+        assert settings.slack.mode == "socket"
+
+    def test_admin_secret_none_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._set_minimum_env(monkeypatch)
+        settings = Settings()
+        assert settings.admin.secret is None
