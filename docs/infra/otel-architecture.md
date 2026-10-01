@@ -12,7 +12,7 @@ The observability stack collects three signal types from a Kubernetes cluster:
 - **Metrics** from application services and from the Kubernetes node runtime
 - **Logs** from application services
 
-All signals converge on a single OpenObserve instance deployed in the same cluster.
+All signals converge on a single OpenObserve instance deployed in the same cluster. The stack is designed for a single-node `kind` cluster used for local development, and it carries forward unchanged to a multi-node AKS cluster without modifying the application or collector configuration.
 
 The design priorities, in order:
 
@@ -368,7 +368,23 @@ A rising `otelcol_processor_refused_spans` indicates the collector is above its 
 
 ---
 
-## 8. Glossary
+## 8. File Reference
+
+| Path | Purpose |
+|:---|:---|
+| `infra/k8s/open-observe-minimal/` | Helm chart for the OpenObserve Deployment |
+| `infra/k8s/otel-gateway/` | Helm chart for the OTel Collector gateway |
+| `infra/k8s/otel-daemonset/` | Helm chart for the OTel Collector DaemonSet |
+| `scripts/common/open-observe/deploy.sh` | Deploys the OpenObserve chart |
+| `scripts/common/otel-gateway-deploy.sh` | Deploys the gateway chart |
+| `scripts/common/otel-daemonset-deploy.sh` | Deploys the DaemonSet chart |
+| `scripts/common/open-observe/backup.sh` | Backs up the OpenObserve SQLite metadata |
+| `scripts/common/open-observe/restore.sh` | Restores the OpenObserve SQLite metadata |
+| `tests/infra/observability.sh` | End-to-end smoke test |
+
+---
+
+## 9. Glossary
 
 | Term | Definition |
 |:---|:---|
