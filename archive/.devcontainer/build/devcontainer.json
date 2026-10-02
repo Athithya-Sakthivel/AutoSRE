@@ -1,0 +1,60 @@
+{
+  "name": "agentic-devcontainer",
+
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+
+  "remoteUser": "root",
+  "containerUser": "root",
+
+  // Playwright browsers are baked into the image.
+  // pre-commit hooks must be installed at runtime because .git/ is bind-mounted.
+  // Project-level npm install for @playwright/test happens here too.
+  "postCreateCommand": "bash .devcontainer/postcreate.sh",
+
+  "forwardPorts": [
+    3000, 3001, 8000, 8001, 8080, 50051,
+    8005, 7000, 7001, 7002, 7003, 6379,
+    9153, 9090, 30080, 443, 80, 18080, 18082, 18090
+  ],
+
+  "runArgs": [
+    "--privileged",
+    "--network=host",
+    "--cap-add=SYS_PTRACE",
+    "--security-opt=seccomp=unconfined",
+    "-v", "/var/run/docker.sock:/var/run/docker.sock",
+    "--shm-size=10g"
+  ],
+
+  "remoteEnv": {
+    "DISPLAY": "",
+    "WAYLAND_DISPLAY": ""
+  },
+
+  "containerEnv": {
+    "DOCKER_GID": "999",
+    "DOCKER_PROXY_HOST": "",
+    "DOCKER_PROXY_PORT": ""
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode-remote.remote-containers"
+      ],
+      "settings": {
+        "files.autoSave": "afterDelay",
+        "files.autoSaveDelay": 1000,
+        "terminal.integrated.scrollback": 3500,
+        "workbench.colorTheme": "Default Dark Modern",
+        "workbench.preferredDarkColorTheme": "Default Dark Modern"
+      }
+    }
+  }
+}
