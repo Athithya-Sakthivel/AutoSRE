@@ -1,0 +1,59 @@
+{
+  "name": "ProcureOps",
+
+  // Consume the prebuilt, digest-pinned image instead of building locally.
+  "image": "ghcr.io/athithya-sakthivel/agentic-devcontainer:2026.10.02@sha256:bf0126934ba5e87149a79d29e3bc3b60671bb1ce419de51b55427a00d18c3a89",
+
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+
+  "remoteUser": "root",
+  "containerUser": "root",
+
+  // postCreateCommand only handles tasks that MUST run at runtime
+  // against the bind-mounted workspace (e.g., git hooks).
+  "postCreateCommand": "bash .devcontainer/postcreate.sh",
+
+  "forwardPorts": [
+    3000, 3001, 8000, 8001, 8080, 50051,
+    8005, 7000, 7001, 7002, 7003, 6379,
+    9153, 9090, 30080, 443, 80, 18080, 18082, 18090
+  ],
+
+  "runArgs": [
+    "--privileged",
+    "--network=host",
+    "--cap-add=SYS_PTRACE",
+    "--security-opt=seccomp=unconfined",
+    "-v", "/var/run/docker.sock:/var/run/docker.sock",
+    "--shm-size=10g"
+  ],
+"remoteEnv": {
+  "PROMPT_COLOR": "always",
+  "PROMPT_THEME": "default",
+  "CLICOLOR": "1",
+  "TERM": "xterm-256color",
+  "DISPLAY": "",
+  "WAYLAND_DISPLAY": ""
+},
+  "containerEnv": {
+    "DOCKER_GID": "999",
+    "DOCKER_PROXY_HOST": "",
+    "DOCKER_PROXY_PORT": ""
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode-remote.remote-containers"
+      ],
+      "settings": {
+        "files.autoSave": "afterDelay",
+        "files.autoSaveDelay": 1000,
+        "terminal.integrated.scrollback": 3500,
+        "workbench.colorTheme": "Default Dark Modern",
+        "workbench.preferredDarkColorTheme": "Default Dark Modern"
+      }
+    }
+  }
+}
