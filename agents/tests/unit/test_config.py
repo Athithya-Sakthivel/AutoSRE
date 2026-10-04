@@ -93,12 +93,18 @@ class TestLLMConfig:
         config = LLMConfig(api_key="key")
         assert config.base_url is None
 
-    def test_cost_defaults_are_zero_for_free_tier(self) -> None:
-        config = LLMConfig(api_key="key")
-        assert config.input_cost_per_1k_coordinator == 0.0
-        assert config.output_cost_per_1k_coordinator == 0.0
-        assert config.input_cost_per_1k_worker == 0.0
-        assert config.output_cost_per_1k_worker == 0.0
+    def test_cost_defaults_are_paid_tier_rates(self) -> None:
+        """Cost defaults reflect paid-tier rates for accurate portfolio projection.
+
+        On free tier, actual billed cost is $0 (reported by the provider),
+        but estimated_paid_cost_usd uses these rates so the portfolio
+        dashboard shows projected costs.
+        """
+        config = LLMConfig(api_key="test")
+        assert config.input_cost_per_1k_coordinator == 0.00075
+        assert config.output_cost_per_1k_coordinator == 0.00375
+        assert config.input_cost_per_1k_worker == 0.00075
+        assert config.output_cost_per_1k_worker == 0.00375
 
     def test_cost_can_be_overridden_for_paid_tier(self) -> None:
         config = LLMConfig(
@@ -118,10 +124,14 @@ class TestLLMConfig:
             LLMConfig(api_key="key", input_cost_per_1k_coordinator=-0.001)
 
     def test_retry_defaults(self) -> None:
-        config = LLMConfig(api_key="key")
-        assert config.max_retries == 5
-        assert config.initial_backoff_seconds == 2.0
-        assert config.max_backoff_seconds == 60.0
+        config = LLMConfig(api_key="test")
+        assert config.max_retries == 3
+        assert config.initial_backoff_seconds == 1.0
+        assert config.max_backoff_seconds == 30.0
+        assert config.absolute_backoff_cap_seconds == 30.0
+        assert config.circuit_breaker_enabled is True
+        assert config.circuit_breaker_threshold == 5
+        assert config.circuit_breaker_timeout_seconds == 60.0
 
     def test_retry_bounds(self) -> None:
         with pytest.raises(ValidationError):

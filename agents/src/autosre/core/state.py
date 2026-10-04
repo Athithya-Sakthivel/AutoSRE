@@ -152,8 +152,17 @@ class AgentState(TypedDict, total=False):
     approval_granted: bool | None
     approval_comment: str | None
 
+    # Token and cost tracking (split for accuracy)
     tokens_used: int
-    cost_usd: float
+    prompt_tokens: int
+    completion_tokens: int
+    cost_usd: float  # Actual billed cost ($0 on free tier)
+    estimated_paid_cost_usd: float  # What it would cost on paid tier
+
+    # Per-model usage tracking
+    model_usage: dict[str, dict[str, int]]  # {"gemini-2.5-pro": {"calls": 5, "tokens": 12000}}
+
+    # Timing and status
     wall_clock_seconds: float
     backoff_seconds: float
     active_seconds: float
@@ -276,7 +285,11 @@ def create_initial_state(
         approval_granted=None,
         approval_comment=None,
         tokens_used=0,
+        prompt_tokens=0,
+        completion_tokens=0,
         cost_usd=0.0,
+        estimated_paid_cost_usd=0.0,
+        model_usage={},
         wall_clock_seconds=0.0,
         backoff_seconds=0.0,
         active_seconds=0.0,

@@ -57,16 +57,55 @@ import os
 import re
 import threading
 import time
+import warnings as _warnings
 from pathlib import Path
 from typing import Any
 
 import httpx
-
-# Configure LiteLLM to drop unsupported parameters for Gemini
 import litellm
 import pytest
 
+_warnings.filterwarnings(
+    "ignore",
+    message=r".*ReadOnly.*qualifier.*",
+    category=UserWarning,
+    module=r"pydantic.*",
+)
+
+# Suppress Pydantic warnings from DeepEval's internal LiteLLM schema generation.
+# These come from ChatCompletionReasoningItem using ReadOnly qualifiers, which
+# Pydantic warns about but doesn't affect functionality.
+_warnings.filterwarnings(
+    "ignore",
+    message=r".*ReadOnly.*qualifier.*",
+    category=UserWarning,
+    module=r"pydantic.*",
+)
+
+_warnings.filterwarnings(
+    "ignore",
+    message=r".*ChatCompletionReasoningItem.*",
+    category=UserWarning,
+)
+
+# ---------------------------------------------------------------------------
+# LiteLLM global configuration
+# ---------------------------------------------------------------------------
+# Drop unsupported parameters globally to prevent hard 400 errors for
+# parameters like temperature, top_p, top_k which Gemini 3+ has deprecated.
+# NOTE: This does NOT fix G-Eval logprobs — G-Eval uses a separate code path
+# (a_generate_raw_response) that bypasses drop_params. G-Eval is permanently
+# incompatible with Gemini Flash Lite on Google AI Studio.
+
 litellm.drop_params = True
+litellm.suppress_debug_info = True
+
+# Suppress the Gemini 3+ deprecation warnings from LiteLLM.
+_warnings.filterwarnings(
+    "ignore",
+    message=r".*temperature.*top_p.*top_k.*",
+    category=DeprecationWarning,
+)
 
 logger = logging.getLogger(__name__)
 

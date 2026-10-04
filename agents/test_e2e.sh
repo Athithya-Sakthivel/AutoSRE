@@ -140,6 +140,8 @@ AGENT_PORT="8000"
 UI_HOST="127.0.0.1"
 UI_PORT="5173"
 
+export PY_COLORS=1 # required
+
 # Port-forward map: "local:remote:namespace:service"
 PORT_FORWARDS=(
     "15432:5432:rivulet:postgres"

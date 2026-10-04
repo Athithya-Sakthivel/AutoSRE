@@ -14,6 +14,7 @@ import {
   formatDuration,
   formatTokens,
 } from "../lib/utils";
+import type { ModelUsageMap } from "../lib/types";
 import { ApiError } from "../lib/api";
 
 export function IncidentDetailPage(): ReactElement {
@@ -108,6 +109,10 @@ export function IncidentDetailPage(): ReactElement {
                 value={formatDuration(incident.wall_clock_seconds)}
               />
               <MetricRow
+                label="Active Work"
+                value={formatDuration(incident.active_seconds)}
+              />
+              <MetricRow
                 label="Iterations"
                 value={formatCount(incident.iterations)}
               />
@@ -115,13 +120,42 @@ export function IncidentDetailPage(): ReactElement {
                 label="Tokens"
                 value={formatTokens(incident.tokens_used)}
               />
+              {typeof incident.prompt_tokens === "number" &&
+                typeof incident.completion_tokens === "number" && (
+                  <>
+                    <MetricRow
+                      label="  ↳ Prompt"
+                      value={formatTokens(incident.prompt_tokens)}
+                      muted
+                    />
+                    <MetricRow
+                      label="  ↳ Completion"
+                      value={formatTokens(incident.completion_tokens)}
+                      muted
+                    />
+                  </>
+                )}
               <MetricRow label="Cost" value={formatCost(incident.cost_usd)} />
+              {typeof incident.estimated_paid_cost_usd === "number" &&
+                incident.estimated_paid_cost_usd > 0 && (
+                  <MetricRow
+                    label="Projected"
+                    value={formatCost(incident.estimated_paid_cost_usd)}
+                    tooltip="Equivalent cost at paid-tier rates"
+                    accent
+                  />
+                )}
               <MetricRow
                 label="Phase"
                 value={incident.phase.replace(/_/g, " ")}
               />
             </dl>
           </div>
+
+          {incident.model_usage &&
+            Object.keys(incident.model_usage).length > 0 && (
+              <ModelUsagePanel modelUsage={incident.model_usage} />
+            )}
 
           <TraceTimeline incident={incident} />
         </div>
@@ -144,16 +178,66 @@ function BackLink(): ReactElement {
 function MetricRow({
   label,
   value,
+  muted = false,
+  accent = false,
+  tooltip,
 }: {
   label: string;
   value: string;
+  muted?: boolean;
+  accent?: boolean;
+  tooltip?: string;
 }): ReactElement {
+  const valueClasses = [
+    "text-sm font-medium tabular-nums",
+    accent
+      ? "text-status-awaiting"
+      : muted
+        ? "text-slate-400"
+        : "text-slate-200",
+  ].join(" ");
+
   return (
-    <div className="flex items-center justify-between">
+    <div className="flex items-center justify-between gap-3">
       <dt className="text-xs text-slate-500">{label}</dt>
-      <dd className="text-sm font-medium tabular-nums text-slate-200">
+      <dd className={valueClasses} title={tooltip}>
         {value}
       </dd>
+    </div>
+  );
+}
+
+function ModelUsagePanel({
+  modelUsage,
+}: {
+  modelUsage: ModelUsageMap;
+}): ReactElement {
+  const entries = Object.entries(modelUsage).sort(
+    (a, b) => b[1].tokens - a[1].tokens,
+  );
+
+  return (
+    <div className="rounded-lg border border-surface-border bg-surface-1 p-4">
+      <h3 className="text-sm font-semibold text-slate-300">Model Usage</h3>
+      <p className="mt-1 text-[11px] text-slate-500">
+        LLM models used during investigation
+      </p>
+
+      <ul className="mt-3 space-y-2">
+        {entries.map(([model, usage]) => (
+          <li
+            key={model}
+            className="flex items-center justify-between gap-3 text-xs"
+          >
+            <span className="truncate font-mono text-slate-300" title={model}>
+              {model}
+            </span>
+            <span className="shrink-0 tabular-nums text-slate-400">
+              {formatCount(usage.calls)} · {formatTokens(usage.tokens)}
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

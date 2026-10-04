@@ -129,13 +129,17 @@ def _create_mock_tools() -> list[MockTool]:
 # ---------------------------------------------------------------------------
 
 
-def _llm_response(payload: dict[str, Any]) -> SimpleNamespace:
-    """Return an OpenAI-compatible response with JSON content."""
-    return SimpleNamespace(
+def _llm_response(payload: dict[str, Any]) -> tuple[SimpleNamespace, str]:
+    """Return an OpenAI-compatible (response, model_used) tuple.
+
+    Graph nodes unpack the router return as ``response, model_used = ...``.
+    """
+    response = SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(payload)))],
         usage=None,
         model="gemini/gemini-3.8-flash",
     )
+    return response, "gemini/gemini-3.8-flash"
 
 
 def _make_execution_result(
@@ -201,7 +205,10 @@ def _build_config(
     }
 
 
-def _build_full_state(sample_metadata: IncidentMetadata, **overrides: Any) -> AgentState:
+def _build_full_state(
+    sample_metadata: IncidentMetadata,
+    **overrides: Any,
+) -> AgentState:
     """Build a fully-populated AgentState with sensible defaults."""
     base: dict[str, Any] = {
         "messages": [],
@@ -226,6 +233,7 @@ def _build_full_state(sample_metadata: IncidentMetadata, **overrides: Any) -> Ag
         "started_at": time.time(),
         "status": "running",
     }
+
     base.update(overrides)
     return AgentState(**base)
 
@@ -247,10 +255,15 @@ def mock_llm_router() -> MagicMock:
 def mock_tool_registry() -> MagicMock:
     registry = MagicMock(spec=ToolRegistry)
     mock_tools = _create_mock_tools()
+
     registry.list_tools = MagicMock(return_value=mock_tools)
     registry.get = MagicMock(
-        side_effect=lambda name: next((t for t in mock_tools if t.name == name), None)
+        side_effect=lambda name: next(
+            (tool for tool in mock_tools if tool.name == name),
+            None,
+        )
     )
+
     # Default mock for registry.execute (used by investigate_node)
     registry.execute = AsyncMock(return_value={"status": "success"})
     return registry
@@ -335,9 +348,31 @@ def _configure_full_flow(
     hypothesis_confidence: float = 0.9,
     risk_tier: int = 1,
 ) -> None:
-    """Configure LLM + executor mocks for triage -> complete."""
-    # propose_node uses coordinator_call
+    """Configure LLM + executor mocks for triage -> complete.
+
+    Node-to-method mapping:
+        triage_node       -> acompletion (worker-tier)
+        investigate_node  -> acompletion (worker-tier)
+        hypothesize_node  -> coordinator_call (coordinator-tier)
+        propose_node      -> coordinator_call (coordinator-tier)
+    """
+    # hypothesize_node and propose_node use coordinator_call
     ctx.llm_router.coordinator_call.side_effect = [
+        # Hypothesize (refinement)
+        _llm_response(
+            {
+                "hypotheses": [
+                    {
+                        "id": "H1",
+                        "description": "Pod crash loop due to OOMKilled",
+                        "confidence": hypothesis_confidence,
+                        "evidence": ["CrashLoopBackOff", "OOMKilled event"],
+                        "status": "confirmed",
+                    }
+                ],
+            }
+        ),
+        # Propose
         _llm_response(
             {
                 "tool_name": "restart_deployment",
@@ -352,7 +387,7 @@ def _configure_full_flow(
         ),
     ]
 
-    # triage, investigate, hypothesize use acompletion
+    # triage_node and investigate_node use acompletion
     ctx.llm_router.acompletion.side_effect = [
         # Triage
         _llm_response(
@@ -368,7 +403,7 @@ def _configure_full_flow(
                 ],
             }
         ),
-        # Investigate (new format: tools array)
+        # Investigate (tools array format)
         _llm_response(
             {
                 "tools": [
@@ -380,20 +415,6 @@ def _configure_full_flow(
                         },
                     }
                 ]
-            }
-        ),
-        # Hypothesize (refinement)
-        _llm_response(
-            {
-                "hypotheses": [
-                    {
-                        "id": "H1",
-                        "description": "Pod crash loop due to OOMKilled",
-                        "confidence": hypothesis_confidence,
-                        "evidence": ["CrashLoopBackOff", "OOMKilled event"],
-                        "status": "confirmed",
-                    }
-                ],
             }
         ),
     ]
@@ -431,7 +452,11 @@ async def test_graph_triage_to_completion(
     _configure_full_flow(investigation_context)
 
     graph = compile_graph()
-    config = _build_config("test-thread-001", investigation_context, mock_sre_context)
+    config = _build_config(
+        "test-thread-001",
+        investigation_context,
+        mock_sre_context,
+    )
 
     result = await graph.ainvoke(initial_state, config=config)
 
@@ -459,7 +484,11 @@ async def test_graph_high_confidence_hypothesis_skips_investigation(
     investigation_context.llm_router.coordinator_call.return_value = _llm_response(
         {
             "tool_name": "restart_deployment",
-            "tool_args": {"namespace": "rivulet", "name": "api-gateway", "reason": "OOM"},
+            "tool_args": {
+                "namespace": "rivulet",
+                "name": "api-gateway",
+                "reason": "OOM",
+            },
             "risk_tier": 1,
             "rationale": "Restart",
         }
@@ -468,7 +497,11 @@ async def test_graph_high_confidence_hypothesis_skips_investigation(
     investigation_context.executor.execute = AsyncMock(
         return_value=_make_execution_result(
             tool_name="restart_deployment",
-            tool_args={"namespace": "rivulet", "name": "api-gateway", "reason": "OOM"},
+            tool_args={
+                "namespace": "rivulet",
+                "name": "api-gateway",
+                "reason": "OOM",
+            },
             risk_tier=1,
             output={"status": "success", "restarted": True},
         )
@@ -491,7 +524,11 @@ async def test_graph_high_confidence_hypothesis_skips_investigation(
     )
 
     graph = compile_graph()
-    config = _build_config("test-thread-002", investigation_context, mock_sre_context)
+    config = _build_config(
+        "test-thread-002",
+        investigation_context,
+        mock_sre_context,
+    )
 
     result = await graph.ainvoke(state, config=config)
 
@@ -507,7 +544,11 @@ async def test_graph_tier1_action_executes_without_hitl(
     mock_sre_context: MagicMock,
 ) -> None:
     """Tier-1 action executes directly without human approval."""
-    tool_args = {"namespace": "rivulet", "name": "api-gateway", "reason": "Restart"}
+    tool_args = {
+        "namespace": "rivulet",
+        "name": "api-gateway",
+        "reason": "Restart",
+    }
 
     investigation_context.executor.execute = AsyncMock(
         return_value=_make_execution_result(
@@ -544,7 +585,11 @@ async def test_graph_tier1_action_executes_without_hitl(
     )
 
     graph = compile_graph()
-    config = _build_config("test-thread-004", investigation_context, mock_sre_context)
+    config = _build_config(
+        "test-thread-004",
+        investigation_context,
+        mock_sre_context,
+    )
 
     result = await graph.ainvoke(state, config=config)
 
@@ -565,7 +610,8 @@ async def test_graph_respects_max_iterations(
     mock_sre_context: MagicMock,
 ) -> None:
     """At budget exhaustion with low confidence, exit as no_action."""
-    # Hypothesize will be called, but since budget is 0 and confidence < 0.55, it returns no_action
+    # Hypothesize will be called, but since budget is 0 and confidence < 0.55,
+    # it returns no_action.
     investigation_context.llm_router.acompletion.return_value = _llm_response(
         {
             "hypotheses": [
@@ -598,7 +644,11 @@ async def test_graph_respects_max_iterations(
     )
 
     graph = compile_graph()
-    config = _build_config("test-thread-003", investigation_context, mock_sre_context)
+    config = _build_config(
+        "test-thread-003",
+        investigation_context,
+        mock_sre_context,
+    )
 
     result = await graph.ainvoke(state, config=config)
 

@@ -128,10 +128,13 @@ class _RateLimiter:
         async with self._lock:
             q = self._requests[key]
             cutoff = now - self._window
+
             while q and q[0] < cutoff:
                 q.popleft()
+
             if len(q) >= self._max:
                 return False
+
             q.append(now)
             return True
 
@@ -139,7 +142,10 @@ class _RateLimiter:
         self._requests.clear()
 
 
-_alerts_limiter = _RateLimiter(_ALERTS_RATE_LIMIT, _ALERTS_RATE_WINDOW_SECONDS)
+_alerts_limiter = _RateLimiter(
+    _ALERTS_RATE_LIMIT,
+    _ALERTS_RATE_WINDOW_SECONDS,
+)
 
 # ---------------------------------------------------------------------------
 # Layer 2 fingerprint deduplication
@@ -165,6 +171,7 @@ class _FingerprintIndex:
     def __init__(self, ttl_seconds: float) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be > 0")
+
         self._ttl = ttl_seconds
         self._entries: dict[str, tuple[str, float]] = {}
         self._lock = asyncio.Lock()
@@ -175,14 +182,19 @@ class _FingerprintIndex:
             return None
 
         now = time.monotonic()
+
         async with self._lock:
             entry = self._entries.get(fingerprint)
+
             if entry is None:
                 return None
+
             incident_id, seen_at = entry
+
             if now - seen_at > self._ttl:
                 del self._entries[fingerprint]
                 return None
+
             return incident_id
 
     async def reserve(self, fingerprint: str, incident_id: str) -> None:
@@ -191,6 +203,7 @@ class _FingerprintIndex:
             return
 
         now = time.monotonic()
+
         async with self._lock:
             self._entries[fingerprint] = (incident_id, now)
 
@@ -250,7 +263,11 @@ class IncidentSummary(BaseModel):
     requires_human_approval: bool
     approval_granted: bool | None
     tokens_used: int
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
     cost_usd: float
+    estimated_paid_cost_usd: float = 0.0
+    model_usage: dict[str, dict[str, int]] = Field(default_factory=dict)
     wall_clock_seconds: float
     active_seconds: float
     backoff_seconds: float
@@ -281,7 +298,11 @@ class IncidentReportResponse(BaseModel):
     proposed_actions: list[dict[str, Any]] = Field(default_factory=list)
     executed_actions: list[dict[str, Any]] = Field(default_factory=list)
     tokens_used: int
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
     cost_usd: float
+    estimated_paid_cost_usd: float = 0.0
+    model_usage: dict[str, dict[str, int]] = Field(default_factory=dict)
     wall_clock_seconds: float
     active_seconds: float
     backoff_seconds: float
@@ -304,7 +325,11 @@ class MetricsSummary(BaseModel):
     baseline_mttr_seconds: float
     mttr_reduction_pct: float
     total_cost_usd: float
+    total_estimated_paid_cost_usd: float = 0.0
     total_tokens: int
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    model_usage_summary: dict[str, dict[str, int]] = Field(default_factory=dict)
     safety_violations: int
     incidents_by_category: dict[str, int]
 
@@ -319,7 +344,10 @@ class MetricBucket(BaseModel):
     failed: int
     avg_mttr_seconds: float
     total_cost_usd: float
+    total_estimated_paid_cost_usd: float = 0.0
     total_tokens: int
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
 
 
 class MetricsTimeseriesResponse(BaseModel):
@@ -336,6 +364,8 @@ class ExpensiveIncident(BaseModel):
     alert_name: str
     service: str
     cost_usd: float
+    estimated_paid_cost_usd: float = 0.0
+    tokens_used: int = 0
     wall_clock_seconds: float
     status: str
 
@@ -372,19 +402,23 @@ _BUCKET_MINUTES_BY_RANGE: dict[str, int] = {
 def get_runner(request: Request) -> RunnerProtocol:
     """Return the LangGraphRunner bound to the running FastAPI app."""
     runner = getattr(request.app.state, "runner", None)
+
     if runner is None:
         raise HTTPException(
             status_code=503,
             detail="Runner not initialized",
         )
+
     return cast(RunnerProtocol, runner)
 
 
 def get_settings_dep(request: Request) -> Settings:
     """Return the Settings bound to the running app."""
     settings = getattr(request.app.state, "settings", None)
+
     if isinstance(settings, Settings):
         return settings
+
     return get_settings()
 
 
@@ -430,11 +464,21 @@ def _require_admin_secret(request: Request, settings: Settings) -> None:
         )
 
     provided = request.headers.get("X-Admin-Secret", "")
-    if not provided:
-        raise HTTPException(status_code=401, detail="Missing admin secret")
 
-    if not hmac.compare_digest(provided, secret.get_secret_value()):
-        raise HTTPException(status_code=401, detail="Invalid admin secret")
+    if not provided:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing admin secret",
+        )
+
+    if not hmac.compare_digest(
+        provided,
+        secret.get_secret_value(),
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid admin secret",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +496,7 @@ def _as_float(value: Any, default: float = 0.0) -> float:
 def _as_int(value: Any, default: int = 0) -> int:
     if isinstance(value, bool):
         return default
+
     try:
         return int(value) if value is not None else default
     except TypeError, ValueError:
@@ -462,13 +507,39 @@ def _as_str(value: Any, default: str = "") -> str:
     return str(value) if value is not None else default
 
 
+def _as_model_usage(
+    value: Any,
+) -> dict[str, dict[str, int]]:
+    """Normalize per-model usage data from checkpointed state."""
+    if not isinstance(value, dict):
+        return {}
+
+    result: dict[str, dict[str, int]] = {}
+
+    for raw_model, raw_usage in value.items():
+        model = _as_str(raw_model).strip()
+
+        if not model or not isinstance(raw_usage, dict):
+            continue
+
+        result[model] = {
+            "calls": _as_int(raw_usage.get("calls", 0)),
+            "tokens": _as_int(raw_usage.get("tokens", 0)),
+        }
+
+    return result
+
+
 def _state_values(state: Any) -> dict[str, Any]:
     """Return the values dict from a checkpointed state snapshot."""
     if state is None:
         return {}
+
     values = getattr(state, "values", state)
+
     if isinstance(values, dict):
         return values
+
     return {}
 
 
@@ -480,12 +551,17 @@ def _derive_status(
     """Return the UI-facing status."""
     if requires_approval and approval_granted is None and raw_status == "running":
         return "awaiting_approval"
+
     return raw_status
 
 
-def _extract_summary(incident_id: str, values: dict[str, Any]) -> IncidentSummary:
+def _extract_summary(
+    incident_id: str,
+    values: dict[str, Any],
+) -> IncidentSummary:
     """Build an IncidentSummary from state values."""
     metadata = values.get("incident_metadata") or {}
+
     if not isinstance(metadata, dict):
         metadata = {}
 
@@ -493,7 +569,19 @@ def _extract_summary(incident_id: str, values: dict[str, Any]) -> IncidentSummar
     approval_granted = values.get("approval_granted")
     raw_status = _as_str(values.get("status", "unknown"))
 
-    status = _derive_status(raw_status, requires_approval, approval_granted)
+    status = _derive_status(
+        raw_status,
+        requires_approval,
+        approval_granted,
+    )
+
+    proposed_actions = values.get("proposed_actions") or []
+    if not isinstance(proposed_actions, list):
+        proposed_actions = []
+
+    executed_actions = values.get("executed_actions") or []
+    if not isinstance(executed_actions, list):
+        executed_actions = []
 
     return IncidentSummary(
         incident_id=incident_id,
@@ -507,38 +595,51 @@ def _extract_summary(incident_id: str, values: dict[str, Any]) -> IncidentSummar
         requires_human_approval=requires_approval,
         approval_granted=(bool(approval_granted) if approval_granted is not None else None),
         tokens_used=_as_int(values.get("tokens_used", 0)),
+        prompt_tokens=_as_int(values.get("prompt_tokens", 0)),
+        completion_tokens=_as_int(values.get("completion_tokens", 0)),
         cost_usd=_as_float(values.get("cost_usd", 0.0)),
+        estimated_paid_cost_usd=_as_float(values.get("estimated_paid_cost_usd", 0.0)),
+        model_usage=_as_model_usage(values.get("model_usage", {})),
         wall_clock_seconds=_as_float(values.get("wall_clock_seconds", 0.0)),
         active_seconds=_as_float(values.get("active_seconds", 0.0)),
         backoff_seconds=_as_float(values.get("backoff_seconds", 0.0)),
         iterations=_as_int(values.get("iteration_count", 0)),
-        proposed_actions=list(values.get("proposed_actions") or []),
-        executed_actions=list(values.get("executed_actions") or []),
+        proposed_actions=proposed_actions,
+        executed_actions=executed_actions,
     )
 
 
 def _baseline_mttr_seconds(values: dict[str, Any]) -> float:
     """Return the dataset-declared baseline MTTR, or 0.0."""
     metadata = values.get("incident_metadata") or {}
+
     if not isinstance(metadata, dict):
         return 0.0
+
     labels = metadata.get("labels") or {}
+
     if not isinstance(labels, dict):
         return 0.0
 
     raw = labels.get("baseline_mttr_seconds")
     value = _as_float(raw, 0.0)
+
     return value if value > 0 else 0.0
 
 
-def _count_safety_violations(executed_actions: list[Any]) -> int:
+def _count_safety_violations(
+    executed_actions: list[Any],
+) -> int:
     """Count prohibited tools that executed despite policy."""
     violations = 0
+
     for action in executed_actions:
         if not isinstance(action, dict):
             continue
+
         if action.get("tool_name") in _PROHIBITED_TOOLS:
             violations += 1
+
     return violations
 
 
@@ -570,11 +671,12 @@ async def readyz(request: Request) -> JSONResponse:
         try:
             async with pg_pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute("SELECT 1")
+
             checks["postgres"] = "ready"
         except Exception as exc:
             checks["postgres"] = f"error: {exc}"
 
-    all_ready = all(v == "ready" for v in checks.values())
+    all_ready = all(value == "ready" for value in checks.values())
 
     return JSONResponse(
         status_code=200 if all_ready else 503,
@@ -601,10 +703,16 @@ async def admin_pause(
 ) -> AdminStatusResponse:
     """Reject new incidents. Existing work continues."""
     _require_admin_secret(request, settings)
+
     request.app.state.paused = True
     request.app.state.pause_reason = "manual"
+
     logger.warning("Agent paused by admin")
-    return AdminStatusResponse(paused=True, reason="manual")
+
+    return AdminStatusResponse(
+        paused=True,
+        reason="manual",
+    )
 
 
 @router.post("/admin/resume")
@@ -614,10 +722,16 @@ async def admin_resume(
 ) -> AdminStatusResponse:
     """Accept new incidents again."""
     _require_admin_secret(request, settings)
+
     request.app.state.paused = False
     request.app.state.pause_reason = None
+
     logger.warning("Agent resumed by admin")
-    return AdminStatusResponse(paused=False, reason=None)
+
+    return AdminStatusResponse(
+        paused=False,
+        reason=None,
+    )
 
 
 @router.get("/admin/status")
@@ -627,9 +741,14 @@ async def admin_status(
 ) -> AdminStatusResponse:
     """Return the current pause state. Requires the admin secret."""
     _require_admin_secret(request, settings)
+
     return AdminStatusResponse(
         paused=_is_paused(request),
-        reason=getattr(request.app.state, "pause_reason", None),
+        reason=getattr(
+            request.app.state,
+            "pause_reason",
+            None,
+        ),
     )
 
 
@@ -645,13 +764,17 @@ async def sign_approval(
 ) -> dict[str, str]:
     """Return an HMAC-signed body for POST /incidents/{id}/approve."""
     body = json.dumps(
-        {"approved": approval.approved, "comment": approval.comment},
+        {
+            "approved": approval.approved,
+            "comment": approval.comment,
+        },
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
 
     secret = settings.alert.webhook_secret
-    secret_value: str = secret.get_secret_value() if isinstance(secret, SecretStr) else str(secret)
+
+    secret_value = secret.get_secret_value() if isinstance(secret, SecretStr) else str(secret)
 
     signature = hmac.new(
         secret_value.encode("utf-8"),
@@ -673,8 +796,10 @@ async def sign_approval(
 def _client_ip(request: Request) -> str:
     """Return the client IP, honoring X-Forwarded-For when present."""
     forwarded = request.headers.get("X-Forwarded-For", "")
+
     if forwarded:
         return forwarded.split(",", 1)[0].strip()
+
     return request.client.host if request.client else "unknown"
 
 
@@ -704,8 +829,10 @@ async def trigger_incident(
     """
     # 1. Rate limit first so abusive clients can't burn signature checks.
     client = _client_ip(request)
+
     if not await _alerts_limiter.allow(client):
         logger.warning("Rate limit exceeded for %s", client)
+
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Rate limit exceeded",
@@ -722,19 +849,38 @@ async def trigger_incident(
     try:
         payload = await request.body()
     except Exception as exc:
-        logger.error("Failed to read /alerts body: %s", exc)
-        raise HTTPException(status_code=400, detail="Failed to read request body") from exc
+        logger.error(
+            "Failed to read /alerts body: %s",
+            exc,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="Failed to read request body",
+        ) from exc
 
-    signature = request.headers.get("X-Webhook-Signature", "")
+    signature = request.headers.get(
+        "X-Webhook-Signature",
+        "",
+    )
 
-    if not _verify_signature(payload, signature, settings.alert.webhook_secret):
-        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    if not _verify_signature(
+        payload,
+        signature,
+        settings.alert.webhook_secret,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid webhook signature",
+        )
 
     # 4. Validate payload.
     try:
         alert = AlertPayload.model_validate_json(payload)
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid alert payload: {exc}") from exc
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid alert payload: {exc}",
+        ) from exc
 
     logger.info(
         "Alert received: %s on %s/%s (severity=%s fingerprint=%s)",
@@ -747,29 +893,35 @@ async def trigger_incident(
 
     # 5. Fingerprint dedup.
     existing = await _fingerprint_index.lookup(alert.fingerprint)
+
     if existing is not None:
         logger.info(
             "Dedup hit: fingerprint=%s existing_incident=%s",
             alert.fingerprint,
             existing,
         )
+
         return {
             "incident_id": existing,
             "status": "already_investigating",
         }
 
-    # 6. Schedule in background. This returns as soon as the incident_id
-    # is generated; the graph runs asynchronously.
+    # 6. Schedule in background.
     try:
         incident_id = await runner.schedule_incident(alert.model_dump())
     except TimeoutError as exc:
-        logger.error("Incident scheduling timed out for alert %s", alert.alert_name)
+        logger.error(
+            "Incident scheduling timed out for alert %s",
+            alert.alert_name,
+        )
+
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail="Incident scheduling exceeded budget",
         ) from exc
     except LLMBudgetExhaustedError as exc:
         logger.error("Incident scheduling aborted: provider budget exhausted")
+
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="LLM provider budget exhausted",
@@ -780,14 +932,28 @@ async def trigger_incident(
             exc,
             traceback.format_exc(),
         )
-        raise HTTPException(status_code=500, detail=f"Internal error: {exc!s}") from exc
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal error: {exc!s}",
+        ) from exc
 
     # Reserve the fingerprint. Subsequent deliveries within TTL receive
     # the same incident_id without scheduling a duplicate graph.
-    await _fingerprint_index.reserve(alert.fingerprint, incident_id)
+    await _fingerprint_index.reserve(
+        alert.fingerprint,
+        incident_id,
+    )
 
-    logger.info("Incident %s scheduled", incident_id)
-    return {"incident_id": incident_id, "status": "accepted"}
+    logger.info(
+        "Incident %s scheduled",
+        incident_id,
+    )
+
+    return {
+        "incident_id": incident_id,
+        "status": "accepted",
+    }
 
 
 @webhook_router.post("/incidents/{incident_id}/approve")
@@ -803,37 +969,57 @@ async def approve_incident(
     Pydantic model, otherwise the body stream is consumed and HMAC
     verification will fail on an empty payload.
     """
-    # Read raw body FIRST before FastAPI consumes it
+    # Read raw body FIRST before FastAPI consumes it.
     payload = await request.body()
-    signature = request.headers.get("X-Webhook-Signature", "")
 
-    if not _verify_signature(payload, signature, settings.alert.webhook_secret):
-        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    signature = request.headers.get(
+        "X-Webhook-Signature",
+        "",
+    )
 
-    # Now parse the validated body manually
+    if not _verify_signature(
+        payload,
+        signature,
+        settings.alert.webhook_secret,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid webhook signature",
+        )
+
+    # Now parse the validated body manually.
     try:
         approval = ApprovalRequest.model_validate_json(payload)
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid approval payload: {exc}") from exc
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid approval payload: {exc}",
+        ) from exc
 
-    approved = await runner.approve_incident(incident_id, approval.approved, approval.comment)
+    approved = await runner.approve_incident(
+        incident_id,
+        approval.approved,
+        approval.comment,
+    )
 
     if not approved:
         state = await runner.get_incident_state(incident_id)
+
         if state is None:
             raise HTTPException(
                 status_code=404,
                 detail=f"Incident {incident_id} not found",
             )
+
         raise HTTPException(
             status_code=409,
-            detail="Incident does not require approval or was already decided",
+            detail=("Incident does not require approval or was already decided"),
         )
 
     return {
         "incident_id": incident_id,
         "approved": approval.approved,
-        "status": "approved" if approval.approved else "rejected",
+        "status": ("approved" if approval.approved else "rejected"),
     }
 
 
@@ -845,28 +1031,55 @@ async def approve_incident(
 @router.get("/incidents")
 async def list_incidents(
     runner: Runner,
-    status_filter: str | None = Query(None, alias="status", description="Filter by derived status"),
-    limit: int = Query(100, ge=1, le=500),
+    status_filter: str | None = Query(
+        None,
+        alias="status",
+        description="Filter by derived status",
+    ),
+    limit: int = Query(
+        100,
+        ge=1,
+        le=500,
+    ),
 ) -> IncidentListResponse:
     """List incidents, optionally filtered by status."""
     try:
         all_states = await runner.list_incidents(limit=limit)
 
         items: list[IncidentSummary] = []
+
         for incident_id, state in all_states:
             values = _state_values(state)
+
             if not values:
                 continue
-            summary = _extract_summary(incident_id, values)
+
+            summary = _extract_summary(
+                incident_id,
+                values,
+            )
+
             if status_filter and summary.status != status_filter:
                 continue
+
             items.append(summary)
 
-        return IncidentListResponse(items=items, total=len(items))
+        return IncidentListResponse(
+            items=items,
+            total=len(items),
+        )
 
     except Exception as exc:
-        logger.error("Error in list_incidents: %s\n%s", exc, traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Failed to list incidents: {exc!s}") from exc
+        logger.error(
+            "Error in list_incidents: %s\n%s",
+            exc,
+            traceback.format_exc(),
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list incidents: {exc!s}",
+        ) from exc
 
 
 @router.get("/incidents/{incident_id}/report")
@@ -892,8 +1105,21 @@ async def get_incident_report(
         )
 
     metadata = values.get("incident_metadata") or {}
+
     if not isinstance(metadata, dict):
         metadata = {}
+
+    hypotheses = values.get("hypotheses") or []
+    if not isinstance(hypotheses, list):
+        hypotheses = []
+
+    proposed_actions = values.get("proposed_actions") or []
+    if not isinstance(proposed_actions, list):
+        proposed_actions = []
+
+    executed_actions = values.get("executed_actions") or []
+    if not isinstance(executed_actions, list):
+        executed_actions = []
 
     return IncidentReportResponse(
         incident_id=incident_id,
@@ -904,16 +1130,25 @@ async def get_incident_report(
         namespace=_as_str(metadata.get("namespace", "")),
         severity=_as_str(metadata.get("severity", "")),
         started_at=_as_str(metadata.get("started_at", "")),
-        hypotheses=list(values.get("hypotheses") or []),
-        proposed_actions=list(values.get("proposed_actions") or []),
-        executed_actions=list(values.get("executed_actions") or []),
+        hypotheses=hypotheses,
+        proposed_actions=proposed_actions,
+        executed_actions=executed_actions,
         tokens_used=_as_int(values.get("tokens_used", 0)),
+        prompt_tokens=_as_int(values.get("prompt_tokens", 0)),
+        completion_tokens=_as_int(values.get("completion_tokens", 0)),
         cost_usd=_as_float(values.get("cost_usd", 0.0)),
+        estimated_paid_cost_usd=_as_float(values.get("estimated_paid_cost_usd", 0.0)),
+        model_usage=_as_model_usage(values.get("model_usage", {})),
         wall_clock_seconds=_as_float(values.get("wall_clock_seconds", 0.0)),
         active_seconds=_as_float(values.get("active_seconds", 0.0)),
         backoff_seconds=_as_float(values.get("backoff_seconds", 0.0)),
         iterations=_as_int(values.get("iteration_count", 0)),
-        requires_human_approval=bool(values.get("requires_human_approval", False)),
+        requires_human_approval=bool(
+            values.get(
+                "requires_human_approval",
+                False,
+            )
+        ),
         approval_granted=values.get("approval_granted"),
     )
 
@@ -924,7 +1159,9 @@ async def get_incident_report(
 
 
 @router.get("/metrics/summary")
-async def get_metrics_summary(runner: Runner) -> MetricsSummary:
+async def get_metrics_summary(
+    runner: Runner,
+) -> MetricsSummary:
     """Aggregate KPIs across all incidents.
 
     MTTR is computed from ``active_seconds`` (excludes rate-limit
@@ -945,65 +1182,124 @@ async def get_metrics_summary(runner: Runner) -> MetricsSummary:
         baselines: list[float] = []
 
         total_cost = 0.0
+        total_estimated_cost = 0.0
         total_tokens = 0
+        total_prompt = 0
+        total_completion = 0
         safety_violations = 0
+
+        model_usage_summary: dict[
+            str,
+            dict[str, int],
+        ] = {}
+
         by_category: dict[str, int] = defaultdict(int)
 
         for _iid, state in all_states:
             values = _state_values(state)
+
             if not values:
                 continue
 
             raw_status = _as_str(values.get("status", "unknown"))
-            requires_approval = bool(values.get("requires_human_approval", False))
+            requires_approval = bool(
+                values.get(
+                    "requires_human_approval",
+                    False,
+                )
+            )
             approval_granted = values.get("approval_granted")
-            status = _derive_status(raw_status, requires_approval, approval_granted)
 
-            if status == "awaiting_approval":
+            incident_status = _derive_status(
+                raw_status,
+                requires_approval,
+                approval_granted,
+            )
+
+            if incident_status == "awaiting_approval":
                 awaiting += 1
-            elif status in _TERMINAL_SUCCESS_STATUSES:
+            elif incident_status in _TERMINAL_SUCCESS_STATUSES:
                 resolved += 1
-            elif status in _TERMINAL_FAILURE_STATUSES:
+            elif incident_status in _TERMINAL_FAILURE_STATUSES:
                 failed += 1
-            elif status in _NO_ACTION_STATUSES:
+            elif incident_status in _NO_ACTION_STATUSES:
                 no_action += 1
 
-            if status in _TERMINAL_SUCCESS_STATUSES:
+            if incident_status in _TERMINAL_SUCCESS_STATUSES:
                 active = _as_float(values.get("active_seconds", 0.0))
                 wall = _as_float(values.get("wall_clock_seconds", 0.0))
                 backoff = _as_float(values.get("backoff_seconds", 0.0))
+
                 if active > 0:
                     active_times.append(active)
+
                 if wall > 0:
                     wall_times.append(wall)
+
                 if backoff >= 0:
                     backoff_times.append(backoff)
 
                 baseline = _baseline_mttr_seconds(values)
+
                 if baseline > 0:
                     baselines.append(baseline)
 
             total_cost += _as_float(values.get("cost_usd", 0.0))
+
+            total_estimated_cost += _as_float(
+                values.get(
+                    "estimated_paid_cost_usd",
+                    0.0,
+                )
+            )
+
             total_tokens += _as_int(values.get("tokens_used", 0))
 
+            total_prompt += _as_int(values.get("prompt_tokens", 0))
+
+            total_completion += _as_int(values.get("completion_tokens", 0))
+
+            # Aggregate model usage.
+            incident_model_usage = _as_model_usage(values.get("model_usage", {}))
+
+            for model, usage in incident_model_usage.items():
+                if model not in model_usage_summary:
+                    model_usage_summary[model] = {
+                        "calls": 0,
+                        "tokens": 0,
+                    }
+
+                model_usage_summary[model]["calls"] += _as_int(usage.get("calls", 0))
+                model_usage_summary[model]["tokens"] += _as_int(usage.get("tokens", 0))
+
             metadata = values.get("incident_metadata") or {}
+
             category = "unknown"
+
             if isinstance(metadata, dict):
                 labels = metadata.get("labels") or {}
+
                 if isinstance(labels, dict):
                     category = _as_str(labels.get("category")) or "unknown"
+
                 if category == "unknown":
                     category = _as_str(metadata.get("category")) or "unknown"
+
             by_category[category] += 1
 
             executed = values.get("executed_actions") or []
+
             if isinstance(executed, list):
                 safety_violations += _count_safety_violations(executed)
 
         avg_active = sum(active_times) / len(active_times) if active_times else 0.0
+
         avg_wall = sum(wall_times) / len(wall_times) if wall_times else 0.0
+
         avg_backoff = sum(backoff_times) / len(backoff_times) if backoff_times else 0.0
+
         avg_baseline = sum(baselines) / len(baselines) if baselines else 0.0
+
         reduction = (
             ((avg_baseline - avg_active) / avg_baseline) * 100.0 if avg_baseline > 0 else 0.0
         )
@@ -1014,13 +1310,38 @@ async def get_metrics_summary(runner: Runner) -> MetricsSummary:
             awaiting_approval_count=awaiting,
             failed_count=failed,
             no_action_count=no_action,
-            avg_mttr_seconds=round(avg_active, 2),
-            avg_wall_clock_seconds=round(avg_wall, 2),
-            avg_backoff_seconds=round(avg_backoff, 2),
-            baseline_mttr_seconds=round(avg_baseline, 2),
-            mttr_reduction_pct=round(reduction, 2),
-            total_cost_usd=round(total_cost, 6),
+            avg_mttr_seconds=round(
+                avg_active,
+                2,
+            ),
+            avg_wall_clock_seconds=round(
+                avg_wall,
+                2,
+            ),
+            avg_backoff_seconds=round(
+                avg_backoff,
+                2,
+            ),
+            baseline_mttr_seconds=round(
+                avg_baseline,
+                2,
+            ),
+            mttr_reduction_pct=round(
+                reduction,
+                2,
+            ),
+            total_cost_usd=round(
+                total_cost,
+                6,
+            ),
+            total_estimated_paid_cost_usd=round(
+                total_estimated_cost,
+                6,
+            ),
             total_tokens=total_tokens,
+            total_prompt_tokens=total_prompt,
+            total_completion_tokens=total_completion,
+            model_usage_summary=model_usage_summary,
             safety_violations=safety_violations,
             incidents_by_category=dict(by_category),
         )
@@ -1031,13 +1352,21 @@ async def get_metrics_summary(runner: Runner) -> MetricsSummary:
             exc,
             traceback.format_exc(),
         )
-        raise HTTPException(status_code=500, detail=f"Failed to get metrics: {exc!s}") from exc
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get metrics: {exc!s}",
+        ) from exc
 
 
-def _bucket_epoch(ts: float, bucket_seconds: int) -> int:
+def _bucket_epoch(
+    ts: float,
+    bucket_seconds: int,
+) -> int:
     """Return the epoch start of the bucket containing ``ts``."""
     if bucket_seconds <= 0:
         raise ValueError("bucket_seconds must be positive")
+
     return (int(ts) // bucket_seconds) * bucket_seconds
 
 
@@ -1066,26 +1395,41 @@ async def get_metrics_timeseries(
 
         for _iid, state in all_states:
             values = _state_values(state)
+
             if not values:
                 continue
 
             metadata = values.get("incident_metadata") or {}
+
             if not isinstance(metadata, dict):
                 continue
 
-            started_at_raw = metadata.get("started_at", "")
+            started_at_raw = metadata.get(
+                "started_at",
+                "",
+            )
+
             if not started_at_raw:
                 continue
 
             try:
-                parsed = datetime.fromisoformat(str(started_at_raw).replace("Z", "+00:00"))
+                parsed = datetime.fromisoformat(
+                    str(started_at_raw).replace(
+                        "Z",
+                        "+00:00",
+                    )
+                )
+
                 if parsed.tzinfo is None:
                     parsed = parsed.replace(tzinfo=UTC)
             except ValueError, TypeError:
                 continue
 
             epoch = parsed.timestamp()
-            bucket_start = _bucket_epoch(epoch, bucket_seconds)
+            bucket_start = _bucket_epoch(
+                epoch,
+                bucket_seconds,
+            )
 
             slot = buckets.setdefault(
                 bucket_start,
@@ -1096,51 +1440,102 @@ async def get_metrics_timeseries(
                     "failed": 0,
                     "active_times": [],
                     "total_cost": 0.0,
+                    "total_estimated_cost": 0.0,
                     "total_tokens": 0,
+                    "total_prompt_tokens": 0,
+                    "total_completion_tokens": 0,
                 },
             )
 
             slot["incidents"] += 1
 
             raw_status = _as_str(values.get("status", "unknown"))
-            requires_approval = bool(values.get("requires_human_approval", False))
-            approval_granted = values.get("approval_granted")
-            status = _derive_status(raw_status, requires_approval, approval_granted)
 
-            if status == "resolved":
+            requires_approval = bool(
+                values.get(
+                    "requires_human_approval",
+                    False,
+                )
+            )
+
+            approval_granted = values.get("approval_granted")
+
+            incident_status = _derive_status(
+                raw_status,
+                requires_approval,
+                approval_granted,
+            )
+
+            if incident_status == "resolved":
                 slot["resolved"] += 1
+
                 active = _as_float(values.get("active_seconds", 0.0))
+
                 if active > 0:
                     slot["active_times"].append(active)
-            elif status == "no_action":
+
+            elif incident_status == "no_action":
                 slot["no_action"] += 1
-            elif status == "failed":
+
+            elif incident_status == "failed":
                 slot["failed"] += 1
 
             slot["total_cost"] += _as_float(values.get("cost_usd", 0.0))
+
+            slot["total_estimated_cost"] += _as_float(
+                values.get(
+                    "estimated_paid_cost_usd",
+                    0.0,
+                )
+            )
+
             slot["total_tokens"] += _as_int(values.get("tokens_used", 0))
+
+            slot["total_prompt_tokens"] += _as_int(values.get("prompt_tokens", 0))
+
+            slot["total_completion_tokens"] += _as_int(values.get("completion_tokens", 0))
 
         result_buckets: list[MetricBucket] = []
 
         for bucket_start in sorted(buckets.keys()):
             data = buckets[bucket_start]
+
             active_list = data["active_times"]
+
             avg_active = sum(active_list) / len(active_list) if active_list else 0.0
 
             result_buckets.append(
                 MetricBucket(
-                    timestamp=datetime.fromtimestamp(bucket_start, tz=UTC).isoformat(),
+                    timestamp=datetime.fromtimestamp(
+                        bucket_start,
+                        tz=UTC,
+                    ).isoformat(),
                     incidents=data["incidents"],
                     resolved=data["resolved"],
                     no_action=data["no_action"],
                     failed=data["failed"],
-                    avg_mttr_seconds=round(avg_active, 2),
-                    total_cost_usd=round(data["total_cost"], 6),
+                    avg_mttr_seconds=round(
+                        avg_active,
+                        2,
+                    ),
+                    total_cost_usd=round(
+                        data["total_cost"],
+                        6,
+                    ),
+                    total_estimated_paid_cost_usd=round(
+                        data["total_estimated_cost"],
+                        6,
+                    ),
                     total_tokens=data["total_tokens"],
+                    total_prompt_tokens=data["total_prompt_tokens"],
+                    total_completion_tokens=data["total_completion_tokens"],
                 )
             )
 
-        return MetricsTimeseriesResponse(buckets=result_buckets, range=time_range)
+        return MetricsTimeseriesResponse(
+            buckets=result_buckets,
+            range=time_range,
+        )
 
     except Exception as exc:
         logger.error(
@@ -1148,6 +1543,7 @@ async def get_metrics_timeseries(
             exc,
             traceback.format_exc(),
         )
+
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get timeseries: {exc!s}",
@@ -1157,7 +1553,11 @@ async def get_metrics_timeseries(
 @router.get("/metrics/top-expensive")
 async def get_top_expensive(
     runner: Runner,
-    limit: int = Query(5, ge=1, le=100),
+    limit: int = Query(
+        5,
+        ge=1,
+        le=100,
+    ),
 ) -> list[ExpensiveIncident]:
     """Return the N most expensive incidents."""
     try:
@@ -1167,25 +1567,68 @@ async def get_top_expensive(
 
         for incident_id, state in all_states:
             values = _state_values(state)
+
             if not values:
                 continue
 
             metadata = values.get("incident_metadata") or {}
+
             if not isinstance(metadata, dict):
                 metadata = {}
 
             incidents.append(
                 ExpensiveIncident(
                     incident_id=incident_id,
-                    alert_name=_as_str(metadata.get("alert_name", "")),
-                    service=_as_str(metadata.get("service", "")),
-                    cost_usd=_as_float(values.get("cost_usd", 0.0)),
-                    wall_clock_seconds=_as_float(values.get("wall_clock_seconds", 0.0)),
-                    status=_as_str(values.get("status", "unknown")),
+                    alert_name=_as_str(
+                        metadata.get(
+                            "alert_name",
+                            "",
+                        )
+                    ),
+                    service=_as_str(
+                        metadata.get(
+                            "service",
+                            "",
+                        )
+                    ),
+                    cost_usd=_as_float(
+                        values.get(
+                            "cost_usd",
+                            0.0,
+                        )
+                    ),
+                    estimated_paid_cost_usd=_as_float(
+                        values.get(
+                            "estimated_paid_cost_usd",
+                            0.0,
+                        )
+                    ),
+                    tokens_used=_as_int(
+                        values.get(
+                            "tokens_used",
+                            0,
+                        )
+                    ),
+                    wall_clock_seconds=_as_float(
+                        values.get(
+                            "wall_clock_seconds",
+                            0.0,
+                        )
+                    ),
+                    status=_as_str(
+                        values.get(
+                            "status",
+                            "unknown",
+                        )
+                    ),
                 )
             )
 
-        incidents.sort(key=lambda x: x.cost_usd, reverse=True)
+        incidents.sort(
+            key=lambda incident: incident.cost_usd,
+            reverse=True,
+        )
+
         return incidents[:limit]
 
     except Exception as exc:
@@ -1194,6 +1637,7 @@ async def get_top_expensive(
             exc,
             traceback.format_exc(),
         )
+
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get top expensive: {exc!s}",

@@ -1,0 +1,89 @@
+{
+  "incident_id": "INC-005",
+  "completed_at": "2026-10-04T12:50:20Z",
+  "result": {
+    "incident_id": "80e125b3-60db-43f7-9a48-54ddaa8ed211",
+    "status": "no_action",
+    "phase": "complete",
+    "alert_name": "ConsumerLagSpike",
+    "service": "ingestion-worker",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "started_at": "2026-10-04T12:50:02Z",
+    "hypotheses": [
+      {
+        "id": "H1",
+        "description": "The ingestion-worker pods in the rivulet namespace are processing messages slower than the incoming rate on the rivulet.orders.in stream for consumer group ingestion-workers, leading to a consumer lag spike.",
+        "confidence": 0.2,
+        "status": "proposed",
+        "evidence": [
+          "Tool get_valkey_stream_info({\"stream_key\": \"rivulet.orders.in\"}) status=succeeded output={\"groups\": [{\"consumers\": 2, \"group_name\": \"ingestion-workers\", \"lag_messages\": 0, \"last_delivered_id\": \"0-0\", \"pending_messages\": 0}], \"stream_key\": \"rivulet.orders.in\", \"stream_length\": 0}",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 1224.91, \"name\": \"api-gateway-5b8f8bcbff-lpmj2\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1260.91, \"name\": \"api-gateway-5b8f8bcbff-pl5qc\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 103906.91, \"name\": \"frontend-5b88cb6888-kj6bz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 103906.91, \"name\": \"frontend-5b88cb6888-l2sr9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 103893.91, \"name\": \"ingestion-worker-6d86fb87bd-jrmf9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 103893.91, \"name\": \"ingestion-worker-6d86fb87bd-tdmdp\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 104244.91, \"name\": \"postgres-6b4c959c9-z4tvv\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 104182.91, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 8}",
+          "Tool get_pod_metrics({\"namespace\": \"rivulet\"}) status=succeeded output={\"metrics\": [{\"cpu_millicores\": 4, \"cpu_request_millicores\": 250, \"memory_mb\": 315, \"memory_request_mb\": 512, \"name\": \"api-gateway-5b8f8bcbff-lpmj2\"}, {\"cpu_millicores\": 3, \"cpu_request_millicores\": 250, \"memory_mb\": 345, \"memory_request_mb\": 512, \"name\": \"api-gateway-5b8f8bcbff-pl5qc\"}, {\"cpu_millicores\": 0, \"cpu_request_millicores\": 50, \"memory_mb\": 13, \"memory_request_mb\": 64, \"name\": \"frontend-5b88cb6888-kj6bz\"}, {\"cpu_millicores\": 0, \"cpu_request_millicores\": 50, \"memory_mb\": 13, \"memory_request_mb\": 64, \"name\": \"frontend-5b88cb6888-l2sr9\"}, {\"cpu_millicores\": 1, \"cpu_request_millicores\": 100, \"memory_mb\": 9, \"memory_request_mb\": 128, \"name\": \"ingestion-worker-6d86fb87bd-jrmf9\"}, {\"cpu_millicores\": 1, \"cpu_request_millicores\": 100, \"memory_mb\": 17, \"memory_request_mb\": 128, \"name\": \"ingestion-worker-6d86fb87bd-tdmdp\"}, {\"cpu_millicores\": 21, \"cpu_request_millicores\": 250, \"memory_mb\": 67, \"memory_request_mb\": 256, \"name\": \"postgres-6b4c959c9-z4tvv\"}, {\"cpu_millicores\": 13, \"cpu_request_millicores\": 500, \"memory_mb\": 19, \"memory_request_mb\": 512, \"name\": \"valkey-0\"}], \"reason\": null, \"total\": 8}"
+        ]
+      },
+      {
+        "id": "H2",
+        "description": "Upstream traffic volume increased significantly for rivulet.orders.in, exceeding the capacity of the current replica count of the ingestion-worker service.",
+        "confidence": 0.2,
+        "status": "proposed",
+        "evidence": [
+          "Tool get_valkey_stream_info({\"stream_key\": \"rivulet.orders.in\"}) status=succeeded output={\"groups\": [{\"consumers\": 2, \"group_name\": \"ingestion-workers\", \"lag_messages\": 0, \"last_delivered_id\": \"0-0\", \"pending_messages\": 0}], \"stream_key\": \"rivulet.orders.in\", \"stream_length\": 0}",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 1224.91, \"name\": \"api-gateway-5b8f8bcbff-lpmj2\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1260.91, \"name\": \"api-gateway-5b8f8bcbff-pl5qc\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 103906.91, \"name\": \"frontend-5b88cb6888-kj6bz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 103906.91, \"name\": \"frontend-5b88cb6888-l2sr9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 103893.91, \"name\": \"ingestion-worker-6d86fb87bd-jrmf9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 103893.91, \"name\": \"ingestion-worker-6d86fb87bd-tdmdp\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 104244.91, \"name\": \"postgres-6b4c959c9-z4tvv\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 104182.91, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 8}",
+          "Tool get_pod_metrics({\"namespace\": \"rivulet\"}) status=succeeded output={\"metrics\": [{\"cpu_millicores\": 4, \"cpu_request_millicores\": 250, \"memory_mb\": 315, \"memory_request_mb\": 512, \"name\": \"api-gateway-5b8f8bcbff-lpmj2\"}, {\"cpu_millicores\": 3, \"cpu_request_millicores\": 250, \"memory_mb\": 345, \"memory_request_mb\": 512, \"name\": \"api-gateway-5b8f8bcbff-pl5qc\"}, {\"cpu_millicores\": 0, \"cpu_request_millicores\": 50, \"memory_mb\": 13, \"memory_request_mb\": 64, \"name\": \"frontend-5b88cb6888-kj6bz\"}, {\"cpu_millicores\": 0, \"cpu_request_millicores\": 50, \"memory_mb\": 13, \"memory_request_mb\": 64, \"name\": \"frontend-5b88cb6888-l2sr9\"}, {\"cpu_millicores\": 1, \"cpu_request_millicores\": 100, \"memory_mb\": 9, \"memory_request_mb\": 128, \"name\": \"ingestion-worker-6d86fb87bd-jrmf9\"}, {\"cpu_millicores\": 1, \"cpu_request_millicores\": 100, \"memory_mb\": 17, \"memory_request_mb\": 128, \"name\": \"ingestion-worker-6d86fb87bd-tdmdp\"}, {\"cpu_millicores\": 21, \"cpu_request_millicores\": 250, \"memory_mb\": 67, \"memory_request_mb\": 256, \"name\": \"postgres-6b4c959c9-z4tvv\"}, {\"cpu_millicores\": 13, \"cpu_request_millicores\": 500, \"memory_mb\": 19, \"memory_request_mb\": 512, \"name\": \"valkey-0\"}], \"reason\": null, \"total\": 8}"
+        ]
+      },
+      {
+        "id": "H3",
+        "description": "Ingestion-worker pods in the rivulet namespace are experiencing connectivity or resource bottlenecks, interrupting message delivery (last delivery 300 seconds ago) and increasing consumer lag.",
+        "confidence": 0.2,
+        "status": "proposed",
+        "evidence": [
+          "Tool get_valkey_stream_info({\"stream_key\": \"rivulet.orders.in\"}) status=succeeded output={\"groups\": [{\"consumers\": 2, \"group_name\": \"ingestion-workers\", \"lag_messages\": 0, \"last_delivered_id\": \"0-0\", \"pending_messages\": 0}], \"stream_key\": \"rivulet.orders.in\", \"stream_length\": 0}",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 1224.91, \"name\": \"api-gateway-5b8f8bcbff-lpmj2\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1260.91, \"name\": \"api-gateway-5b8f8bcbff-pl5qc\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 103906.91, \"name\": \"frontend-5b88cb6888-kj6bz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 103906.91, \"name\": \"frontend-5b88cb6888-l2sr9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 103893.91, \"name\": \"ingestion-worker-6d86fb87bd-jrmf9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 103893.91, \"name\": \"ingestion-worker-6d86fb87bd-tdmdp\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 104244.91, \"name\": \"postgres-6b4c959c9-z4tvv\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 104182.91, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 8}",
+          "Tool get_pod_metrics({\"namespace\": \"rivulet\"}) status=succeeded output={\"metrics\": [{\"cpu_millicores\": 4, \"cpu_request_millicores\": 250, \"memory_mb\": 315, \"memory_request_mb\": 512, \"name\": \"api-gateway-5b8f8bcbff-lpmj2\"}, {\"cpu_millicores\": 3, \"cpu_request_millicores\": 250, \"memory_mb\": 345, \"memory_request_mb\": 512, \"name\": \"api-gateway-5b8f8bcbff-pl5qc\"}, {\"cpu_millicores\": 0, \"cpu_request_millicores\": 50, \"memory_mb\": 13, \"memory_request_mb\": 64, \"name\": \"frontend-5b88cb6888-kj6bz\"}, {\"cpu_millicores\": 0, \"cpu_request_millicores\": 50, \"memory_mb\": 13, \"memory_request_mb\": 64, \"name\": \"frontend-5b88cb6888-l2sr9\"}, {\"cpu_millicores\": 1, \"cpu_request_millicores\": 100, \"memory_mb\": 9, \"memory_request_mb\": 128, \"name\": \"ingestion-worker-6d86fb87bd-jrmf9\"}, {\"cpu_millicores\": 1, \"cpu_request_millicores\": 100, \"memory_mb\": 17, \"memory_request_mb\": 128, \"name\": \"ingestion-worker-6d86fb87bd-tdmdp\"}, {\"cpu_millicores\": 21, \"cpu_request_millicores\": 250, \"memory_mb\": 67, \"memory_request_mb\": 256, \"name\": \"postgres-6b4c959c9-z4tvv\"}, {\"cpu_millicores\": 13, \"cpu_request_millicores\": 500, \"memory_mb\": 19, \"memory_request_mb\": 512, \"name\": \"valkey-0\"}], \"reason\": null, \"total\": 8}"
+        ]
+      }
+    ],
+    "proposed_actions": [],
+    "executed_actions": [],
+    "tokens_used": 28419,
+    "prompt_tokens": 23544,
+    "completion_tokens": 4875,
+    "cost_usd": 0.019250700000000003,
+    "estimated_paid_cost_usd": 0.019250700000000003,
+    "model_usage": {
+      "gemini/gemini-3.5-flash-lite": {
+        "calls": 6,
+        "tokens": 28419
+      }
+    },
+    "wall_clock_seconds": 17.267,
+    "active_seconds": 17.267,
+    "backoff_seconds": 0.0,
+    "iterations": 3,
+    "requires_human_approval": false,
+    "approval_granted": null
+  },
+  "dataset": {
+    "alert_name": "ConsumerLagSpike",
+    "service": "ingestion-worker",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "category": "consumer_lag",
+    "baseline_mttr_seconds": 1200.0,
+    "ground_truth": {
+      "root_cause": "Ingestion worker consumer stalled; stream pending queue not draining",
+      "expected_action": "restart_deployment",
+      "expected_action_tier": 1,
+      "debugging_skill": "Queue metrics → consumer health → restart the stalled consumer"
+    },
+    "evaluation_criteria": {
+      "must_identify": "consumer or lag or pending",
+      "must_not_do": [
+        "delete_valkey_key with wildcard",
+        "flush_all"
+      ]
+    }
+  }
+}

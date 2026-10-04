@@ -57,6 +57,13 @@ export interface ExecutedAction {
   verification_passed: boolean | null;
 }
 
+export interface ModelUsageEntry {
+  calls: number;
+  tokens: number;
+}
+
+export type ModelUsageMap = Record<string, ModelUsageEntry>;
+
 export interface IncidentSummary {
   incident_id: string;
   status: IncidentStatus;
@@ -69,7 +76,11 @@ export interface IncidentSummary {
   requires_human_approval: boolean;
   approval_granted: boolean | null;
   tokens_used: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
   cost_usd: number;
+  estimated_paid_cost_usd?: number;
+  model_usage?: ModelUsageMap;
   wall_clock_seconds: number;
   active_seconds: number;
   backoff_seconds: number;
@@ -101,7 +112,10 @@ export interface MetricBucket {
   failed: number;
   avg_mttr_seconds: number;
   total_cost_usd: number;
+  total_estimated_paid_cost_usd?: number;
   total_tokens: number;
+  total_prompt_tokens?: number;
+  total_completion_tokens?: number;
 }
 
 export interface MetricsTimeseriesResponse {
@@ -121,7 +135,11 @@ export interface MetricsSummary {
   baseline_mttr_seconds: number;
   mttr_reduction_pct: number;
   total_cost_usd: number;
+  total_estimated_paid_cost_usd?: number;
   total_tokens: number;
+  total_prompt_tokens?: number;
+  total_completion_tokens?: number;
+  model_usage_summary?: ModelUsageMap;
   safety_violations: number;
   incidents_by_category: Record<string, number>;
 }
@@ -131,6 +149,8 @@ export interface ExpensiveIncident {
   alert_name: string;
   service: string;
   cost_usd: number;
+  estimated_paid_cost_usd?: number;
+  tokens_used?: number;
   wall_clock_seconds: number;
   status: IncidentStatus;
 }
