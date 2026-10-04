@@ -1392,7 +1392,12 @@ def complete_node(
     state: AgentState,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """Compute final metrics and set terminal status."""
+    """Compute final metrics and set terminal status.
+
+    If the incident is awaiting human approval (requires_human_approval=True
+    and approval_granted is None), the status must remain 'running' so the
+    dashboard correctly shows it as awaiting approval.
+    """
     started_at = float(state.get("started_at", 0.0) or 0.0)
     wall_clock = time.time() - started_at if started_at > 0 else 0.0
 
@@ -1401,21 +1406,16 @@ def complete_node(
     active = max(0.0, wall_clock - backoff)
 
     current_status = str(state.get("status", "running"))
+    requires_approval = bool(state.get("requires_human_approval", False))
+    approval_granted = state.get("approval_granted")
 
-    # If status is already terminal, preserve it
-    if current_status in ("resolved", "failed", "no_action", "blocked"):
+    # If awaiting approval, preserve running status so dashboard shows it
+    if requires_approval and approval_granted is None:
+        final_status = "running"
+    elif current_status in ("resolved", "failed", "no_action", "blocked"):
         final_status = current_status
     else:
-        # Derive status from executed actions
-        executed_actions = _coerce_dict_list(state.get("executed_actions"))
-
-        if executed_actions:
-            # Check if any action succeeded
-            any_succeeded = any(action.get("success", False) for action in executed_actions)
-            final_status = "resolved" if any_succeeded else "failed"
-        else:
-            # No actions executed - default to no_action
-            final_status = "no_action"
+        final_status = "no_action"
 
     return {
         "current_phase": PHASE_COMPLETE,

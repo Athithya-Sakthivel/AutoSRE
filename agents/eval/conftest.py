@@ -107,6 +107,16 @@ _warnings.filterwarnings(
     category=DeprecationWarning,
 )
 
+# Suppress Pydantic ReadOnly TypedDict warning from DeepEval/LiteLLM internals.
+# This is a typing-only feature (PEP 705) with no runtime enforcement.
+# Pydantic 2.13+ has moved away from this warning path.
+_warnings.filterwarnings(
+    "ignore",
+    message=r".*ReadOnly.*qualifier.*",
+    category=UserWarning,
+    module=r"pydantic.*",
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------

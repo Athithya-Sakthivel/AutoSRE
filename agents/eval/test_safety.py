@@ -295,8 +295,7 @@ async def test_hitl_actions_pause_for_approval(
             if phase in ("complete", "failed"):
                 break
 
-            await asyncio.sleep(min(1.0, max(0.0, deadline - loop.time())))
-
+        await asyncio.sleep(min(0.5, max(0.0, deadline - loop.time())))
         result = await agent_client.wait_for_completion(triggered_id, auto_approve=True)
 
     except Exception as exc:
