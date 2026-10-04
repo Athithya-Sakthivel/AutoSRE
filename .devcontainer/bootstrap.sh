@@ -8,18 +8,14 @@ export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
 ###############################################################################
 
 MAVEN_VERSION="${MAVEN_VERSION:-3.9.16}"
-PYTHON_VERSION="${PYTHON_VERSION:-3.14.6}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.14.8}"
 GO_VERSION="${GO_VERSION:-1.27.1}"
 
 OPENTOFU_VERSION="${OPENTOFU_VERSION:-1.12.6}"
 KUBECTL_VERSION="${KUBECTL_VERSION:-v1.36.4}"
 KIND_VERSION="${KIND_VERSION:-v0.32.0}"
 HELM_VERSION="${HELM_VERSION:-v4.3.0}"
-K6_VERSION="${K6_VERSION:-v2.2.0}"
-CLOUDFLARED_VERSION="${CLOUDFLARED_VERSION:-2026.9.0}"
 PRECOMMIT_VERSION="${PRECOMMIT_VERSION:-4.6.0}"
-ARGO_ROLLOUTS_VERSION="${ARGO_ROLLOUTS_VERSION:-v1.10.0}"
-PLAYWRIGHT_VERSION="${PLAYWRIGHT_VERSION:-1.63.0}"
 
 ###############################################################################
 # Paths
@@ -217,7 +213,7 @@ EOF
 }
 
 ###############################################################################
-# Python 3.14.6
+# Python
 #
 # Installed separately under /opt.
 #
@@ -225,7 +221,7 @@ EOF
 #   /usr/bin/python3
 #
 # Developer-facing default becomes:
-#   /usr/local/bin/python3 -> Python 3.14.6
+#   /usr/local/bin/python3 -> Python 3.14.x
 ###############################################################################
 
 install_python() {
@@ -309,7 +305,7 @@ install_python() {
     fi
 
     ###########################################################################
-    # Make Python 3.14.6 the developer-facing default.
+    # Make Python 3.14.x the developer-facing default.
     #
     # /usr/bin/python3 is deliberately NOT changed.
     #
@@ -325,12 +321,12 @@ install_python() {
         /usr/local/bin/python
 
     ###########################################################################
-    # pip commands tied explicitly to Python 3.14.6
+    # pip commands tied explicitly to the installed Python version
     ###########################################################################
 
-    cat > /usr/local/bin/pip3.14 <<'EOF'
+    cat > /usr/local/bin/pip3.14 <<EOF
 #!/bin/sh
-exec /opt/python/3.14.6/bin/python3.14 -m pip "$@"
+exec "${PYTHON_PREFIX}/bin/python3.14" -m pip "\$@"
 EOF
 
     chmod 0755 /usr/local/bin/pip3.14
@@ -344,27 +340,27 @@ EOF
         /usr/local/bin/pip
 
     ###########################################################################
-    # pytest launcher tied explicitly to Python 3.14.6
+    # pytest launcher tied explicitly to the installed Python version
     ###########################################################################
 
-    cat > /usr/local/bin/pytest <<'EOF'
+    cat > /usr/local/bin/pytest <<EOF
 #!/bin/sh
-exec /opt/python/3.14.6/bin/python3.14 -m pytest "$@"
+exec "${PYTHON_PREFIX}/bin/python3.14" -m pytest "\$@"
 EOF
 
     chmod 0755 /usr/local/bin/pytest
 
-    cat > /etc/profile.d/python314.sh <<'EOF'
-export PYTHON314_HOME=/opt/python/3.14.6
+    cat > /etc/profile.d/python314.sh <<EOF
+export PYTHON314_HOME=${PYTHON_PREFIX}
 EOF
 
     chmod 0644 /etc/profile.d/python314.sh
 
     ###########################################################################
-    # Verify Python 3.14.6
+    # Verify Python
     ###########################################################################
 
-    log "Checking Python 3.14.6"
+    log "Checking Python ${PYTHON_VERSION}"
 
     "${PYTHON_PREFIX}/bin/python3.14" - <<'PY'
 import bz2
@@ -383,11 +379,12 @@ except ImportError:
 
 import pytest
 
-print("Python 3.14.6 standard-library checks passed.")
+print("Python standard-library checks passed.")
 print(f"pytest {pytest.__version__}")
 PY
 
     log "Python default commands configured"
+
     curl -LsSf https://astral.sh/uv/0.12.17/install.sh | sh
 
     python3 --version
@@ -399,7 +396,7 @@ PY
 }
 
 ###############################################################################
-# Go 1.27.1
+# Go
 ###############################################################################
 
 install_go() {
@@ -571,78 +568,10 @@ install_helm() {
 }
 
 ###############################################################################
-# k6
-###############################################################################
-
-install_k6() {
-    log "Installing k6 ${K6_VERSION}"
-
-    local arch
-    local archive="/tmp/k6.tar.gz"
-    local unpack="/tmp/k6"
-
-    arch="$(detect_arch)"
-
-    rm -rf "${unpack}"
-    mkdir -p "${unpack}"
-
-    retry_curl \
-        "https://github.com/grafana/k6/releases/download/${K6_VERSION}/k6-${K6_VERSION}-linux-${arch}.tar.gz" \
-        -o "${archive}"
-
-    tar -xzf "${archive}" -C "${unpack}"
-
-    local binary=""
-    binary="$(find "${unpack}" \
-        -type f \
-        -name k6 \
-        -perm -u+x \
-        -print \
-        -quit)"
-
-    [[ -n "${binary}" ]] \
-        || die "k6 executable was not found."
-
-    install -m 0755 \
-        "${binary}" \
-        /usr/local/bin/k6
-
-    rm -rf "${unpack}" "${archive}"
-}
-
-###############################################################################
-# cloudflared
-###############################################################################
-
-install_cloudflared() {
-    log "Installing cloudflared ${CLOUDFLARED_VERSION}"
-
-    local asset
-
-    case "$(dpkg --print-architecture)" in
-        amd64)
-            asset="cloudflared-linux-amd64"
-            ;;
-        arm64)
-            asset="cloudflared-linux-arm64"
-            ;;
-        *)
-            die "Unsupported cloudflared architecture."
-            ;;
-    esac
-
-    retry_curl \
-        "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/${asset}" \
-        -o /usr/local/bin/cloudflared
-
-    chmod 0755 /usr/local/bin/cloudflared
-}
-
-###############################################################################
 # pre-commit
 #
 # IMPORTANT:
-# Use Python 3.14.6 explicitly.
+# Use the installed Python version explicitly.
 ###############################################################################
 
 install_precommit() {
@@ -730,26 +659,6 @@ EOF
 }
 
 ###############################################################################
-# Argo Rollouts
-###############################################################################
-
-install_argo_rollouts() {
-    log "Installing Argo Rollouts ${ARGO_ROLLOUTS_VERSION}"
-
-    local arch
-    local asset
-
-    arch="$(detect_arch)"
-    asset="kubectl-argo-rollouts-linux-${arch}"
-
-    retry_curl \
-        "https://github.com/argoproj/argo-rollouts/releases/download/${ARGO_ROLLOUTS_VERSION}/${asset}" \
-        -o /usr/local/bin/kubectl-argo-rollouts
-
-    chmod 0755 /usr/local/bin/kubectl-argo-rollouts
-}
-
-###############################################################################
 # Verification
 ###############################################################################
 
@@ -810,15 +719,6 @@ verify_installation() {
     printf 'npm:                '
     "${NVM_DIR}/current/bin/npm" --version
 
-    printf 'k6:                 '
-    k6 version 2>&1 | head -n 1
-
-    printf 'Argo Rollouts:      '
-    kubectl argo rollouts version 2>&1 | head -n 1
-
-    printf 'cloudflared:        '
-    cloudflared --version 2>&1 | head -n 1
-
     printf 'pre-commit:         '
     pre-commit --version
 
@@ -856,33 +756,6 @@ post_create() {
         log "No Git repository/.pre-commit-config.yaml; skipping pre-commit hooks"
     fi
 
-    ###########################################################################
-    # Playwright
-    ###########################################################################
-
-    local playwright_dir="/workspace/azure-pipelines/tests/playwright"
-
-    if [[ -f "${playwright_dir}/package.json" ]]; then
-        log "Installing Playwright ${PLAYWRIGHT_VERSION}"
-
-        cd "${playwright_dir}"
-
-        # Use the Node LTS exposed by the image without sourcing nvm.
-        export PATH="${NVM_DIR}/current/bin:${PATH}"
-
-        node --version
-        npm --version
-
-        npm install \
-            --save-dev \
-            --save-exact \
-            "@playwright/test@${PLAYWRIGHT_VERSION}"
-
-        npx playwright install --with-deps
-    else
-        log "Playwright project not found; skipping"
-    fi
-
     cd /workspace
 
     log "Post-create configuration completed"
@@ -907,11 +780,8 @@ build() {
     install_kubectl
     install_kind
     install_helm
-    install_k6
-    install_cloudflared
     install_precommit
     install_node_lts
-    install_argo_rollouts
 
     verify_installation
 

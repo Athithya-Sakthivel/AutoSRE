@@ -3,7 +3,7 @@
 
 provider "registry.opentofu.org/openobserve/openobserve" {
   version     = "1.4.1"
-  constraints = "~> 1.4.1"
+  constraints = "1.4.1"
   hashes = [
     "h1:+ts//CFgdLKn2/bAZF0qe6jCPicgTladnKEyT2JSE4A=",
     "h1:0ohKS7s2CcYoZKOtx/Njyd92Njc3D+70QgmWjI58nsw=",

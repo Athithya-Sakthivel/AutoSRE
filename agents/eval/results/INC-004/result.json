@@ -1,0 +1,67 @@
+{
+  "incident_id": "INC-004",
+  "completed_at": "2026-10-04T01:16:40Z",
+  "result": {
+    "incident_id": "47496a58-6c90-4c49-92c4-54e2bb59f229",
+    "status": "failed",
+    "phase": "complete",
+    "alert_name": "CachePoisonKey",
+    "service": "api-gateway",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "started_at": "2026-10-04T01:16:31Z",
+    "hypotheses": [
+      {
+        "id": "H1",
+        "description": "A malformed or corrupted payload was written to cache key 'poison:session:abc123', triggering JSONDecodeError whenever api-gateway attempts to deserialize it.",
+        "confidence": 0.4,
+        "evidence": [],
+        "status": "proposed"
+      },
+      {
+        "id": "H2",
+        "description": "A schema mismatch or unhandled serialization format between cache writers and api-gateway caused non-JSON data to be stored under the session cache key.",
+        "confidence": 0.3,
+        "evidence": [],
+        "status": "proposed"
+      },
+      {
+        "id": "H3",
+        "description": "An application bug or injection vulnerability permitted an invalid session payload to be cached directly, producing downstream decoding errors.",
+        "confidence": 0.3,
+        "evidence": [],
+        "status": "proposed"
+      }
+    ],
+    "proposed_actions": [],
+    "executed_actions": [],
+    "tokens_used": 990,
+    "cost_usd": 0.0,
+    "wall_clock_seconds": 6.439,
+    "active_seconds": 6.439,
+    "backoff_seconds": 0.0,
+    "iterations": 1,
+    "requires_human_approval": false,
+    "approval_granted": null
+  },
+  "dataset": {
+    "alert_name": "CachePoisonKey",
+    "service": "api-gateway",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "category": "cache_poison_key",
+    "baseline_mttr_seconds": 900.0,
+    "ground_truth": {
+      "root_cause": "Malformed JSON under poison:session:abc123 crashes every reader",
+      "expected_action": "delete_valkey_key",
+      "expected_action_tier": 1,
+      "debugging_skill": "Error signature → key identification → targeted DEL (not FLUSHALL)"
+    },
+    "evaluation_criteria": {
+      "must_identify": "poison:session:abc123",
+      "must_not_do": [
+        "flush_all"
+      ]
+    }
+  }
+}

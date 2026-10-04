@@ -363,17 +363,6 @@ _BUCKET_MINUTES_BY_RANGE: dict[str, int] = {
     "30d": 1440,
 }
 
-_MUTATING_TOOLS = frozenset(
-    {
-        "restart_deployment",
-        "scale_deployment",
-        "delete_pod",
-        "terminate_backend",
-        "delete_valkey_key",
-        "set_feature_flag",
-    }
-)
-
 
 # ---------------------------------------------------------------------------
 # Dependency injection
@@ -805,16 +794,27 @@ async def trigger_incident(
 async def approve_incident(
     incident_id: str,
     request: Request,
-    approval: ApprovalRequest,
     runner: Runner,
     settings: AppSettings,
 ) -> dict[str, Any]:
-    """Resume a paused HITL interrupt with the operator's decision."""
+    """Resume a paused HITL interrupt with the operator's decision.
+
+    CRITICAL: We must read the raw body BEFORE FastAPI parses it into a
+    Pydantic model, otherwise the body stream is consumed and HMAC
+    verification will fail on an empty payload.
+    """
+    # Read raw body FIRST before FastAPI consumes it
     payload = await request.body()
     signature = request.headers.get("X-Webhook-Signature", "")
 
     if not _verify_signature(payload, signature, settings.alert.webhook_secret):
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    # Now parse the validated body manually
+    try:
+        approval = ApprovalRequest.model_validate_json(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid approval payload: {exc}") from exc
 
     approved = await runner.approve_incident(incident_id, approval.approved, approval.comment)
 
@@ -878,14 +878,17 @@ async def get_incident_report(
     state = await runner.get_incident_state(incident_id)
 
     if state is None:
-        raise HTTPException(status_code=404, detail=f"Incident {incident_id} not found")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Incident {incident_id} not found",
+        )
 
     values = _state_values(state)
 
     if not values:
         raise HTTPException(
-            status_code=500,
-            detail=f"Invalid state format for incident {incident_id}",
+            status_code=404,
+            detail=f"Incident {incident_id} not found",
         )
 
     metadata = values.get("incident_metadata") or {}

@@ -8,15 +8,25 @@ Contents:
     * JSON extraction from unstructured LLM output (fence, prose, nesting)
     * Hypothesis validation and normalization
     * Tool metadata extraction (deterministic, cache-friendly ordering)
-    * Small utilities: top_hypothesis, is_high_confidence, approval parsing
+    * Small utilities: top_hypothesis, approval parsing
+
+## Contract with config.py
+
+All agent behaviour thresholds are configurable via ``AUTOSRE_SAFETY__*``
+environment variables and read at runtime from ``SafetyConfig``. This
+module does not define any behaviour constants. All thresholds are
+injected into graph nodes via ``GraphContext`` fields, populated from
+``settings.safety.*`` by the lifespan function in ``api/main.py``.
 
 ## Contract with state.py
 
-All graph-wide constants (iteration budget, thresholds, limits) live in
-``state.py``. This module re-exports the legacy alias ``MAX_ITERATIONS``
-for backward compatibility but does not define any new constants that
-describe the same limit. If a number needs to change, it changes in
-``state.py``.
+This module imports only the Pydantic models (``Hypothesis``) and the
+``AgentState`` / ``RunMetrics`` / ``SREContext`` dataclasses from
+``state.py``. It does not import or re-export any behaviour constants.
+The stale constants ``INITIAL_ITERATION_BUDGET``, ``STAGNATION_LIMIT``,
+``MAX_ACTION_ATTEMPTS``, ``MIN_CONFIDENCE_FOR_ACTION``,
+``HIGH_CONFIDENCE_THRESHOLD``, and ``MIN_CONFIDENCE_IMPROVEMENT`` were
+removed from ``state.py`` and replaced with ``SafetyConfig`` fields.
 
 ## Contract with graph_nodes.py
 
@@ -30,7 +40,10 @@ Nodes call into this module for:
     * count_action_attempts(...)         — per-tool retry counter.
     * parse_json_response(...)           — never returns a non-dict unless
                                            ``allow_array=True``.
-    * top_hypothesis / is_high_confidence — read-only ranking helpers.
+    * top_hypothesis                     — read-only ranking helper.
+
+Nodes read behaviour thresholds from ``graph_context`` fields, never
+from module-level constants.
 
 ## Idempotency semantics
 
@@ -55,11 +68,7 @@ from langchain_core.runnables import RunnableConfig
 
 from autosre.core.context import ContextEviction
 from autosre.core.router import TokenVelocityRouter
-from autosre.core.state import (
-    HIGH_CONFIDENCE_THRESHOLD,
-    INITIAL_ITERATION_BUDGET,
-    Hypothesis,
-)
+from autosre.core.state import Hypothesis
 from autosre.safety.executor import SafeExecutor
 from autosre.safety.policy import PolicyEngine
 from autosre.tools.registry import ToolRegistry
@@ -94,14 +103,8 @@ PHASES: tuple[str, ...] = (
 )
 
 # ---------------------------------------------------------------------------
-# Re-exports and tool classification
-#
-# The legacy name MAX_ITERATIONS is retained so external code and older
-# tests continue to work. New code should import INITIAL_ITERATION_BUDGET
-# from state.py directly.
+# Tool classification
 # ---------------------------------------------------------------------------
-
-MAX_ITERATIONS: int = INITIAL_ITERATION_BUDGET
 
 READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
     {
@@ -157,13 +160,33 @@ class GraphContext:
     Frozen so nodes cannot accidentally rebind a field. The referenced
     objects are still mutable (registries, executors), which is
     intentional.
+
+    All behaviour thresholds are populated from ``settings.safety.*``
+    by the lifespan function in ``api/main.py``. Nodes read these
+    fields instead of module-level constants, making every threshold
+    configurable via ``AUTOSRE_SAFETY__*`` environment variables.
     """
+
+    # -- Infrastructure dependencies ----------------------------------------
 
     llm_router: TokenVelocityRouter
     registry: ToolRegistry
     executor: SafeExecutor
     policy_engine: PolicyEngine
     context_eviction: ContextEviction
+
+    # -- Investigation loop control -----------------------------------------
+
+    initial_iteration_budget: int = 3
+    stagnation_limit: int = 2
+    max_action_attempts: int = 2
+
+    # -- Confidence thresholds ----------------------------------------------
+
+    confidence_propose: float = 0.55
+    confidence_fast_path: float = 0.80
+    confidence_give_up: float = 0.40
+    min_confidence_improvement: float = 0.05
 
 
 def get_graph_context(config: RunnableConfig) -> GraphContext:
@@ -683,7 +706,7 @@ async def list_tool_specs(registry: ToolRegistry) -> list[dict[str, Any]]:
     """Return deterministic JSON-safe tool metadata including input schemas.
 
     Sorted alphabetically by name. Deterministic ordering is required for
-    Groq prompt-cache prefix matching: identical schemas in identical order
+    prompt-cache prefix matching: identical schemas in identical order
     enable cache hits across calls.
 
     Tries ``to_openai_schema()`` first; falls back to
@@ -803,15 +826,6 @@ def top_hypothesis(
     return max(hypotheses, key=_confidence_value)
 
 
-def is_high_confidence(
-    hypotheses: Sequence[Mapping[str, Any]],
-) -> bool:
-    """Return whether any hypothesis reached the proposal threshold."""
-    return any(
-        _confidence_value(hypothesis) >= HIGH_CONFIDENCE_THRESHOLD for hypothesis in hypotheses
-    )
-
-
 # ---------------------------------------------------------------------------
 # Approval parsing
 # ---------------------------------------------------------------------------
@@ -869,7 +883,6 @@ __all__ = [
     "PHASE_COMPLETE",
     "PHASES",
     # Constants
-    "MAX_ITERATIONS",
     "READ_ONLY_TOOL_NAMES",
     "MUTATING_TOOLS",
     "REMEDIATION_RISK_TIERS",
@@ -898,7 +911,6 @@ __all__ = [
     # Utilities
     "safe_json",
     "top_hypothesis",
-    "is_high_confidence",
     # Approval
     "approval_value_to_bool",
 ]

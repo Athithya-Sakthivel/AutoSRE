@@ -24,10 +24,13 @@ from pydantic import BaseModel
 
 from autosre.core.context import ContextEviction
 from autosre.core.graph import compile_graph
-from autosre.core.graph_helpers import PHASE_COMPLETE, PHASE_HYPOTHESIZE
+from autosre.core.graph_helpers import (
+    PHASE_COMPLETE,
+    PHASE_HYPOTHESIZE,
+    GraphContext,
+)
 from autosre.core.router import TokenVelocityRouter
 from autosre.core.state import (
-    INITIAL_ITERATION_BUDGET,
     AgentState,
     IncidentMetadata,
     ProposedAction,
@@ -131,6 +134,7 @@ def _llm_response(payload: dict[str, Any]) -> SimpleNamespace:
     return SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(payload)))],
         usage=None,
+        model="gemini/gemini-3.8-flash",
     )
 
 
@@ -201,13 +205,13 @@ def _build_full_state(sample_metadata: IncidentMetadata, **overrides: Any) -> Ag
     """Build a fully-populated AgentState with sensible defaults."""
     base: dict[str, Any] = {
         "messages": [],
-        "incident_metadata": sample_metadata,
+        "incident_metadata": sample_metadata.model_dump(),
         "hypotheses": [],
         "proposed_actions": [],
         "executed_actions": [],
         "current_phase": "triage",
         "iteration_count": 0,
-        "iteration_budget": INITIAL_ITERATION_BUDGET,
+        "iteration_budget": 3,  # Matches default initial_iteration_budget
         "last_top_confidence": 0.0,
         "stagnation_count": 0,
         "action_attempts": 0,
@@ -223,7 +227,7 @@ def _build_full_state(sample_metadata: IncidentMetadata, **overrides: Any) -> Ag
         "status": "running",
     }
     base.update(overrides)
-    return AgentState(**base)  # type: ignore[typeddict-item]
+    return AgentState(**base)
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +251,8 @@ def mock_tool_registry() -> MagicMock:
     registry.get = MagicMock(
         side_effect=lambda name: next((t for t in mock_tools if t.name == name), None)
     )
+    # Default mock for registry.execute (used by investigate_node)
+    registry.execute = AsyncMock(return_value={"status": "success"})
     return registry
 
 
@@ -279,15 +285,21 @@ def investigation_context(
     mock_safe_executor: MagicMock,
     mock_policy_engine: MagicMock,
     context_eviction: ContextEviction,
-) -> Any:
-    from autosre.core.graph_helpers import GraphContext
-
+) -> GraphContext:
     return GraphContext(
         llm_router=mock_llm_router,
         registry=mock_tool_registry,
         executor=mock_safe_executor,
         policy_engine=mock_policy_engine,
         context_eviction=context_eviction,
+        # Thresholds match SafetyConfig defaults
+        initial_iteration_budget=3,
+        stagnation_limit=2,
+        max_action_attempts=2,
+        confidence_propose=0.55,
+        confidence_fast_path=0.80,
+        confidence_give_up=0.40,
+        min_confidence_improvement=0.05,
     )
 
 
@@ -318,12 +330,13 @@ def initial_state(sample_metadata: IncidentMetadata) -> AgentState:
 
 
 def _configure_full_flow(
-    ctx: Any,
+    ctx: GraphContext,
     *,
     hypothesis_confidence: float = 0.9,
     risk_tier: int = 1,
 ) -> None:
-    """Configure LLM + executor mocks for triage → complete."""
+    """Configure LLM + executor mocks for triage -> complete."""
+    # propose_node uses coordinator_call
     ctx.llm_router.coordinator_call.side_effect = [
         _llm_response(
             {
@@ -339,6 +352,7 @@ def _configure_full_flow(
         ),
     ]
 
+    # triage, investigate, hypothesize use acompletion
     ctx.llm_router.acompletion.side_effect = [
         # Triage
         _llm_response(
@@ -348,21 +362,24 @@ def _configure_full_flow(
                         "id": "H1",
                         "description": "Pod crash loop due to OOMKilled",
                         "confidence": 0.5,
-                        "evidence": ["CrashLoopBackOff"],
+                        "evidence": [],
                         "status": "proposed",
                     }
                 ],
             }
         ),
-        # Investigate
+        # Investigate (new format: tools array)
         _llm_response(
             {
-                "tool_name": "get_pod_events",
-                "tool_args": {
-                    "namespace": "rivulet",
-                    "pod_name": "api-gateway-abc123",
-                },
-                "rationale": "Checking pod events for OOMKilled",
+                "tools": [
+                    {
+                        "name": "get_pod_events",
+                        "args": {
+                            "namespace": "rivulet",
+                            "pod_name": "api-gateway-abc123",
+                        },
+                    }
+                ]
             }
         ),
         # Hypothesize (refinement)
@@ -373,10 +390,7 @@ def _configure_full_flow(
                         "id": "H1",
                         "description": "Pod crash loop due to OOMKilled",
                         "confidence": hypothesis_confidence,
-                        "evidence": [
-                            "CrashLoopBackOff",
-                            "OOMKilled event",
-                        ],
+                        "evidence": ["CrashLoopBackOff", "OOMKilled event"],
                         "status": "confirmed",
                     }
                 ],
@@ -384,27 +398,22 @@ def _configure_full_flow(
         ),
     ]
 
-    ctx.executor.execute.side_effect = [
-        _make_execution_result(
-            tool_name="get_pod_events",
-            tool_args={
-                "namespace": "rivulet",
-                "pod_name": "api-gateway-abc123",
-            },
-            risk_tier=0,
-            output={"events": [{"reason": "OOMKilled"}]},
-        ),
-        _make_execution_result(
+    # investigate_node calls registry.execute
+    ctx.registry.execute = AsyncMock(return_value={"events": [{"reason": "OOMKilled"}]})
+
+    # execute_node calls executor.execute
+    ctx.executor.execute = AsyncMock(
+        return_value=_make_execution_result(
             tool_name="restart_deployment",
             tool_args={
                 "namespace": "rivulet",
                 "name": "api-gateway",
                 "reason": "CrashLoopBackOff with OOMKilled evidence",
             },
-            risk_tier=1,
+            risk_tier=risk_tier,
             output={"status": "success", "restarted": True},
-        ),
-    ]
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +424,7 @@ def _configure_full_flow(
 @pytest.mark.asyncio
 async def test_graph_triage_to_completion(
     initial_state: AgentState,
-    investigation_context: Any,
+    investigation_context: GraphContext,
     mock_sre_context: MagicMock,
 ) -> None:
     """Full investigation reaches completion and executes remediation."""
@@ -430,9 +439,10 @@ async def test_graph_triage_to_completion(
     assert len(result["hypotheses"]) >= 1
     assert result["hypotheses"][0]["id"] == "H1"
 
-    assert len(result["proposed_actions"]) >= 1
-    assert result["proposed_actions"][0]["tool_name"] == "restart_deployment"
+    # execute_node clears proposed_actions after execution
+    assert len(result["proposed_actions"]) == 0
 
+    # executed_actions should contain the remediation
     assert len(result["executed_actions"]) >= 1
     assert result["executed_actions"][0]["tool_name"] == "restart_deployment"
     assert result["executed_actions"][0]["success"] is True
@@ -441,32 +451,27 @@ async def test_graph_triage_to_completion(
 @pytest.mark.asyncio
 async def test_graph_high_confidence_hypothesis_skips_investigation(
     sample_metadata: IncidentMetadata,
-    investigation_context: Any,
+    investigation_context: GraphContext,
     mock_sre_context: MagicMock,
 ) -> None:
-    """High-confidence input skips the investigation loop."""
+    """High-confidence input skips the investigation loop (fast path)."""
+    # Only propose_node will be called (coordinator_call)
     investigation_context.llm_router.coordinator_call.return_value = _llm_response(
         {
             "tool_name": "restart_deployment",
-            "tool_args": {
-                "namespace": "rivulet",
-                "name": "api-gateway",
-                "reason": "Restart after OOM crash loop",
-            },
+            "tool_args": {"namespace": "rivulet", "name": "api-gateway", "reason": "OOM"},
             "risk_tier": 1,
-            "rationale": "Restart after OOM crash loop",
+            "rationale": "Restart",
         }
     )
 
-    investigation_context.executor.execute.return_value = _make_execution_result(
-        tool_name="restart_deployment",
-        tool_args={
-            "namespace": "rivulet",
-            "name": "api-gateway",
-            "reason": "Restart after OOM crash loop",
-        },
-        risk_tier=1,
-        output={"status": "success", "restarted": True},
+    investigation_context.executor.execute = AsyncMock(
+        return_value=_make_execution_result(
+            tool_name="restart_deployment",
+            tool_args={"namespace": "rivulet", "name": "api-gateway", "reason": "OOM"},
+            risk_tier=1,
+            output={"status": "success", "restarted": True},
+        )
     )
 
     state = _build_full_state(
@@ -474,9 +479,9 @@ async def test_graph_high_confidence_hypothesis_skips_investigation(
         hypotheses=[
             {
                 "id": "H1",
-                "description": "Pod OOMKilled",
+                "description": "OOM",
                 "confidence": 0.9,
-                "evidence": ["OOMKilled event"],
+                "evidence": ["OOM"],
                 "status": "confirmed",
             }
         ],
@@ -491,29 +496,26 @@ async def test_graph_high_confidence_hypothesis_skips_investigation(
     result = await graph.ainvoke(state, config=config)
 
     assert result["current_phase"] == PHASE_COMPLETE
-    assert len(result["proposed_actions"]) >= 1
-    assert result["proposed_actions"][0]["tool_name"] == "restart_deployment"
     assert len(result["executed_actions"]) >= 1
+    assert result["executed_actions"][0]["tool_name"] == "restart_deployment"
 
 
 @pytest.mark.asyncio
 async def test_graph_tier1_action_executes_without_hitl(
     sample_metadata: IncidentMetadata,
-    investigation_context: Any,
+    investigation_context: GraphContext,
     mock_sre_context: MagicMock,
 ) -> None:
     """Tier-1 action executes directly without human approval."""
-    tool_args = {
-        "namespace": "rivulet",
-        "name": "api-gateway",
-        "reason": "Restart to clear crash loop",
-    }
+    tool_args = {"namespace": "rivulet", "name": "api-gateway", "reason": "Restart"}
 
-    investigation_context.executor.execute.return_value = _make_execution_result(
-        tool_name="restart_deployment",
-        tool_args=tool_args,
-        risk_tier=1,
-        output={"status": "success", "restarted": True},
+    investigation_context.executor.execute = AsyncMock(
+        return_value=_make_execution_result(
+            tool_name="restart_deployment",
+            tool_args=tool_args,
+            risk_tier=1,
+            output={"status": "success", "restarted": True},
+        )
     )
 
     state = _build_full_state(
@@ -521,9 +523,9 @@ async def test_graph_tier1_action_executes_without_hitl(
         hypotheses=[
             {
                 "id": "H1",
-                "description": "Crash loop",
+                "description": "Crash",
                 "confidence": 0.9,
-                "evidence": ["CrashLoopBackOff"],
+                "evidence": [],
                 "status": "confirmed",
             }
         ],
@@ -532,7 +534,7 @@ async def test_graph_tier1_action_executes_without_hitl(
                 "tool_name": "restart_deployment",
                 "tool_args": tool_args,
                 "risk_tier": 1,
-                "rationale": "Restart to clear crash loop",
+                "rationale": "Restart",
                 "requires_approval": False,
             }
         ],
@@ -550,26 +552,28 @@ async def test_graph_tier1_action_executes_without_hitl(
     assert len(result["executed_actions"]) == 1
     assert result["executed_actions"][0]["success"] is True
 
-    # execute → verify → complete does not invoke the LLM.
+    # execute -> verify -> complete does not invoke the LLM.
     investigation_context.llm_router.acompletion.assert_not_awaited()
+    investigation_context.llm_router.coordinator_call.assert_not_awaited()
     investigation_context.executor.execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_graph_respects_max_iterations(
     sample_metadata: IncidentMetadata,
-    investigation_context: Any,
+    investigation_context: GraphContext,
     mock_sre_context: MagicMock,
 ) -> None:
     """At budget exhaustion with low confidence, exit as no_action."""
+    # Hypothesize will be called, but since budget is 0 and confidence < 0.55, it returns no_action
     investigation_context.llm_router.acompletion.return_value = _llm_response(
         {
             "hypotheses": [
                 {
                     "id": "H1",
-                    "description": "Unknown issue",
+                    "description": "Unknown",
                     "confidence": 0.3,
-                    "evidence": ["Unclear logs"],
+                    "evidence": [],
                     "status": "proposed",
                 }
             ],
@@ -581,15 +585,15 @@ async def test_graph_respects_max_iterations(
         hypotheses=[
             {
                 "id": "H1",
-                "description": "Unknown issue",
+                "description": "Unknown",
                 "confidence": 0.3,
-                "evidence": ["Unclear logs"],
+                "evidence": [],
                 "status": "proposed",
             }
         ],
         current_phase=PHASE_HYPOTHESIZE,
         iteration_count=5,
-        iteration_budget=0,
+        iteration_budget=0,  # Budget exhausted
         last_top_confidence=0.3,
     )
 
@@ -599,4 +603,4 @@ async def test_graph_respects_max_iterations(
     result = await graph.ainvoke(state, config=config)
 
     assert result["current_phase"] == PHASE_COMPLETE
-    assert result["status"] in ("no_action", "failed")
+    assert result["status"] == "no_action"

@@ -1,22 +1,16 @@
-"""Token-velocity routing for LiteLLM-backed Groq models.
+"""Token-velocity routing for LiteLLM-backed models.
 
 ## Provider contract
 
-Groq's native API uses model IDs such as ``openai/gpt-oss-20b`` and
-``qwen/qwen3.8-27b``. LiteLLM's Groq provider is selected by prefixing
-the model with ``groq/``:
+Model IDs use the LiteLLM canonical form: ``<provider>/<model>``.
 
-    groq/openai/gpt-oss-20b
-    groq/qwen/qwen3.8-27b
+    gemini/gemini-3.8-flash
+    openai/gpt-4o-mini
+    anthropic/claude-3-5-sonnet
 
-This is different from calling Groq's OpenAI-compatible HTTP endpoint
-directly, where the request model must remain ``openai/gpt-oss-20b``.
-Do not force ``custom_llm_provider="openai"`` for native Groq calls.
-
-Groq prompt caching is automatic on supported models and only benefits
-exact prefix matches. Static system instructions and deterministically
-ordered tool schemas must remain unchanged; dynamic incident data must
-be appended after that stable prefix.
+The router passes these strings through to LiteLLM without modification.
+LiteLLM infers the provider from the prefix and routes to the correct
+endpoint. No application-level provider normalization is performed.
 
 ## Routing contract
 
@@ -27,34 +21,45 @@ The router selects between two tiers:
 
 Selection is by *estimated input tokens*. Threshold-based routing keeps
 small triage/propose prompts on the fast tier and large
-investigate/hypothesize prompts on the worker tier.
+investigate/hypothesize prompts on the worker tier. When both tiers
+point to the same model (common on free tiers with uniform pricing),
+the router still functions correctly as a pass-through.
 
 Explicit overrides:
     "coordinator" / "auto"   Threshold-based routing
     "fast"                   Force the coordinator model
     "worker" / "slow"        Force the worker model
-    <explicit model id>      Normalized and passed through
+    <explicit model id>      Passed through unchanged
 
-## Failure and budget contract
+## Retry and backoff contract
 
 Every physical HTTP call is counted in ``RunMetrics.llm_call_count``.
-Every failed call increments ``RunMetrics.llm_consecutive_failures``,
-and every successful call resets it to 0. When the counter reaches
-``max_consecutive_failures`` the router raises
+Transient errors (HTTP 429, 500, 503) trigger exponential backoff with
+jitter. The sleep duration is recorded in ``RunMetrics.backoff_seconds``
+so that ``complete_node`` can report honest active work time excluding
+rate-limit waits.
+
+Backoff strategy:
+    - Attempts 0-2: linear (initial_backoff * (attempt + 1))
+    - Attempts 3+: exponential (initial_backoff * 2^attempt)
+    - All: capped at min(max_backoff, 30.0)
+    - All: jitter up to 10% of base to prevent thundering herd
+    - Retry-After header honored when present
+
+Daily quota exhaustion (RPD) is detected and fast-fails without retry,
+since no amount of backoff will restore a depleted daily bucket.
+
+When consecutive failures exceed ``max_retries``, the router raises
 ``LLMBudgetExhaustedError``, which propagates out of ``acompletion``
 and is handled by the graph node as a fatal incident error.
-
-Rate-limit fallback (fast -> worker) is transparent. Rate-limit sleeps
-are recorded in ``RunMetrics.backoff_seconds`` so that ``complete_node``
-can report the honest active work time.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
+import random
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -73,17 +78,27 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TOKEN_THRESHOLD = 6000
 DEFAULT_TIKTOKEN_ENCODING = "cl100k_base"
-DEFAULT_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
-DEFAULT_MAX_WORKER_ATTEMPTS = 3
 
 Message = Mapping[str, Any]
 
+# HTTP status codes that warrant a retry with backoff.
+_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
+
+# Substrings in error messages that indicate daily quota exhaustion.
+# These should fast-fail rather than retry.
+_DAILY_QUOTA_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"quota exceeded", re.IGNORECASE),
+    re.compile(r"daily.*limit", re.IGNORECASE),
+    re.compile(r"RPD", re.IGNORECASE),
+    re.compile(r"requests per day", re.IGNORECASE),
+    re.compile(r"resource has been exhausted", re.IGNORECASE),
+    re.compile(r"exceeded your current quota", re.IGNORECASE),
+)
+
 
 class LLMBudgetExhaustedError(RuntimeError):
-    """Raised when consecutive LLM failures exceed the configured budget.
+    """Raised when retries are exhausted or daily quota is depleted.
 
-    Indicates a persistent provider outage rather than a transient error.
     Graph nodes must not retry on this exception; the incident should be
     marked failed and left for human investigation.
     """
@@ -97,15 +112,8 @@ class LLMBudgetExhaustedError(RuntimeError):
 class TokenVelocityRouter:
     """Select a model tier from estimated prompt size and dispatch to LiteLLM.
 
-    Aliases:
-
-        coordinator / auto      Threshold-based routing
-        fast                    Force the coordinator model
-        worker / slow           Force the worker model
-
-    When ``provider == "groq"``, configured model IDs are converted to the
-    LiteLLM form ``groq/<native-groq-model-id>``. This preserves namespaces
-    such as ``openai/`` inside the actual Groq model ID.
+    Provider-agnostic pass-through. The configured model IDs are sent to
+    LiteLLM verbatim.
     """
 
     AUTO_ALIASES: frozenset[str] = frozenset({"coordinator", "auto"})
@@ -119,53 +127,38 @@ class TokenVelocityRouter:
         threshold_tokens: int = DEFAULT_TOKEN_THRESHOLD,
         *,
         encoder: Any | None = None,
-        fallback_on_rate_limit: bool = True,
-        max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
+        max_llm_calls_per_incident: int = 15,
     ) -> None:
         """Initialize the router.
 
         Args:
-            config: LLM settings including provider, model IDs, and pricing.
+            config: LLM settings including model IDs, pricing, and retry config.
             threshold_tokens: Input-token count above which the worker tier
                 is selected. Must be > 0.
-            encoder: Optional tiktoken-compatible encoder. Defaults to
-                cl100k_base.
-            fallback_on_rate_limit: When True, auto-routed fast-tier calls
-                that receive HTTP 429 retry on the worker tier.
-            max_consecutive_failures: Number of consecutive failed physical
-                calls after which ``LLMBudgetExhaustedError`` is raised.
+            encoder: Optional tiktoken-compatible encoder.
+            max_llm_calls_per_incident: Hard budget on LLM calls per incident.
         """
         if threshold_tokens <= 0:
             raise ValueError("threshold_tokens must be greater than zero")
 
-        if max_consecutive_failures <= 0:
-            raise ValueError("max_consecutive_failures must be greater than zero")
-
         self.config = config
         self.threshold_tokens = threshold_tokens
-        self.max_consecutive_failures = max_consecutive_failures
-
-        raw_provider = getattr(config.provider, "value", config.provider)
-        self.provider = str(raw_provider).strip().lower()
 
         self.api_key = self._secret_value(getattr(config, "api_key", None))
+        self.base_url = getattr(config, "base_url", None)
 
-        configured_base_url = getattr(config, "base_url", None)
-        if configured_base_url:
-            self.base_url: str | None = str(configured_base_url)
-        elif self.provider == "groq":
-            self.base_url = DEFAULT_GROQ_BASE_URL
-        else:
-            self.base_url = None
-
-        self.fallback_on_rate_limit = fallback_on_rate_limit
+        self.max_retries = config.max_retries
+        self.initial_backoff = config.initial_backoff_seconds
+        self.max_backoff = config.max_backoff_seconds
+        self.max_llm_calls_per_incident = max_llm_calls_per_incident
 
         self.encoder = (
             encoder if encoder is not None else tiktoken.get_encoding(DEFAULT_TIKTOKEN_ENCODING)
         )
 
-        self.fast_model = self._normalize_model(str(config.model_coordinator))
-        self.slow_model = self._normalize_model(str(config.model_worker))
+        # Pass-through: use the configured model IDs verbatim.
+        self.fast_model = str(config.model_coordinator).strip()
+        self.slow_model = str(config.model_worker).strip()
 
         if not self.fast_model or not self.slow_model:
             raise ValueError("Both coordinator and worker model names are required")
@@ -180,11 +173,14 @@ class TokenVelocityRouter:
 
         logger.info(
             "TokenVelocityRouter initialized: fast=%s slow=%s "
-            "threshold=%d max_consecutive_failures=%d",
+            "threshold=%d max_retries=%d backoff=%.1fs..%.1fs max_calls=%d",
             self.fast_model,
             self.slow_model,
             self.threshold_tokens,
-            self.max_consecutive_failures,
+            self.max_retries,
+            self.initial_backoff,
+            self.max_backoff,
+            self.max_llm_calls_per_incident,
         )
 
     # ------------------------------------------------------------------ setup
@@ -204,47 +200,6 @@ class TokenVelocityRouter:
         text = str(resolved).strip()
         return text or None
 
-    def _normalize_model(self, model: str) -> str:
-        """Normalize a model for the configured LiteLLM provider.
-
-        For Groq:
-
-            openai/gpt-oss-20b     -> groq/openai/gpt-oss-20b
-            qwen/qwen3.8-27b       -> groq/qwen/qwen3.8-27b
-            groq/openai/gpt-oss-20b -> unchanged
-
-        Groq retired ``groq/compound`` and ``groq/compound-mini`` on
-        2026-09-21, so this router rejects those legacy IDs instead of
-        carrying a dead fallback path into production.
-        """
-        model = model.strip()
-
-        if not model or self.provider != "groq":
-            return model
-
-        lower = model.lower()
-
-        if lower in {
-            "compound",
-            "compound-mini",
-            "groq/compound",
-            "groq/compound-mini",
-        }:
-            raise ValueError(
-                "Groq Compound models were retired on 2026-09-21; "
-                "configure an active Groq model instead"
-            )
-
-        if lower.startswith("groq/"):
-            return model
-
-        if "/" not in model:
-            raise ValueError(
-                f"Groq model names must use the canonical provider/model form, got {model!r}"
-            )
-
-        return f"groq/{model}"
-
     # ------------------------------------------------------------- tokenizing
 
     def count_tokens(
@@ -254,18 +209,11 @@ class TokenVelocityRouter:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any | None = None,
     ) -> int:
-        """Estimate input tokens deterministically for routing decisions.
-
-        Includes message fields, structured tool-call data, tool schemas,
-        image inputs, and lightweight chat framing. Excludes predicted
-        output tokens because routing is based on input context size.
-        """
+        """Estimate input tokens deterministically for routing decisions."""
         total = 0
 
         for message in messages:
-            # Approximate chat-message framing.
-            total += 4
-
+            total += 4  # Chat framing overhead.
             total += self._count_text(message.get("role"))
             total += self._count_text(message.get("name"))
             total += self._count_text(message.get("tool_call_id"))
@@ -303,9 +251,7 @@ class TokenVelocityRouter:
                     if item_type == "text":
                         total += self._count_text(item.get("text"))
                     elif item_type == "image_url":
-                        # Groq documents 2048 input tokens per image for
-                        # Qwen 3.8 27B. Do not also count the URL as text.
-                        total += 2048
+                        total += 2048  # Conservative image token estimate.
                     else:
                         total += self._count_structured(item)
                 else:
@@ -356,25 +302,23 @@ class TokenVelocityRouter:
         return selected
 
     def _resolve_model(self, model: str) -> str:
-        """Resolve a routing alias or normalize an explicit model ID."""
+        """Resolve a routing alias or return the explicit model ID unchanged."""
         alias = model.strip().lower()
 
         if alias in self.model_map:
             return self.model_map[alias]
 
-        return self._normalize_model(model)
+        # Pass-through: no normalization.
+        return model.strip()
 
     # ------------------------------------------------------------ call kwargs
 
     def _build_call_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Build LiteLLM call arguments without duplicating caller settings.
-
-        LiteLLM's Python completion API uses ``api_base``. Accept
-        ``base_url`` as a compatibility convenience but never pass both
-        names to LiteLLM.
-        """
+        """Build LiteLLM call arguments without duplicating caller settings."""
         call_kwargs = dict(kwargs)
 
+        # LiteLLM's Python completion API uses ``api_base``. Accept
+        # ``base_url`` as a compatibility convenience.
         if "api_base" not in call_kwargs and "base_url" in call_kwargs:
             call_kwargs["api_base"] = call_kwargs.pop("base_url")
 
@@ -389,25 +333,71 @@ class TokenVelocityRouter:
     # ---------------------------------------------------------- error helpers
 
     @staticmethod
-    def _is_rate_limit_error(error: BaseException) -> bool:
-        """Return True for a provider/LiteLLM 429 rate-limit failure."""
+    def _extract_status_code(error: BaseException) -> int | None:
+        """Extract HTTP status code from a LiteLLM or HTTP exception."""
         status_code = getattr(error, "status_code", None)
-        if status_code == 429:
-            return True
+        if isinstance(status_code, int):
+            return status_code
 
         response = getattr(error, "response", None)
-        response_status = getattr(response, "status_code", None)
-        if response_status == 429:
+        if response is not None:
+            response_status = getattr(response, "status_code", None)
+            if isinstance(response_status, int):
+                return response_status
+
+        return None
+
+    @classmethod
+    def _is_retryable(cls, error: BaseException) -> bool:
+        """Return True if the error warrants a retry with backoff."""
+        status_code = cls._extract_status_code(error)
+        if status_code is not None and status_code in _RETRYABLE_STATUS_CODES:
             return True
 
-        text = str(error).lower()
-
+        error_text = str(error).lower()
         return (
-            "rate limit" in text
-            or "too many requests" in text
-            or "status code 429" in text
-            or "http 429" in text
+            "rate limit" in error_text
+            or "too many requests" in error_text
+            or "service unavailable" in error_text
+            or "overloaded" in error_text
+            or "timeout" in error_text
+            or "connection error" in error_text
         )
+
+    @classmethod
+    def _is_daily_quota_exhausted(cls, error: BaseException) -> bool:
+        """Return True if the error indicates daily quota is depleted.
+
+        Daily quota exhaustion should fast-fail: no amount of backoff
+        will restore the bucket until the next reset.
+        """
+        error_text = str(error)
+        return any(pattern.search(error_text) for pattern in _DAILY_QUOTA_PATTERNS)
+
+    @staticmethod
+    def _extract_retry_after(error: BaseException) -> float | None:
+        """Extract Retry-After seconds from the error, if present."""
+        # Check response headers first.
+        response = getattr(error, "response", None)
+        if response is not None:
+            headers = getattr(response, "headers", None)
+            if isinstance(headers, Mapping):
+                retry_after = headers.get("retry-after") or headers.get("Retry-After")
+                if retry_after is not None:
+                    try:
+                        return float(retry_after)
+                    except TypeError, ValueError:
+                        pass
+
+        # Fall back to parsing the error message for "try again in X.Ys".
+        match = re.search(r"try again in ([\d.]+)\s*s", str(error), re.IGNORECASE)
+        if match:
+            try:
+                return float(match.group(1))
+            except TypeError, ValueError:
+                pass
+
+        return None
 
     @staticmethod
     def _log_usage(response: Any, model: str) -> None:
@@ -427,9 +417,10 @@ class TokenVelocityRouter:
 
         prompt_details = _value("prompt_tokens_details")
 
+        cached: Any = None
         if isinstance(prompt_details, Mapping):
             cached = prompt_details.get("cached_tokens")
-        else:
+        elif prompt_details is not None:
             cached = getattr(prompt_details, "cached_tokens", None)
 
         logger.debug(
@@ -443,6 +434,32 @@ class TokenVelocityRouter:
 
     # ------------------------------------------------------------- dispatcher
 
+    def _compute_backoff(self, attempt: int, error: BaseException) -> float:
+        """Compute backoff duration with linear growth for first 3 attempts,
+        then exponential, capped at min(max_backoff, 30.0).
+
+        Honors Retry-After header when present.
+        """
+        retry_after = self._extract_retry_after(error)
+
+        if retry_after is not None:
+            # Honor provider hint but cap at max_backoff.
+            base = min(retry_after, self.max_backoff)
+        else:
+            # Linear backoff for first 3 attempts: initial * (attempt + 1)
+            # Exponential after that: initial * 2^attempt
+            if attempt < 3:
+                raw = self.initial_backoff * (attempt + 1)
+            else:
+                raw = self.initial_backoff * (2**attempt)
+            # Cap at max_backoff, then hard-cap at 30s.
+            base = min(raw, self.max_backoff)
+            base = min(base, 30.0)
+
+        # Add jitter: up to 10% of the base duration to prevent thundering herd.
+        jitter = random.uniform(0.0, base * 0.1)
+        return base + jitter
+
     async def _call(
         self,
         model: str,
@@ -451,49 +468,97 @@ class TokenVelocityRouter:
         run_metrics: RunMetrics | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Perform one physical LiteLLM call and record its outcome.
+        """Perform one physical LiteLLM call with retry and backoff.
 
         Raises:
-            LLMBudgetExhaustedError: When this failure pushes the
-                consecutive-failure counter over the configured limit.
-            Exception: The original provider error, on any other failure.
+            LLMBudgetExhaustedError: When retries are exhausted, daily
+                quota is depleted, or per-incident call budget is exceeded.
+            Exception: Non-retryable provider errors propagate unchanged.
         """
-        call_kwargs = self._build_call_kwargs(kwargs)
-
-        if run_metrics is not None:
-            run_metrics.record_llm_call()
-
-        logger.debug(
-            "Calling litellm.acompletion: model=%s messages=%d kwargs=%s",
-            model,
-            len(messages),
-            sorted(call_kwargs.keys()),
-        )
-
-        try:
-            response = await litellm.acompletion(
-                model=model,
-                messages=messages,
-                **call_kwargs,
+        # Enforce per-incident call budget.
+        if (
+            run_metrics is not None
+            and run_metrics.llm_call_count >= self.max_llm_calls_per_incident
+        ):
+            raise LLMBudgetExhaustedError(
+                f"Incident exceeded LLM call budget: "
+                f"{run_metrics.llm_call_count}/{self.max_llm_calls_per_incident}"
             )
-        except Exception as exc:
+
+        call_kwargs = self._build_call_kwargs(kwargs)
+        last_error: BaseException | None = None
+
+        for attempt in range(self.max_retries + 1):
             if run_metrics is not None:
-                run_metrics.record_llm_failure()
-                if run_metrics.llm_consecutive_failures >= self.max_consecutive_failures:
+                run_metrics.record_llm_call()
+
+            logger.debug(
+                "Calling litellm.acompletion: model=%s messages=%d attempt=%d/%d",
+                model,
+                len(messages),
+                attempt + 1,
+                self.max_retries + 1,
+            )
+
+            try:
+                response = await litellm.acompletion(
+                    model=model,
+                    messages=messages,
+                    **call_kwargs,
+                )
+            except Exception as exc:
+                last_error = exc
+
+                if run_metrics is not None:
+                    run_metrics.record_llm_failure()
+
+                # Daily quota exhaustion: fast-fail.
+                if self._is_daily_quota_exhausted(exc):
                     raise LLMBudgetExhaustedError(
-                        "LLM budget exhausted: "
-                        f"{run_metrics.llm_consecutive_failures} consecutive "
-                        f"failures (limit="
-                        f"{self.max_consecutive_failures}). "
-                        f"Last error: {exc}"
+                        f"Daily quota exhausted for {model}: {exc}"
                     ) from exc
-            raise
 
-        if run_metrics is not None:
-            run_metrics.record_llm_success()
+                # Non-retryable error: propagate immediately.
+                if not self._is_retryable(exc):
+                    raise
 
-        self._log_usage(response, model)
-        return response
+                # Last attempt failed: budget exhausted.
+                if attempt >= self.max_retries:
+                    raise LLMBudgetExhaustedError(
+                        f"LLM budget exhausted after {self.max_retries + 1} "
+                        f"attempts for {model}. Last error: {exc}"
+                    ) from exc
+
+                # Backoff and retry.
+                sleep_s = self._compute_backoff(attempt, exc)
+                if run_metrics is not None:
+                    run_metrics.record_backoff(sleep_s)
+
+                logger.warning(
+                    "LLM call to %s failed (attempt %d/%d): %s. Backing off %.2fs before retry.",
+                    model,
+                    attempt + 1,
+                    self.max_retries + 1,
+                    exc,
+                    sleep_s,
+                )
+
+                await asyncio.sleep(sleep_s)
+                continue
+
+            # Success path.
+            if run_metrics is not None:
+                run_metrics.record_llm_success()
+
+            self._log_usage(response, model)
+            return response
+
+        # Should be unreachable, but defensive.
+        if last_error is not None:
+            raise LLMBudgetExhaustedError(
+                f"LLM budget exhausted for {model}. Last error: {last_error}"
+            ) from last_error
+        raise LLMBudgetExhaustedError(f"LLM budget exhausted for {model}")
 
     async def acompletion(
         self,
@@ -503,133 +568,20 @@ class TokenVelocityRouter:
         run_metrics: RunMetrics | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Call LiteLLM with automatic token routing and rate-limit fallback.
+        """Call LiteLLM with automatic token routing and retry.
 
         Parameter order puts ``messages`` first so graph nodes can call
         ``acompletion(messages=..., response_format=...)`` without
         supplying a model; auto-routing is the default.
-
-        Rate-limit fallback:
-
-            Auto-routed fast-tier requests that receive HTTP 429 retry
-            immediately on the worker tier. Worker retries use exponential
-            backoff up to ``DEFAULT_MAX_WORKER_ATTEMPTS`` attempts before
-            re-raising. Every sleep is recorded in ``RunMetrics`` so the
-            incident's reported active time excludes it.
         """
-        requested_model = model.strip().lower()
+        selected_model = self._resolve_model(model)
 
-        if requested_model in self.AUTO_ALIASES:
-            selected_model = self.select_model(
-                messages,
-                tools=kwargs.get("tools"),
-                tool_choice=kwargs.get("tool_choice"),
-            )
-            auto_routed = True
-
-        elif requested_model in (self.FAST_ALIASES | self.SLOW_ALIASES):
-            selected_model = self._resolve_model(requested_model)
-            auto_routed = False
-
-        else:
-            selected_model = self._resolve_model(model)
-            auto_routed = False
-
-        try:
-            return await self._call(
-                selected_model,
-                messages,
-                run_metrics=run_metrics,
-                **kwargs,
-            )
-
-        except LLMBudgetExhaustedError:
-            # Budget exhaustion is fatal and must not trigger fallback.
-            raise
-
-        except Exception as exc:
-            can_fallback = (
-                auto_routed
-                and self.fallback_on_rate_limit
-                and selected_model == self.fast_model
-                and self.fast_model != self.slow_model
-                and self._is_rate_limit_error(exc)
-            )
-
-            if not can_fallback:
-                logger.error(
-                    "LLM call failed: model=%s error=%s",
-                    selected_model,
-                    exc,
-                    exc_info=True,
-                )
-                raise
-
-            logger.warning(
-                "Fast model rate-limited; switching immediately to worker model=%s",
-                self.slow_model,
-            )
-
-            last_exc: Exception = exc
-
-            for attempt in range(DEFAULT_MAX_WORKER_ATTEMPTS):
-                if run_metrics is not None:
-                    run_metrics.llm_retry_count += 1
-
-                try:
-                    return await self._call(
-                        self.slow_model,
-                        messages,
-                        run_metrics=run_metrics,
-                        **kwargs,
-                    )
-
-                except LLMBudgetExhaustedError:
-                    raise
-
-                except Exception as worker_exc:
-                    if not self._is_rate_limit_error(worker_exc):
-                        logger.error(
-                            "LLM call failed: model=%s error=%s",
-                            self.slow_model,
-                            worker_exc,
-                            exc_info=True,
-                        )
-                        raise
-
-                    last_exc = worker_exc
-
-                    if attempt == DEFAULT_MAX_WORKER_ATTEMPTS - 1:
-                        break
-
-                    # Default exponential backoff:
-                    # attempt 0 -> 30s, attempt 1 -> 60s
-                    wait_seconds: float = 30.0 * (2**attempt)
-
-                    # Respect a larger provider-supplied delay when present.
-                    error_str = str(worker_exc).lower()
-                    match = re.search(r"try again in ([\d.]+)s", error_str)
-
-                    if match:
-                        with contextlib.suppress(ValueError):
-                            wait_seconds = max(
-                                wait_seconds,
-                                float(match.group(1)) + 1.0,
-                            )
-
-                    if run_metrics is not None:
-                        run_metrics.record_backoff(wait_seconds)
-
-                    logger.warning(
-                        "Worker model rate-limited (attempt %d/%d). Waiting %.1fs before retry...",
-                        attempt + 1,
-                        DEFAULT_MAX_WORKER_ATTEMPTS,
-                        wait_seconds,
-                    )
-
-                    await asyncio.sleep(wait_seconds)
-
-            raise last_exc from None
+        return await self._call(
+            selected_model,
+            messages,
+            run_metrics=run_metrics,
+            **kwargs,
+        )
 
     async def coordinator_call(
         self,
@@ -641,8 +593,7 @@ class TokenVelocityRouter:
         """Auto-routed call. Threshold decides fast vs worker per prompt size.
 
         Named for the coordinator stage (propose_node) but functionally
-        equivalent to ``acompletion(model="auto")``. Kept as a distinct
-        method so the graph reads as intent, not mechanism.
+        equivalent to ``acompletion(model="auto")``.
         """
         return await self.acompletion(
             messages=messages,
@@ -653,9 +604,6 @@ class TokenVelocityRouter:
 
 
 __all__ = [
-    "DEFAULT_GROQ_BASE_URL",
-    "DEFAULT_MAX_CONSECUTIVE_FAILURES",
-    "DEFAULT_MAX_WORKER_ATTEMPTS",
     "DEFAULT_TIKTOKEN_ENCODING",
     "DEFAULT_TOKEN_THRESHOLD",
     "LLMBudgetExhaustedError",

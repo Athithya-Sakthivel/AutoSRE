@@ -30,10 +30,14 @@ GATEWAY_SERVICE="${GATEWAY_SERVICE:-otel-gateway}"
 GATEWAY_GRPC_PORT="${GATEWAY_GRPC_PORT:-4317}"
 OPENOBSERVE_SERVICE="${OPENOBSERVE_SERVICE:-openobserve}"
 OPENOBSERVE_PORT="${OPENOBSERVE_PORT:-5080}"
-TELEMETRYGEN_IMAGE="${TELEMETRYGEN_IMAGE:-ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest}"
+TELEMETRYGEN_IMAGE="${TELEMETRYGEN_IMAGE:-ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.157.0}"
 TEST_SERVICE_NAME="${TEST_SERVICE_NAME:-smoke-test}"
 TEST_TAG="${TEST_TAG:-smoke-$(date -u +%Y%m%d-%H%M%S)}"
 O2_LOCAL_PORT="${O2_LOCAL_PORT:-15080}"
+TEST_START_TIME=""
+TEST_START_US=""
+QUERY_RETRY_SECONDS="${QUERY_RETRY_SECONDS:-60}"
+QUERY_RETRY_INTERVAL="${QUERY_RETRY_INTERVAL:-3}"
 
 # Pod names
 TRACES_POD="telemetrygen-traces-${TEST_TAG}"
@@ -147,7 +151,6 @@ preflight() {
 }
 
 # --- Test 1: Pod health ------------------------------------------------------
-# --- Test 1: Pod health ------------------------------------------------------
 
 check_pods() {
   log "Test 1: Verifying pod health"
@@ -185,6 +188,7 @@ check_pods() {
 
   [[ ${failed} -eq 0 ]] || die "${failed} pod(s) not ready"
 }
+
 # --- Test 2: Create network policy for test pods -----------------------------
 
 create_smoke_policy() {
@@ -324,12 +328,12 @@ apply_pods() {
   done
 }
 
-# --- Test 4: Verify gateway exported without error --------------------------
+# --- Test 4: Verify gateway exported this test without error -----------------
 
 verify_gateway() {
-  log "Test 4: Verifying gateway export logs"
+  log "Test 4: Verifying gateway export logs for this test run"
 
-  # Wait for at least one export cycle
+  # Allow the gateway at least one export cycle after telemetrygen completes.
   sleep 15
 
   local pod
@@ -337,74 +341,139 @@ verify_gateway() {
   [[ -n "${pod}" ]] || die "No otel-gateway pod found"
 
   local logs
-  logs="$(kubectl logs "${pod}" -n "${NAMESPACE}" --tail=500 2>&1)"
+  logs="$(kubectl logs "${pod}" -n "${NAMESPACE}" \
+    --since-time="${TEST_START_TIME}" 2>&1)"
 
-  local failed=0
+  # Restrict the check to the OpenObserve exporter. This prevents unrelated
+  # exporters in the gateway from failing the smoke test.
+  local export_failures nonretryable
+  export_failures="$(grep -E 'Exporting failed|Dropping data' <<< "${logs}" \
+    | grep 'otlp_http/openobserve' || true)"
+  nonretryable="$(grep -Ei 'refused|permanently failed' <<< "${logs}" \
+    | grep 'otlp_http/openobserve' || true)"
 
-  if grep -qE 'Exporting failed|Dropping data' <<< "${logs}"; then
-    fail "Gateway reported export failures:"
-    grep -E 'Exporting failed|Dropping data' <<< "${logs}" | tail -5 >&2
-    failed=$((failed + 1))
-  else
-    pass "No export failures in gateway logs"
+  if [[ -n "${export_failures}" ]]; then
+    fail "Gateway reported OpenObserve export failures during this test run:"
+    tail -10 <<< "${export_failures}" >&2
+    return 1
   fi
+  pass "No OpenObserve export failures during this test run"
 
-  if grep -qE 'refused|permanently failed' <<< "${logs}"; then
-    fail "Gateway reported refused or non-retryable errors:"
-    grep -E 'refused|permanently failed' <<< "${logs}" | tail -5 >&2
-    failed=$((failed + 1))
-  else
-    pass "No refused or non-retryable errors"
+  if [[ -n "${nonretryable}" ]]; then
+    fail "Gateway reported non-retryable OpenObserve export errors during this test run:"
+    tail -10 <<< "${nonretryable}" >&2
+    return 1
   fi
-
-  [[ ${failed} -eq 0 ]]
+  pass "No non-retryable OpenObserve export errors during this test run"
 }
 
-# --- Test 5: Verify OpenObserve accepted the data ---------------------------
+# --- Test 5: Verify OpenObserve accepted this test run ----------------------
 
 verify_openobserve() {
-  log "Test 5: Verifying OpenObserve ingestion"
+  log "Test 5: Verifying OpenObserve accepted telemetry from this test run"
 
   local pod
   pod="$(pod_for_release "openobserve")"
   [[ -n "${pod}" ]] || die "No openobserve pod found"
 
   local logs
-  logs="$(kubectl logs "${pod}" -n "${NAMESPACE}" --tail=500 2>&1)"
+  logs="$(kubectl logs "${pod}" -n "${NAMESPACE}" \
+    --since-time="${TEST_START_TIME}" 2>&1)"
 
   local failed=0
   for signal in traces metrics logs; do
     local count
     count="$(grep -cE "POST /api/default/v1/${signal} HTTP/1.1\" 200" <<< "${logs}" || true)"
     if [[ "${count}" -gt 0 ]]; then
-      pass "OpenObserve accepted ${count} ${signal} POST(s) with HTTP 200"
+      pass "OpenObserve accepted ${count} ${signal} POST(s) with HTTP 200 during this test run"
     else
-      if [[ "${signal}" == "metrics" ]]; then
-        fail "OpenObserve accepted zero ${signal} POSTs"
-        failed=$((failed + 1))
-      else
-        warn "No ${signal} POSTs in the last 500 log lines (batch may not have flushed)"
-      fi
+      fail "OpenObserve accepted zero ${signal} POSTs during this test run"
+      failed=$((failed + 1))
     fi
   done
 
   [[ ${failed} -eq 0 ]]
 }
 
+# Escape a value for a single-quoted SQL string.
+sql_escape() {
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
+# Escape an SQL identifier for a double-quoted identifier.
+sql_identifier_escape() {
+  printf '%s' "$1" | sed 's/"/""/g'
+}
+
+# Return candidate stream/field pairs that actually contain a smoke-test field.
+# We discover this from the live OpenObserve schema because OTLP attributes can
+# be normalized differently by signal/stream (for example,
+# service_smoke_test_id vs smoke_test_id).
+discover_smoke_targets() {
+  local signal="$1"
+  local streams_json="$2"
+
+  jq -r '
+    .list[]?
+    | .name as $stream
+    | ([.schema[]?.name | select(test("(^|_)smoke_test_id$"; "i"))] | .[]) as $field
+    | [$stream, $field]
+    | @tsv
+  ' <<< "${streams_json}"
+}
+
+search_smoke_target() {
+  local signal="$1"
+  local stream="$2"
+  local field="$3"
+  local sql_tag="$4"
+  local start_us="$5"
+  local end_us="$6"
+
+  local stream_sql field_sql sql body response
+  stream_sql="$(sql_identifier_escape "${stream}")"
+  field_sql="$(sql_identifier_escape "${field}")"
+
+  sql="SELECT * FROM \"${stream_sql}\" WHERE \"${field_sql}\" = '${sql_tag}' ORDER BY _timestamp DESC LIMIT 1"
+
+  body="$(jq -nc \
+    --arg sql "${sql}" \
+    --arg start_us "${start_us}" \
+    --arg end_us "${end_us}" \
+    '{query:{sql:$sql,start_time:($start_us|tonumber),end_time:($end_us|tonumber),from:0,size:1},search_type:"ui",timeout:30}')"
+
+  response="$(curl -sS \
+    -X POST "http://localhost:${O2_LOCAL_PORT}/api/default/_search?type=${signal}" \
+    -H "Authorization: ${AUTH_HEADER}" \
+    -H "Content-Type: application/json" \
+    -d "${body}")"
+
+  if jq -e '.hits? and (.hits | length > 0)' <<< "${response}" >/dev/null 2>&1; then
+    printf '%s\n' "${response}"
+    return 0
+  fi
+
+  return 1
+}
+
 # --- Test 6: Query the OpenObserve search API -------------------------------
 
 verify_query() {
-  log "Test 6: Querying OpenObserve search API"
+  log "Test 6: Verifying test-specific data through the OpenObserve search API"
 
-  # Start port-forward in background
+  # Start port-forward in background.
   kubectl port-forward -n "${NAMESPACE}" svc/openobserve "${O2_LOCAL_PORT}:5080" \
     >/dev/null 2>&1 &
   PORT_FORWARD_PID=$!
 
-  # Wait for port-forward readiness
+  # Wait for port-forward readiness.
   local wait_start wait_elapsed
   wait_start="$(date +%s)"
   while true; do
+    if ! kill -0 "${PORT_FORWARD_PID}" 2>/dev/null; then
+      fail "port-forward exited before becoming ready"
+      return 1
+    fi
     if curl -sf "http://localhost:${O2_LOCAL_PORT}/healthz" >/dev/null 2>&1; then
       break
     fi
@@ -416,41 +485,91 @@ verify_query() {
     sleep 1
   done
 
-  # Retrieve credentials
-  local email password auth
+  # Retrieve credentials.
+  local email password
   email="$(kubectl get secret openobserve-auth -n "${NAMESPACE}" \
     -o jsonpath='{.data.ZO_ROOT_USER_EMAIL}' | base64 -d)"
   password="$(kubectl get secret openobserve-auth -n "${NAMESPACE}" \
     -o jsonpath='{.data.ZO_ROOT_USER_PASSWORD}' | base64 -d)"
-  auth="Basic $(printf '%s:%s' "${email}" "${password}" | b64_encode)"
+  AUTH_HEADER="Basic $(printf '%s:%s' "${email}" "${password}" | b64_encode)"
 
-  # Query the last 15 minutes
-  local end_us start_us
-  end_us="$(( $(date -u +%s) * 1000000 ))"
-  start_us="$(( end_us - 900000000 ))"
+  local sql_tag
+  sql_tag="$(sql_escape "${TEST_TAG}")"
 
-  local body
-  body="$(jq -nc \
-    --argjson s "${start_us}" \
-    --argjson e "${end_us}" \
-    '{query: {sql: "SELECT * FROM \"default\" LIMIT 1", start_time: $s, end_time: $e}}')"
+  # OpenObserve search requires microsecond time bounds. Keep the beginning of
+  # the query window slightly before the test started to tolerate small clock
+  # differences between telemetrygen and OpenObserve, and extend the end on
+  # each poll so delayed ingestion can become queryable.
+  local query_start_us
+  query_start_us=$(( TEST_START_US - 30000000 ))
+  (( query_start_us < 0 )) && query_start_us=0
 
-  local response
-  response="$(curl -s -X POST \
-    "http://localhost:${O2_LOCAL_PORT}/api/default/_search?type=traces" \
-    -H "Authorization: ${auth}" \
-    -H "Content-Type: application/json" \
-    -d "${body}")"
+  local signal streams_json targets target_stream target_field
+  local deadline end_us response found target_count
+  for signal in traces metrics logs; do
+    found=0
+    response=""
+    targets=""
+    deadline=$(( $(date +%s) + QUERY_RETRY_SECONDS ))
 
-  if jq -e '.hits' <<< "${response}" >/dev/null 2>&1; then
-    local hits
-    hits="$(jq '.hits | length' <<< "${response}")"
-    pass "OpenObserve search API responded (traces hits: ${hits})"
-  else
-    fail "OpenObserve search API returned an unexpected response:"
-    echo "${response}" | head -20 >&2
-    return 1
-  fi
+    while (( $(date +%s) < deadline )); do
+      # Discover the live stream + schema on every retry. Streams such as the
+      # OTLP metric "gen" stream can be created asynchronously after the first
+      # ingestion request.
+      if streams_json="$(curl -fsS \
+          -u "${email}:${password}" \
+          "http://localhost:${O2_LOCAL_PORT}/api/default/streams?type=${signal}&fetchSchema=true" 2>/dev/null)"; then
+        targets="$(discover_smoke_targets "${signal}" "${streams_json}" || true)"
+      else
+        targets=""
+      fi
+
+      target_count=0
+      [[ -n "${targets}" ]] && target_count="$(wc -l <<< "${targets}")"
+
+      if (( target_count > 0 )); then
+        end_us=$(( $(date -u +%s) * 1000000 + 60000000 ))
+
+        while IFS=$'\t' read -r target_stream target_field; do
+          [[ -z "${target_stream}" || -z "${target_field}" ]] && continue
+
+          if response="$(search_smoke_target \
+              "${signal}" \
+              "${target_stream}" \
+              "${target_field}" \
+              "${sql_tag}" \
+              "${query_start_us}" \
+              "${end_us}")"; then
+            local hits
+            hits="$(jq '.hits | length' <<< "${response}")"
+            pass "OpenObserve search found ${hits} ${signal} record(s) for ${TEST_TAG} in ${target_stream} using ${target_field}"
+            found=1
+            break
+          fi
+        done <<< "${targets}"
+      fi
+
+      (( found == 1 )) && break
+      sleep "${QUERY_RETRY_INTERVAL}"
+    done
+
+    if (( found == 0 )); then
+      fail "OpenObserve search found no ${signal} records for ${TEST_TAG} after ${QUERY_RETRY_SECONDS}s"
+      if [[ -n "${targets}" ]]; then
+        fail "Discovered ${signal} target(s):"
+        while IFS=$'\t' read -r target_stream target_field; do
+          [[ -n "${target_stream}" ]] && printf '  stream=%s field=%s\n' "${target_stream}" "${target_field}" >&2
+        done <<< "${targets}"
+      else
+        fail "No ${signal} stream currently exposes a smoke_test_id field"
+        if [[ -n "${streams_json:-}" ]]; then
+          echo "${streams_json}" |
+            jq '{list: [.list[]? | {name, stream_type, fields: [.schema[]?.name | select(test("smoke|test"; "i"))]}]}' >&2 || true
+        fi
+      fi
+      return 1
+    fi
+  done
 }
 
 # --- Main --------------------------------------------------------------------
@@ -475,10 +594,13 @@ Environment (defaults shown):
   OPENOBSERVE_PORT       5080
   O2_LOCAL_PORT          15080
   TEST_SERVICE_NAME      smoke-test
-  TELEMETRYGEN_IMAGE     ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.160.0
+  TELEMETRYGEN_IMAGE     ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.157.0
+  QUERY_RETRY_SECONDS    60
+  QUERY_RETRY_INTERVAL   3
 
 This test creates temporary pods and a CiliumNetworkPolicy to validate the
-full observability pipeline under zero-trust network policies.
+full observability pipeline under zero-trust network policies. Assertions are
+scoped to the current smoke-test run and its unique smoke.test.id.
 EOF
 }
 
@@ -501,7 +623,18 @@ main() {
   preflight
   check_pods
   create_smoke_policy
+
+  TEST_START_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  TEST_START_US="$(( $(date -u +%s) * 1000000 ))"
+  log "Test run start: ${TEST_START_TIME}"
+
   apply_pods
+
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    log "Dry run complete"
+    exit 0
+  fi
+
   verify_gateway
   verify_openobserve
   verify_query

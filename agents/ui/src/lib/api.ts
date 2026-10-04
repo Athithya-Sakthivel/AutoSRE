@@ -30,10 +30,10 @@ import type {
 // ---------------------------------------------------------------------------
 
 export class ApiError extends Error {
-  public readonly status: number;
-  public readonly statusText: string;
-  public readonly body: unknown;
-  public readonly url: string;
+  public status: number;
+  public statusText: string;
+  public body: unknown;
+  public url: string;
 
   constructor(status: number, statusText: string, body: unknown, url: string) {
     super(`API ${status}${statusText ? ` ${statusText}` : ""}: ${url}`);
@@ -158,7 +158,6 @@ export async function apiFetch<T>(
 
   let serializedBody: BodyInit | undefined;
   if (rawBody !== undefined) {
-    // Verbatim: caller is responsible for Content-Type (e.g. HMAC-signed payload).
     serializedBody = rawBody;
   } else if (body !== undefined) {
     if (!headers.has("Content-Type")) {
@@ -266,12 +265,26 @@ export const healthApi = {
   /**
    * Bootstrap gate for the UI. Polls /readyz until the backend reports
    * "ready" or the timeout elapses.
+   *
+   * Accepts either a plain timeout number or an options object with
+   * timeoutMs and pollIntervalMs fields.
    */
   ready: async (
-    options: { timeoutMs?: number; pollIntervalMs?: number } = {},
+    timeoutOrOptions?: number | { timeoutMs?: number; pollIntervalMs?: number },
   ): Promise<void> => {
-    const timeoutMs = options.timeoutMs ?? 30_000;
-    const pollIntervalMs = options.pollIntervalMs ?? 1_000;
+    let timeoutMs: number;
+    let pollIntervalMs: number;
+
+    if (typeof timeoutOrOptions === "number") {
+      timeoutMs = timeoutOrOptions;
+      pollIntervalMs = 1_000;
+    } else if (timeoutOrOptions != null) {
+      timeoutMs = timeoutOrOptions.timeoutMs ?? 30_000;
+      pollIntervalMs = timeoutOrOptions.pollIntervalMs ?? 1_000;
+    } else {
+      timeoutMs = 30_000;
+      pollIntervalMs = 1_000;
+    }
 
     const deadline = Date.now() + timeoutMs;
     let lastError: unknown = null;
@@ -337,12 +350,6 @@ interface SignedApprovalPayload {
 }
 
 export const incidentsApi = {
-  /**
-   * List incidents, optionally filtered by status.
-   *
-   * `status=awaiting_approval` is a derived status computed by the backend
-   * from `requires_human_approval && approval_granted === null`.
-   */
   list: (
     params: { status?: string; limit?: number } = {},
     signal?: AbortSignal | null,
@@ -361,7 +368,6 @@ export const incidentsApi = {
     );
   },
 
-  /** Fetch the full incident report (hypotheses, actions, metrics). */
   get: (
     incidentId: string,
     signal?: AbortSignal | null,
@@ -371,14 +377,6 @@ export const incidentsApi = {
       { signal: signal ?? undefined },
     ),
 
-  /**
-   * Approve or reject an incident.
-   *
-   * Two-step flow because the approval route is HMAC-protected and the
-   * browser cannot compute HMAC-SHA256 without exposing the shared secret:
-   *   1. Request a signature from the same-origin /api/sign-approval route.
-   *   2. POST the returned body verbatim with the returned signature header.
-   */
   approve: async (
     incidentId: string,
     request: ApprovalRequest,
@@ -422,13 +420,11 @@ export const incidentsApi = {
 // ---------------------------------------------------------------------------
 
 export const metricsApi = {
-  /** Aggregate KPIs across all incidents. */
   summary: (signal?: AbortSignal | null): Promise<MetricsSummary> =>
     apiFetch<MetricsSummary>("/metrics/summary", {
       signal: signal ?? undefined,
     }),
 
-  /** Time-bucketed metrics for the requested range. */
   timeseries: (
     range: MetricTimeRange,
     signal?: AbortSignal | null,
@@ -440,7 +436,6 @@ export const metricsApi = {
     );
   },
 
-  /** Top N most expensive incidents. */
   topExpensive: (
     limit = 5,
     signal?: AbortSignal | null,

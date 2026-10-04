@@ -196,14 +196,15 @@ class ExecutionResult:
         """
         executed_at = self.executed_at or _utc_now()
 
-        raw_id = self.action.get("tool_call_id")
-        tool_call_id = raw_id if isinstance(raw_id, str) else uuid.uuid4().hex
+        # ProposedAction is a Pydantic model, not a dict.
+        # tool_call_id is not a field on ProposedAction; generate one.
+        tool_call_id = uuid.uuid4().hex
 
         success = self.executed and self.error is None and self.verified is not False
 
         return ExecutedAction(
-            tool_name=self.action["tool_name"],
-            tool_args=self.action["tool_args"],
+            tool_name=self.action.tool_name,
+            tool_args=self.action.tool_args,
             tool_call_id=tool_call_id,
             result=self.output if self.output is not None else {},
             success=success,
@@ -375,8 +376,9 @@ class SafeExecutor:
                 re-raised, so a prohibited attempt is never silent.
             NeedsApprovalError: Action requires HITL before dispatch.
         """
-        tool_name = action["tool_name"]
-        args = dict(action["tool_args"])
+        # ProposedAction is a Pydantic model; use attribute access.
+        tool_name = action.tool_name
+        args = dict(action.tool_args)
 
         # ------------------------------------------------------------------
         # Step 1 — registry lookup.
@@ -407,7 +409,7 @@ class SafeExecutor:
         # ------------------------------------------------------------------
         try:
             registered_tier = RiskTier(tool.risk_tier)
-            proposed_tier = RiskTier(action.get("risk_tier", RiskTier.OBSERVE))
+            proposed_tier = RiskTier(action.risk_tier)
         except (TypeError, ValueError) as exc:
             await self._safe_audit(
                 incident_id=incident_id,
@@ -456,7 +458,7 @@ class SafeExecutor:
         # conservatively: policy still controls the tier, but we never
         # discard a planner's explicit approval annotation.
         # ------------------------------------------------------------------
-        if action.get("requires_approval", False) and not decision.requires_approval:
+        if action.requires_approval and not decision.requires_approval:
             decision = PolicyDecision(
                 allowed=decision.allowed,
                 risk_tier=decision.risk_tier,
@@ -724,7 +726,8 @@ class SafeExecutor:
         args: dict[str, Any],
     ) -> None:
         """Emit a terminal audit record for a result that ran to completion."""
-        tool_name = result.action["tool_name"]
+        # ProposedAction is a Pydantic model; use attribute access.
+        tool_name = result.action.tool_name
         await self._safe_audit(
             incident_id=incident_id,
             tool_name=tool_name,

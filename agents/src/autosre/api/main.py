@@ -350,7 +350,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # ==============================================================
         # 7. SREContext.
         # ==============================================================
-        llm_router = TokenVelocityRouter(settings.llm, threshold_tokens=6000)
+        llm_router = TokenVelocityRouter(
+            settings.llm,
+            threshold_tokens=6000,
+            max_llm_calls_per_incident=settings.safety.max_llm_calls_per_incident,
+        )
 
         sre_context = SREContext(
             db_session=None,
@@ -392,7 +396,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             executor=executor,
             policy_engine=policy_engine,
             context_eviction=context_eviction,
+            confidence_propose=settings.safety.confidence_propose,
+            confidence_fast_path=settings.safety.confidence_fast_path,
+            confidence_give_up=settings.safety.confidence_give_up,
         )
+
         logger.info("GraphContext assembled")
 
         # ==============================================================

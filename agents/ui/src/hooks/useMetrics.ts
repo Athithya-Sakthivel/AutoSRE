@@ -1,9 +1,3 @@
-/**
- * Hook for fetching metrics.
- *
- * Syncs with /metrics/summary, /metrics/timeseries, /metrics/top-expensive.
- */
-
 import { useQuery } from "@tanstack/react-query";
 import { metricsApi } from "../lib/api";
 import type {
@@ -16,31 +10,31 @@ import type {
 export function useMetricsSummary() {
   return useQuery<MetricsSummary, Error>({
     queryKey: ["metrics", "summary"],
-    queryFn: ({ signal }) => metricsApi.summary(signal),
+    queryFn: () => metricsApi.summary(),
     staleTime: 10_000,
     refetchInterval: 10_000,
+    retry: 1,
   });
 }
 
 export function useMetricsTimeseries(range: MetricTimeRange = "24h") {
   return useQuery<MetricsTimeseriesResponse, Error>({
     queryKey: ["metrics", "timeseries", range],
-    queryFn: ({ signal }) => metricsApi.timeseries(range, signal),
+    queryFn: () => metricsApi.timeseries(range),
     staleTime: 10_000,
     refetchInterval: 10_000,
+    retry: 1,
   });
 }
 
 export function useTopExpensiveIncidents(limit = 5) {
   return useQuery<ExpensiveIncident[], Error>({
     queryKey: ["metrics", "top-expensive", limit],
-    queryFn: ({ signal }) => metricsApi.topExpensive(limit, signal),
+    queryFn: () => metricsApi.topExpensive(limit),
     staleTime: 10_000,
     refetchInterval: 10_000,
+    retry: 1,
   });
 }
 
-/**
- * Alias for useTopExpensiveIncidents — used by Metrics page.
- */
 export const useTopExpensive = useTopExpensiveIncidents;

@@ -1,11 +1,3 @@
-/**
- * Hooks for fetching and managing incidents.
- *
- * Syncs with:
- *   GET /incidents            -> useIncidentList  (IncidentListResponse)
- *   GET /incidents/{id}/report -> useIncident     (IncidentReport)
- */
-
 import { useQuery } from "@tanstack/react-query";
 import { incidentsApi } from "../lib/api";
 import type {
@@ -14,100 +6,83 @@ import type {
   IncidentReport,
 } from "../lib/types";
 
-// ---------------------------------------------------------------------------
-// List queries
-// ---------------------------------------------------------------------------
-
-/**
- * Primary list hook. Returns every incident with optional status filter.
- * Polls every 5s so the dashboard reflects graph progress.
- */
 export function useIncidentList(
   params: { status?: string; limit?: number } = {},
 ) {
   return useQuery<IncidentListResponse, Error>({
     queryKey: ["incidents", params.status, params.limit],
-    queryFn: ({ signal }) => incidentsApi.list(params, signal),
+    queryFn: () => incidentsApi.list(params),
     staleTime: 5_000,
     refetchInterval: 5_000,
+    retry: 1,
   });
 }
 
-/** Alias kept for backwards compatibility with older call sites. */
 export const useIncidents = useIncidentList;
 
 export function useActiveIncidents() {
-  return useQuery<IncidentListResponse, Error>({
+  return useQuery<Incident[], Error>({
     queryKey: ["incidents", "active"],
-    queryFn: ({ signal }) => incidentsApi.list({ limit: 100 }, signal),
-    staleTime: 5_000,
-    refetchInterval: 5_000,
-    select: (data) => ({
-      ...data,
-      items: data.items.filter(
-        (item: Incident) =>
+    queryFn: async () => {
+      const response = await incidentsApi.list({ limit: 100 });
+      return response.items.filter(
+        (item) =>
           item.status === "running" ||
           item.status === "investigating" ||
           item.status === "awaiting_approval",
-      ),
-    }),
+      );
+    },
+    staleTime: 5_000,
+    refetchInterval: 5_000,
+    retry: 1,
   });
 }
 
 export function useResolvedIncidents() {
-  return useQuery<IncidentListResponse, Error>({
+  return useQuery<Incident[], Error>({
     queryKey: ["incidents", "resolved"],
-    queryFn: ({ signal }) => incidentsApi.list({ limit: 100 }, signal),
+    queryFn: async () => {
+      const response = await incidentsApi.list({ limit: 100 });
+      return response.items.filter(
+        (item) => item.status === "resolved" || item.status === "complete",
+      );
+    },
     staleTime: 5_000,
     refetchInterval: 5_000,
-    select: (data) => ({
-      ...data,
-      items: data.items.filter(
-        (item: Incident) =>
-          item.status === "resolved" || item.status === "complete",
-      ),
-    }),
+    retry: 1,
   });
 }
 
 export function useAwaitingApprovalIncidents() {
-  return useQuery<IncidentListResponse, Error>({
+  return useQuery<Incident[], Error>({
     queryKey: ["incidents", "awaiting_approval"],
-    queryFn: ({ signal }) => incidentsApi.list({ limit: 100 }, signal),
+    queryFn: async () => {
+      const response = await incidentsApi.list({ limit: 100 });
+      return response.items.filter(
+        (item) =>
+          item.requires_human_approval && item.approval_granted === null,
+      );
+    },
     staleTime: 5_000,
     refetchInterval: 5_000,
-    select: (data) => ({
-      ...data,
-      items: data.items.filter(
-        (item: Incident) =>
-          item.requires_human_approval && item.approval_granted === null,
-      ),
-    }),
+    retry: 1,
   });
 }
 
-// ---------------------------------------------------------------------------
-// Detail query
-// ---------------------------------------------------------------------------
-
-/**
- * Fetch the full report for a single incident.
- * Returns the query in a disabled state until an id is provided.
- */
 export function useIncident(incidentId: string | undefined) {
   return useQuery<IncidentReport, Error>({
     queryKey: ["incident", incidentId],
-    queryFn: ({ signal }) => {
+    queryFn: () => {
       if (!incidentId) {
-        throw new Error("useIncident: incidentId is required");
+        throw new Error("incidentId is required");
       }
-      return incidentsApi.get(incidentId, signal);
+      return incidentsApi.get(incidentId);
     },
     enabled: Boolean(incidentId),
     staleTime: 5_000,
     refetchInterval: 5_000,
+    retry: 1,
   });
 }
 
-/** Alias kept for backwards compatibility with older call sites. */
 export const useIncidentReport = useIncident;

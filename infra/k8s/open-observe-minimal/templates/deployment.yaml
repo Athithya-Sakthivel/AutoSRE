@@ -1,156 +1,289 @@
+{{/*
+Validate the single-node OpenObserve deployment contract.
+
+This chart intentionally supports exactly one OpenObserve replica because it
+uses local persistent disk storage and SQLite metadata.
+*/}}
 {{- if ne (int .Values.replicaCount) 1 }}
 {{- fail "single-node OpenObserve requires replicaCount=1" }}
 {{- end }}
+
+{{/*
+OpenObserve credentials are supplied by the ESO-managed Secret referenced by
+.Values.secrets.auth.
+*/}}
 {{- if not .Values.secrets.auth }}
 {{- fail "secrets.auth is required" }}
 {{- end }}
+
+{{/*
+The PVC must use an explicitly selected StorageClass. The staging deployment
+does not create a StorageClass itself.
+*/}}
 {{- if not .Values.persistence.storageClass }}
 {{- fail "persistence.storageClass is required" }}
 {{- end }}
+
+{{/*
+podAnnotations is optional in values.yaml.
+
+Create a safe local dictionary so accessing .secretRevision never causes a
+Helm nil-pointer failure when the whole podAnnotations object is omitted.
+*/}}
+{{- $podAnnotations := .Values.podAnnotations | default (dict) }}
+
 apiVersion: apps/v1
 kind: Deployment
+
 metadata:
   name: {{ include "open-observe-minimal.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "open-observe-minimal.labels" . | nindent 4 }}
+
 spec:
+  # This chart is deliberately single-replica.
   replicas: 1
+
+  # Keep a small number of old ReplicaSets for rollback diagnostics.
   revisionHistoryLimit: 3
+
+  # Give the pod enough time to start OpenObserve before Kubernetes considers
+  # the Deployment rollout stalled.
   progressDeadlineSeconds: 900
+
+  # Require the new pod to remain Ready briefly before rollout progresses.
   minReadySeconds: 5
+
+  # Recreate is required because the deployment uses a single local PVC.
   strategy:
     type: Recreate
+
   selector:
     matchLabels:
       {{- include "open-observe-minimal.selectorLabels" . | nindent 6 }}
+
   template:
     metadata:
       annotations:
-        openobserve.autosre.io/secret-revision: {{ .Values.podAnnotations.secretRevision | default "initial" | quote }}
-        {{- with .Values.podAnnotations.additional }}
+        # Used to make secret changes visible in the pod template and to
+        # provide a stable value even when no explicit annotation is supplied.
+        openobserve.autosre.io/secret-revision: {{ $podAnnotations.secretRevision | default "initial" | quote }}
+
+        # Optional caller-supplied pod annotations.
+        {{- with $podAnnotations.additional }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+
       labels:
         {{- include "open-observe-minimal.selectorLabels" . | nindent 8 }}
+
+        # Optional additional pod labels.
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+
     spec:
+      # OpenObserve runs with the chart-managed service account.
       serviceAccountName: {{ include "open-observe-minimal.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+
+      # Pod-level security settings.
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+
       containers:
         - name: openobserve
+
+          # Image helper resolves registry/repository/tag/digest consistently.
           image: {{ include "open-observe-minimal.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          # Container-level security settings.
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+
           ports:
+            # OpenObserve HTTP API/UI.
             - name: http
               containerPort: 5080
               protocol: TCP
+
           env:
+            # Static OpenObserve configuration supplied by Helm values.
             {{- range $k, $v := .Values.config }}
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}
+
+            # Root username is sourced from the ESO-managed auth Secret.
             - name: ZO_ROOT_USER_EMAIL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secrets.auth }}
                   key: ZO_ROOT_USER_EMAIL
+
+            # Root password is sourced from the ESO-managed auth Secret.
             - name: ZO_ROOT_USER_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secrets.auth }}
                   key: ZO_ROOT_USER_PASSWORD
+
+            {{/*
+            Optional Azure storage credentials.
+
+            These remain conditional because the staging deployment uses local
+            disk storage and normally does not provide .Values.secrets.storage.
+            */}}
             {{- with .Values.secrets.storage }}
             - name: AZURE_STORAGE_ACCOUNT_NAME
               valueFrom:
                 secretKeyRef:
                   name: {{ . }}
                   key: account-name
+
             - name: AZURE_STORAGE_ACCOUNT_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ . }}
                   key: account-key
             {{- end }}
+
+            # Optional additional environment variables supplied by values.
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+
+          # Optional environment variables sourced from additional Secrets or
+          # ConfigMaps.
           {{- with .Values.extraEnvFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+
+          {{/*
+          Startup probe protects the container during initial OpenObserve
+          initialization and local-disk recovery.
+          */}}
           {{- if .Values.probes.startup.enabled }}
           startupProbe:
-            httpGet: { path: /healthz, port: http }
+            httpGet:
+              path: /healthz
+              port: http
             initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.startup.periodSeconds }}
             timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
             failureThreshold: {{ .Values.probes.startup.failureThreshold }}
           {{- end }}
+
+          {{/*
+          Readiness controls whether Kubernetes considers OpenObserve ready to
+          receive traffic from the Service.
+          */}}
           {{- if .Values.probes.readiness.enabled }}
           readinessProbe:
-            httpGet: { path: /healthz, port: http }
+            httpGet:
+              path: /healthz
+              port: http
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
             timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
             failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
           {{- end }}
+
+          {{/*
+          Liveness restarts the container if the health endpoint stops
+          responding successfully.
+          */}}
           {{- if .Values.probes.liveness.enabled }}
           livenessProbe:
-            httpGet: { path: /healthz, port: http }
+            httpGet:
+              path: /healthz
+              port: http
             initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
             timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
             failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
           {{- end }}
+
+          {{/*
+          Optional graceful shutdown hook.
+
+          The staging default disables this hook, but the template remains
+          configurable through values.
+          */}}
           {{- if .Values.lifecycle.preStop.enabled }}
           lifecycle:
             preStop:
               exec:
-                command: ["/bin/sh", "-c", "sleep {{ .Values.lifecycle.preStop.sleepSeconds }}"]
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep {{ .Values.lifecycle.preStop.sleepSeconds }}
           {{- end }}
+
+          # CPU and memory requests/limits supplied by values.
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+
           volumeMounts:
+            # Persistent OpenObserve data, including local indexes/database/WAL.
             - name: data
               mountPath: /data
+
+            # Writable temporary directory for runtime temporary data.
             - name: tmp
               mountPath: /tmp
+
+            # Writable /var/tmp for components that require it.
             - name: vartmp
               mountPath: /var/tmp
+
+            # Optional additional volume mounts.
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+
       volumes:
+        # Single persistent volume claim used by the single OpenObserve pod.
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "open-observe-minimal.fullname" . }}-data
+
+        # Ephemeral runtime storage.
         - name: tmp
           emptyDir: {}
+
+        # Ephemeral /var/tmp storage.
         - name: vartmp
           emptyDir: {}
+
+        # Optional additional volumes.
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+
+      # Optional node placement constraints.
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+
+      # Optional tolerations.
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+
+      # Optional affinity/anti-affinity rules.
       {{- with .Values.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}

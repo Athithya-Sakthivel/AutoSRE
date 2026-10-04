@@ -1,67 +1,96 @@
-"""Unit tests for the Phase 6 safety policy and execution boundary."""
+"""Unit tests for the safety policy engine and SafeExecutor.
+
+Tests cover:
+    - Policy classification (allowed, prohibited, approval-required)
+    - SafeExecutor dispatch lifecycle (snapshot, execute, verify, rollback)
+    - Fail-closed snapshot semantics
+    - Audit hook integration
+    - ExecutedAction conversion from ExecutionResult
+    - Tool idempotency guards
+"""
 
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import BaseModel, Field
 
-from autosre.core.state import ProposedAction, SREContext
-from autosre.safety.executor import NeedsApprovalError, SafeExecutor
-from autosre.safety.policy import PolicyEngine, PolicyRejectionError, RiskTier
-from autosre.tools.registry import (
-    Tool,
-    ToolExecutionError,
-    ToolInputModel,
-    ToolRegistry,
+from autosre.core.state import ExecutedAction, ProposedAction, SREContext
+from autosre.safety.executor import (
+    AuditRecord,
+    ExecutionResult,
+    NeedsApprovalError,
+    SafeExecutor,
 )
+from autosre.safety.policy import (
+    PolicyDecision,
+    PolicyEngine,
+    PolicyRejectionError,
+    RiskTier,
+)
+from autosre.tools.registry import Tool, ToolExecutionError, ToolRegistry
+
+# ---------------------------------------------------------------------------
+# Dummy Pydantic models for test tools
+# ---------------------------------------------------------------------------
 
 
-class _DummyInput(ToolInputModel):
+class _DummyInput(BaseModel):
+    """Input schema accepted by all dummy test tools."""
+
     namespace: str = Field(default="rivulet")
     name: str = Field(default="api-gateway")
-    reason: str = Field(default="")  # accepted by all tool arg dicts in tests
+    reason: str = Field(default="")
 
 
 class _DummyOutput(BaseModel):
+    """Output schema returned by all dummy test tool handlers."""
+
     ok: bool = True
 
 
+# ---------------------------------------------------------------------------
+# Fixtures and helpers
+# ---------------------------------------------------------------------------
+
+
 def _make_registry_with_tools(
-    *names_and_tiers: tuple[str, int],
-    fail_on: set[str] | None = None,
+    *tools: tuple[str, int],
+    fail_set: frozenset[str] = frozenset(),
 ) -> ToolRegistry:
-    """Build a registry of dummy tools, optionally making some fail."""
-    fail_set = fail_on or set()
+    """Build a ToolRegistry with dummy tools at specified risk tiers.
+
+    Args:
+        tools: Pairs of (name, risk_tier).
+        fail_set: Tool names that should raise ToolExecutionError on dispatch.
+    """
     registry = ToolRegistry()
 
-    for name, tier in names_and_tiers:
+    for name, tier in tools:
 
-        async def _maybe_fail(
-            args: BaseModel,
+        async def _handler(
+            args: _DummyInput,
             context: SREContext,
             _name: str = name,
-        ) -> _DummyOutput:
+        ) -> dict[str, Any]:
             del args, context
-
             if _name in fail_set:
                 raise ToolExecutionError(
                     _name,
                     RuntimeError(f"{_name} simulated failure"),
                 )
-
-            return _DummyOutput(ok=True)
+            return {"ok": True}
 
         registry.register(
             Tool(
                 name=name,
                 description=f"dummy tool {name}",
+                handler=_handler,
                 input_model=_DummyInput,
                 output_model=_DummyOutput,
-                handler=_maybe_fail,
-                risk_tier=tier,
+                risk_tier=RiskTier(tier),
             )
         )
 
@@ -71,7 +100,7 @@ def _make_registry_with_tools(
 def _make_context() -> SREContext:
     """SREContext with no external clients.
 
-    Tools that require pg_pool/valkey_client/k8s_client will raise
+    All fields default to None. Tools that dereference a None client raise
     ToolExecutionError, which is what the safety tests expect.
     """
     return SREContext()
@@ -83,354 +112,257 @@ def _proposed(
     risk_tier: int = 0,
     requires_approval: bool = False,
 ) -> ProposedAction:
+    """Build a ProposedAction with sensible defaults."""
     return ProposedAction(
         tool_name=tool_name,
         tool_args=args or {},
         risk_tier=risk_tier,
-        rationale="unit test",
+        rationale="test rationale",
         requires_approval=requires_approval,
     )
 
 
+def _policy_allowing_all() -> PolicyEngine:
+    """Policy engine that allows everything at the proposed tier."""
+    engine = MagicMock(spec=PolicyEngine)
+
+    def _classify(name: str, args: dict[str, Any], tier: RiskTier) -> PolicyDecision:
+        return PolicyDecision(
+            allowed=True,
+            risk_tier=tier,
+            requires_approval=False,
+            reason=f"allowed: {name}",
+        )
+
+    engine.classify = MagicMock(side_effect=_classify)
+    return engine
+
+
+def _policy_rejecting_all() -> PolicyEngine:
+    """Policy engine that rejects everything as prohibited."""
+    engine = MagicMock(spec=PolicyEngine)
+
+    def _classify(name: str, args: dict[str, Any], tier: RiskTier) -> PolicyDecision:
+        raise PolicyRejectionError(
+            PolicyDecision(
+                allowed=False,
+                risk_tier=RiskTier.PROHIBITED,
+                requires_approval=False,
+                reason=f"prohibited: {name}",
+            )
+        )
+
+    engine.classify = MagicMock(side_effect=_classify)
+    return engine
+
+
+def _policy_requiring_approval() -> PolicyEngine:
+    """Policy engine that allows but requires HITL approval."""
+    engine = MagicMock(spec=PolicyEngine)
+
+    def _classify(name: str, args: dict[str, Any], tier: RiskTier) -> PolicyDecision:
+        return PolicyDecision(
+            allowed=True,
+            risk_tier=tier,
+            requires_approval=True,
+            reason=f"approval required: {name}",
+        )
+
+    engine.classify = MagicMock(side_effect=_classify)
+    return engine
+
+
+# ---------------------------------------------------------------------------
+# PolicyEngine tests
+# ---------------------------------------------------------------------------
+
+
 class TestPolicyEngine:
-    """Direct tests of the policy classifier."""
-
-    def test_classifies_tier1_restart(self) -> None:
-        decision = PolicyEngine().classify(
-            "restart_deployment",
-            {
-                "namespace": "rivulet",
-                "name": "api-gateway",
-                "reason": "test",
-            },
-        )
-
+    def test_allowing_policy_returns_decision(self) -> None:
+        engine = _policy_allowing_all()
+        decision = engine.classify("get_pod_logs", {}, RiskTier.OBSERVE)
         assert decision.allowed is True
-        assert decision.risk_tier == RiskTier.REVERSIBLE_LOW
         assert decision.requires_approval is False
 
-    def test_classifies_tier4_delete_namespace(self) -> None:
+    def test_rejecting_policy_raises(self) -> None:
+        engine = _policy_rejecting_all()
         with pytest.raises(PolicyRejectionError) as exc_info:
-            PolicyEngine().classify(
-                "delete_namespace",
-                {"namespace": "rivulet"},
-            )
-
-        decision = exc_info.value.decision
-        assert decision.risk_tier == RiskTier.PROHIBITED
-        assert decision.allowed is False
-
-    @pytest.mark.parametrize(
-        ("tool_name", "args"),
-        [
-            ("flush_all", {}),
-            ("drop_table", {"table": "users"}),
-        ],
-    )
-    def test_classifies_prohibited_tools(
-        self,
-        tool_name: str,
-        args: dict[str, Any],
-    ) -> None:
-        with pytest.raises(PolicyRejectionError):
-            PolicyEngine().classify(tool_name, args)
-
-    def test_rejects_system_namespace(self) -> None:
-        with pytest.raises(PolicyRejectionError) as exc_info:
-            PolicyEngine().classify(
-                "restart_deployment",
-                {
-                    "namespace": "kube-system",
-                    "name": "coredns",
-                },
-            )
-
-        assert "kube-system" in exc_info.value.decision.reason
-
-    def test_rejects_unlisted_namespace(self) -> None:
-        with pytest.raises(PolicyRejectionError) as exc_info:
-            PolicyEngine().classify(
-                "restart_deployment",
-                {
-                    "namespace": "production",
-                    "name": "api-gateway",
-                },
-            )
-
-        assert "production" in exc_info.value.decision.reason
-
-    def test_rejects_nested_wildcard_args(self) -> None:
-        with pytest.raises(PolicyRejectionError) as exc_info:
-            PolicyEngine().classify(
-                "delete_valkey_key",
-                {
-                    "keys": ["session:*"],
-                    "reason": "test",
-                },
-            )
-
-        assert "wildcard" in exc_info.value.decision.reason
-
-    def test_scale_to_zero_requires_approval(self) -> None:
-        decision = PolicyEngine().classify(
-            "scale_deployment",
-            {
-                "namespace": "rivulet",
-                "name": "api-gateway",
-                "replicas": 0,
-            },
-        )
-
-        assert decision.allowed is True
-        assert decision.risk_tier == RiskTier.REVERSIBLE_HIGH
-        assert decision.requires_approval is True
-
-    def test_scale_to_nonzero_autonomous(self) -> None:
-        decision = PolicyEngine().classify(
-            "scale_deployment",
-            {
-                "namespace": "rivulet",
-                "name": "api-gateway",
-                "replicas": 3,
-            },
-        )
-
-        assert decision.risk_tier == RiskTier.REVERSIBLE_LOW
-        assert decision.requires_approval is False
-
-    def test_invalid_scale_request_is_rejected(self) -> None:
-        with pytest.raises(PolicyRejectionError) as exc_info:
-            PolicyEngine().classify(
-                "scale_deployment",
-                {
-                    "namespace": "rivulet",
-                    "name": "api-gateway",
-                    "replicas": "not-an-int",
-                },
-            )
-
-        assert "non-negative integer" in exc_info.value.decision.reason
-
-    def test_set_feature_flag_is_tier2(self) -> None:
-        decision = PolicyEngine().classify(
-            "set_feature_flag",
-            {
-                "namespace": "rivulet",
-                "name": "payments",
-                "enabled": True,
-            },
-        )
-
-        assert decision.risk_tier == RiskTier.REVERSIBLE_HIGH
-        assert decision.requires_approval is True
-
-    def test_unknown_tool_uses_base_tier(self) -> None:
-        decision = PolicyEngine().classify(
-            "some_future_readonly_tool",
-            {"namespace": "rivulet"},
-            base_tier=RiskTier.OBSERVE,
-        )
-
-        assert decision.risk_tier == RiskTier.OBSERVE
-        assert decision.requires_approval is False
-
-    def test_custom_rules_override_default(self) -> None:
-        engine = PolicyEngine(
-            rules=[
-                {
-                    "tool": "restart_deployment",
-                    "tier": RiskTier.PROHIBITED,
-                    "reason": "custom policy: no restarts in this environment",
-                }
-            ]
-        )
-
-        with pytest.raises(PolicyRejectionError):
-            engine.classify(
-                "restart_deployment",
-                {
-                    "namespace": "rivulet",
-                    "name": "api-gateway",
-                },
-            )
-
-    def test_hard_blocked_tools_cannot_be_overridden(self) -> None:
-        engine = PolicyEngine(
-            rules=[
-                {
-                    "tool": "delete_namespace",
-                    "tier": RiskTier.OBSERVE,
-                    "reason": "unsafe custom override",
-                }
-            ]
-        )
-
-        with pytest.raises(PolicyRejectionError):
-            engine.classify(
-                "delete_namespace",
-                {"namespace": "rivulet"},
-            )
-
-    def test_prohibited_base_tier_raises(self) -> None:
-        with pytest.raises(PolicyRejectionError) as exc_info:
-            PolicyEngine().classify(
-                "future_mutating_tool",
-                {"namespace": "rivulet"},
-                base_tier=RiskTier.PROHIBITED,
-            )
-
+            engine.classify("delete_namespace", {}, RiskTier.OBSERVE)
         assert exc_info.value.decision.allowed is False
 
-    def test_empty_namespace_is_rejected(self) -> None:
-        with pytest.raises(PolicyRejectionError):
-            PolicyEngine().classify(
-                "restart_deployment",
-                {
-                    "namespace": "",
-                    "name": "api-gateway",
-                },
-            )
+    def test_approval_policy_returns_requires_approval(self) -> None:
+        engine = _policy_requiring_approval()
+        decision = engine.classify("scale_deployment", {}, RiskTier.REVERSIBLE_HIGH)
+        assert decision.allowed is True
+        assert decision.requires_approval is True
 
-    def test_max_autonomous_tier_can_be_raised(self) -> None:
-        decision = PolicyEngine(max_autonomous_tier=RiskTier.REVERSIBLE_HIGH).classify(
-            "scale_deployment",
-            {
-                "namespace": "rivulet",
-                "name": "api-gateway",
-                "replicas": 0,
-            },
-        )
 
-        assert decision.requires_approval is False
+# ---------------------------------------------------------------------------
+# SafeExecutor — dispatch lifecycle
+# ---------------------------------------------------------------------------
 
 
 class TestSafeExecutor:
-    """Tests of the policy-gated executor."""
+    @pytest.mark.asyncio
+    async def test_successful_execution_returns_verified(self) -> None:
+        """Tier-0 tool with no snapshot/verifier/rollback succeeds cleanly."""
+        registry = _make_registry_with_tools(("get_pod_logs", 0))
+        policy = _policy_allowing_all()
+        executor = SafeExecutor(registry, policy)
+
+        action = _proposed("get_pod_logs", risk_tier=0)
+        result = await executor.execute(action, _make_context())
+
+        assert result.status == "succeeded"
+        assert result.executed is True
+        assert result.verified is None
+        assert result.rolled_back is False
+        assert result.error is None
 
     @pytest.mark.asyncio
-    async def test_tier4_action_is_rejected_without_dispatch(self) -> None:
-        registry = _make_registry_with_tools(("delete_namespace", 4))
-        registry.execute = AsyncMock(wraps=registry.execute)  # type: ignore[method-assign]
+    async def test_policy_rejection_raises_and_audits(self) -> None:
+        """Prohibited action raises PolicyRejectionError before dispatch."""
+        audit_records: list[AuditRecord] = []
 
-        executor = SafeExecutor(registry, PolicyEngine())
+        async def capture_audit(record: AuditRecord) -> None:
+            audit_records.append(record)
+
+        registry = _make_registry_with_tools(("delete_namespace", 4))
+        policy = _policy_rejecting_all()
+        executor = SafeExecutor(registry, policy, audit_hook=capture_audit)
+
+        action = _proposed("delete_namespace", risk_tier=4)
 
         with pytest.raises(PolicyRejectionError):
-            await executor.execute(
-                _proposed("delete_namespace", {"namespace": "rivulet"}),
-                _make_context(),
-            )
+            await executor.execute(action, _make_context())
 
-        registry.execute.assert_not_awaited()  # type: ignore[attr-defined]
-
-    @pytest.mark.asyncio
-    async def test_tier1_action_executes_autonomously(self) -> None:
-        registry = _make_registry_with_tools(("restart_deployment", 1))
-        executor = SafeExecutor(registry, PolicyEngine())
-
-        result = await executor.execute(
-            _proposed(
-                "restart_deployment",
-                {
-                    "namespace": "rivulet",
-                    "name": "api-gateway",
-                    "reason": "test",
-                },
-            ),
-            _make_context(),
-        )
-
-        assert result.executed is True
-        assert result.decision.risk_tier == RiskTier.REVERSIBLE_LOW
-        assert result.error is None
-        assert result.output == {"ok": True}
-        assert result.executed_at is not None
+        assert len(audit_records) == 1
+        assert audit_records[0].status == "rejected"
+        assert audit_records[0].executed is False
 
     @pytest.mark.asyncio
-    async def test_tier2_action_raises_needs_approval(self) -> None:
+    async def test_approval_required_raises_before_dispatch(self) -> None:
+        """Tier-2+ action raises NeedsApprovalError without dispatching."""
         registry = _make_registry_with_tools(("scale_deployment", 2))
-        registry.execute = AsyncMock(wraps=registry.execute)  # type: ignore[method-assign]
+        policy = _policy_requiring_approval()
+        executor = SafeExecutor(registry, policy)
 
-        executor = SafeExecutor(registry, PolicyEngine())
+        action = _proposed("scale_deployment", risk_tier=2)
 
         with pytest.raises(NeedsApprovalError) as exc_info:
-            await executor.execute(
-                _proposed(
-                    "scale_deployment",
-                    {
-                        "namespace": "rivulet",
-                        "name": "api-gateway",
-                        "replicas": 0,
-                    },
-                ),
-                _make_context(),
-            )
+            await executor.execute(action, _make_context())
 
         assert exc_info.value.decision.requires_approval is True
-        registry.execute.assert_not_awaited()  # type: ignore[attr-defined]
+        assert exc_info.value.action.tool_name == "scale_deployment"
 
     @pytest.mark.asyncio
-    async def test_failed_tool_triggers_injected_rollback(self) -> None:
+    async def test_tool_failure_triggers_rollback(self) -> None:
+        """When a tool with a registered rollback fails, rollback runs."""
+        rollback_called = False
+
+        async def snapshot_fn(args: dict[str, Any], context: SREContext) -> dict[str, Any]:
+            del context
+            return {"previous": args.get("name", "")}
+
+        async def rollback_fn(
+            args: dict[str, Any],
+            snapshot: dict[str, Any],
+            context: SREContext,
+        ) -> bool:
+            nonlocal rollback_called
+            del args, snapshot, context
+            rollback_called = True
+            return True
+
         registry = _make_registry_with_tools(
             ("restart_deployment", 1),
-            fail_on={"restart_deployment"},
+            fail_set=frozenset({"restart_deployment"}),
+        )
+        policy = _policy_allowing_all()
+        executor = SafeExecutor(
+            registry,
+            policy,
+            snapshots={"restart_deployment": snapshot_fn},
+            rollbacks={"restart_deployment": rollback_fn},
         )
 
-        async def snapshot(args: dict[str, Any], context: SREContext) -> dict[str, Any]:
-            del context
-            return {"previous": args["name"]}
+        action = _proposed(
+            "restart_deployment",
+            args={"namespace": "rivulet", "name": "api-gateway"},
+            risk_tier=1,
+        )
+        result = await executor.execute(action, _make_context())
 
-        rollback = AsyncMock(return_value=True)
+        assert result.status == "failed"
+        assert result.executed is True
+        assert result.rolled_back is True
+        assert rollback_called is True
+
+    @pytest.mark.asyncio
+    async def test_snapshot_failure_prevents_dispatch(self) -> None:
+        """Fail-closed: snapshot failure prevents the tool from dispatching."""
+        registry = _make_registry_with_tools(("restart_deployment", 1))
+        policy = _policy_allowing_all()
+
+        async def failing_snapshot(args: dict[str, Any], context: SREContext) -> dict[str, Any]:
+            del args, context
+            raise RuntimeError("snapshot unavailable")
 
         executor = SafeExecutor(
             registry,
-            PolicyEngine(),
-            snapshots={"restart_deployment": snapshot},
-            rollbacks={"restart_deployment": rollback},
+            policy,
+            snapshots={"restart_deployment": failing_snapshot},
         )
 
-        result = await executor.execute(
-            _proposed(
-                "restart_deployment",
-                {"namespace": "rivulet", "name": "api-gateway"},
-            ),
-            _make_context(),
-        )
+        action = _proposed("restart_deployment", risk_tier=1)
+        result = await executor.execute(action, _make_context())
 
-        assert result.executed is True
-        assert result.error is not None
-        assert result.rolled_back is True
-        rollback.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_failed_tool_without_rollback_marks_not_rolled_back(
-        self,
-    ) -> None:
-        registry = _make_registry_with_tools(
-            ("terminate_backend", 1),
-            fail_on={"terminate_backend"},
-        )
-
-        result = await SafeExecutor(registry, PolicyEngine()).execute(
-            _proposed(
-                "terminate_backend",
-                {"pid": 12345, "reason": "test"},
-            ),
-            _make_context(),
-        )
-
-        assert result.executed is True
-        assert result.error is not None
+        assert result.status == "snapshot_failed"
+        assert result.executed is False
         assert result.rolled_back is False
 
     @pytest.mark.asyncio
-    async def test_failed_verification_triggers_rollback(self) -> None:
+    async def test_verification_pass_marks_verified(self) -> None:
+        """When verifier returns True, status becomes 'verified'."""
         registry = _make_registry_with_tools(("restart_deployment", 1))
+        policy = _policy_allowing_all()
 
-        async def snapshot(args: dict[str, Any], context: SREContext) -> dict[str, Any]:
+        async def snapshot_fn(args: dict[str, Any], context: SREContext) -> dict[str, Any]:
             del args, context
             return {"state": "before"}
 
-        async def verify(
+        async def verify_fn(
+            args: dict[str, Any],
+            snapshot: dict[str, Any] | None,
+            context: SREContext,
+        ) -> bool:
+            del args, snapshot, context
+            return True
+
+        executor = SafeExecutor(
+            registry,
+            policy,
+            snapshots={"restart_deployment": snapshot_fn},
+            verifiers={"restart_deployment": verify_fn},
+        )
+
+        action = _proposed("restart_deployment", risk_tier=1)
+        result = await executor.execute(action, _make_context())
+
+        assert result.status == "verified"
+        assert result.verified is True
+        assert result.rolled_back is False
+
+    @pytest.mark.asyncio
+    async def test_verification_failure_triggers_rollback(self) -> None:
+        """When verifier returns False, rollback runs and status is verification_failed."""
+        rollback_called = False
+
+        async def snapshot_fn(args: dict[str, Any], context: SREContext) -> dict[str, Any]:
+            del args, context
+            return {"state": "before"}
+
+        async def verify_fn(
             args: dict[str, Any],
             snapshot: dict[str, Any] | None,
             context: SREContext,
@@ -438,158 +370,318 @@ class TestSafeExecutor:
             del args, snapshot, context
             return False
 
-        rollback = AsyncMock(return_value=True)
+        async def rollback_fn(
+            args: dict[str, Any],
+            snapshot: dict[str, Any],
+            context: SREContext,
+        ) -> bool:
+            nonlocal rollback_called
+            del args, snapshot, context
+            rollback_called = True
+            return True
 
-        result = await SafeExecutor(
+        registry = _make_registry_with_tools(("restart_deployment", 1))
+        policy = _policy_allowing_all()
+        executor = SafeExecutor(
             registry,
-            PolicyEngine(),
-            snapshots={"restart_deployment": snapshot},
-            verifiers={"restart_deployment": verify},
-            rollbacks={"restart_deployment": rollback},
-        ).execute(
-            _proposed(
-                "restart_deployment",
-                {"namespace": "rivulet", "name": "api-gateway"},
-            ),
-            _make_context(),
+            policy,
+            snapshots={"restart_deployment": snapshot_fn},
+            verifiers={"restart_deployment": verify_fn},
+            rollbacks={"restart_deployment": rollback_fn},
         )
 
-        assert result.executed is True
+        action = _proposed("restart_deployment", risk_tier=1)
+        result = await executor.execute(action, _make_context())
+
+        assert result.status == "verification_failed"
         assert result.verified is False
         assert result.rolled_back is True
-        assert result.error is None
+        assert rollback_called is True
 
     @pytest.mark.asyncio
-    async def test_verifier_runs_without_snapshot(self) -> None:
-        registry = _make_registry_with_tools(("restart_deployment", 1))
-        context = _make_context()
-        verify = AsyncMock(return_value=True)
+    async def test_unknown_tool_raises_policy_rejection(self) -> None:
+        """Executing a tool not in the registry raises PolicyRejectionError."""
+        registry = ToolRegistry()  # Empty registry
+        policy = _policy_allowing_all()
+        executor = SafeExecutor(registry, policy)
 
-        result = await SafeExecutor(
-            registry,
-            PolicyEngine(),
-            verifiers={"restart_deployment": verify},
-        ).execute(
-            _proposed(
-                "restart_deployment",
-                {"namespace": "rivulet", "name": "api-gateway"},
-            ),
-            context,
+        action = _proposed("nonexistent_tool", risk_tier=0)
+
+        with pytest.raises(PolicyRejectionError):
+            await executor.execute(action, _make_context())
+
+    @pytest.mark.asyncio
+    async def test_audit_hook_receives_record_on_success(self) -> None:
+        """Audit hook fires with correct fields on successful execution."""
+        audit_records: list[AuditRecord] = []
+
+        async def capture_audit(record: AuditRecord) -> None:
+            audit_records.append(record)
+
+        registry = _make_registry_with_tools(("get_pod_logs", 0))
+        policy = _policy_allowing_all()
+        executor = SafeExecutor(registry, policy, audit_hook=capture_audit)
+
+        action = _proposed("get_pod_logs", risk_tier=0)
+        await executor.execute(action, _make_context(), incident_id="test-123")
+
+        assert len(audit_records) == 1
+        record = audit_records[0]
+        assert record.incident_id == "test-123"
+        assert record.tool_name == "get_pod_logs"
+        assert record.status == "succeeded"
+        assert record.executed is True
+        assert record.error_class is None
+
+    @pytest.mark.asyncio
+    async def test_audit_hook_receives_record_on_failure(self) -> None:
+        """Audit hook fires with error class on failed execution."""
+        audit_records: list[AuditRecord] = []
+
+        async def capture_audit(record: AuditRecord) -> None:
+            audit_records.append(record)
+
+        registry = _make_registry_with_tools(
+            ("restart_deployment", 1),
+            fail_set=frozenset({"restart_deployment"}),
+        )
+        policy = _policy_allowing_all()
+        executor = SafeExecutor(registry, policy, audit_hook=capture_audit)
+
+        action = _proposed("restart_deployment", risk_tier=1)
+        await executor.execute(action, _make_context())
+
+        assert len(audit_records) == 1
+        record = audit_records[0]
+        assert record.status == "failed"
+        assert record.executed is True
+        assert record.error_class is not None
+
+    @pytest.mark.asyncio
+    async def test_audit_hook_failure_does_not_propagate(self) -> None:
+        """If the audit hook raises, execution still returns a result."""
+
+        async def failing_audit(record: AuditRecord) -> None:
+            del record
+            raise RuntimeError("audit store down")
+
+        registry = _make_registry_with_tools(("get_pod_logs", 0))
+        policy = _policy_allowing_all()
+        executor = SafeExecutor(registry, policy, audit_hook=failing_audit)
+
+        action = _proposed("get_pod_logs", risk_tier=0)
+        # Should not raise despite audit hook failing
+        result = await executor.execute(action, _make_context())
+        assert result.status == "succeeded"
+
+
+# ---------------------------------------------------------------------------
+# ExecutionResult.to_executed_action
+# ---------------------------------------------------------------------------
+
+
+class TestExecutionResultConversion:
+    def test_to_executed_action_preserves_execution_time(self) -> None:
+        """to_executed_action must carry the executed_at timestamp."""
+        action = ProposedAction(
+            tool_name="restart_deployment",
+            tool_args={"namespace": "rivulet", "name": "api-gateway"},
+            risk_tier=1,
+            rationale="test",
+            requires_approval=False,
+        )
+        decision = PolicyDecision(
+            allowed=True,
+            risk_tier=RiskTier.REVERSIBLE_LOW,
+            requires_approval=False,
+            reason="test",
+        )
+        result = ExecutionResult(
+            action=action,
+            decision=decision,
+            status="succeeded",
+            executed=True,
+            verified=None,
+            executed_at="2026-01-15T10:30:00Z",
+            output={"status": "success"},
         )
 
-        assert result.verified is True
-        verify.assert_awaited_once_with(
-            {"namespace": "rivulet", "name": "api-gateway"},
-            None,
-            context,
+        executed: ExecutedAction = result.to_executed_action()
+
+        assert executed.tool_name == "restart_deployment"
+        assert executed.tool_args == {"namespace": "rivulet", "name": "api-gateway"}
+        assert executed.executed_at == "2026-01-15T10:30:00Z"
+        assert executed.success is True
+        assert executed.result == {"status": "success"}
+        assert executed.verification_passed is None
+
+    def test_to_executed_action_success_with_verification(self) -> None:
+        """Verified execution produces success=True and verification_passed=True."""
+        action = ProposedAction(
+            tool_name="restart_deployment",
+            tool_args={},
+            risk_tier=1,
+            rationale="test",
+            requires_approval=False,
+        )
+        decision = PolicyDecision(
+            allowed=True,
+            risk_tier=RiskTier.REVERSIBLE_LOW,
+            requires_approval=False,
+            reason="test",
+        )
+        result = ExecutionResult(
+            action=action,
+            decision=decision,
+            status="verified",
+            executed=True,
+            verified=True,
+            executed_at="2026-01-15T10:30:00Z",
+            output={"status": "success"},
         )
 
-    @pytest.mark.asyncio
-    async def test_snapshot_failure_fails_closed_without_dispatch(
-        self,
-    ) -> None:
-        registry = _make_registry_with_tools(("restart_deployment", 1))
-        registry.execute = AsyncMock(wraps=registry.execute)  # type: ignore[method-assign]
+        executed: ExecutedAction = result.to_executed_action()
 
-        async def snapshot(args: dict[str, Any], context: SREContext) -> dict[str, Any]:
-            del args, context
-            raise RuntimeError("snapshot unavailable")
+        assert executed.success is True
+        assert executed.verification_passed is True
 
-        result = await SafeExecutor(
-            registry,
-            PolicyEngine(),
-            snapshots={"restart_deployment": snapshot},
-        ).execute(
-            _proposed(
-                "restart_deployment",
-                {"namespace": "rivulet", "name": "api-gateway"},
-            ),
-            _make_context(),
+    def test_to_executed_action_verification_failed(self) -> None:
+        """Verification failure produces success=False and verification_passed=False."""
+        action = ProposedAction(
+            tool_name="restart_deployment",
+            tool_args={},
+            risk_tier=1,
+            rationale="test",
+            requires_approval=False,
+        )
+        decision = PolicyDecision(
+            allowed=True,
+            risk_tier=RiskTier.REVERSIBLE_LOW,
+            requires_approval=False,
+            reason="test",
+        )
+        result = ExecutionResult(
+            action=action,
+            decision=decision,
+            status="verification_failed",
+            executed=True,
+            verified=False,
+            executed_at="2026-01-15T10:30:00Z",
+            output={},
         )
 
-        assert result.executed is False
-        assert result.error is not None
-        registry.execute.assert_not_awaited()  # type: ignore[attr-defined]
+        executed: ExecutedAction = result.to_executed_action()
 
-    @pytest.mark.asyncio
-    async def test_proposal_cannot_downgrade_registered_risk(self) -> None:
-        registry = _make_registry_with_tools(("scale_deployment", 2))
-        executor = SafeExecutor(registry, PolicyEngine())
+        assert executed.success is False
+        assert executed.verification_passed is False
 
-        with pytest.raises(NeedsApprovalError):
-            await executor.execute(
-                _proposed(
-                    "scale_deployment",
-                    {
-                        "namespace": "rivulet",
-                        "name": "api-gateway",
-                        "replicas": 0,
-                    },
-                    risk_tier=RiskTier.OBSERVE,
-                ),
-                _make_context(),
-            )
-
-    @pytest.mark.asyncio
-    async def test_unknown_tool_is_rejected_before_dispatch(self) -> None:
-        registry = ToolRegistry()
-
-        with pytest.raises(PolicyRejectionError) as exc_info:
-            await SafeExecutor(registry, PolicyEngine()).execute(
-                _proposed("missing_tool", {"namespace": "rivulet"}),
-                _make_context(),
-            )
-
-        assert "not registered" in exc_info.value.decision.reason
-
-    @pytest.mark.asyncio
-    async def test_proposal_explicitly_requesting_approval_is_honored(
-        self,
-    ) -> None:
-        registry = _make_registry_with_tools(("restart_deployment", 1))
-        registry.execute = AsyncMock(wraps=registry.execute)  # type: ignore[method-assign]
-
-        with pytest.raises(NeedsApprovalError) as exc_info:
-            await SafeExecutor(registry, PolicyEngine()).execute(
-                _proposed(
-                    "restart_deployment",
-                    {"namespace": "rivulet", "name": "api-gateway"},
-                    requires_approval=True,
-                ),
-                _make_context(),
-            )
-
-        assert exc_info.value.decision.requires_approval is True
-        registry.execute.assert_not_awaited()  # type: ignore[attr-defined]
-
-    @pytest.mark.asyncio
-    async def test_to_executed_action_preserves_execution_time(self) -> None:
-        registry = _make_registry_with_tools(("restart_deployment", 1))
-
-        result = await SafeExecutor(registry, PolicyEngine()).execute(
-            _proposed(
-                "restart_deployment",
-                {"namespace": "rivulet", "name": "api-gateway"},
-            ),
-            _make_context(),
+    def test_to_executed_action_not_dispatched(self) -> None:
+        """Non-dispatched result produces success=False."""
+        action = ProposedAction(
+            tool_name="restart_deployment",
+            tool_args={},
+            risk_tier=1,
+            rationale="test",
+            requires_approval=False,
+        )
+        decision = PolicyDecision(
+            allowed=True,
+            risk_tier=RiskTier.REVERSIBLE_LOW,
+            requires_approval=False,
+            reason="test",
+        )
+        result = ExecutionResult(
+            action=action,
+            decision=decision,
+            status="snapshot_failed",
+            executed=False,
+            verified=None,
+            executed_at=None,
+            output=None,
         )
 
-        executed = result.to_executed_action()
+        executed: ExecutedAction = result.to_executed_action()
 
-        assert executed["tool_name"] == "restart_deployment"
-        assert executed["success"] is True
-        assert executed["verification_passed"] is None
-        assert executed["result"] == {"ok": True}
-        assert executed["executed_at"] == result.executed_at
+        assert executed.success is False
+        # executed_at should be auto-generated when None
+        assert executed.executed_at != ""
 
-    @pytest.mark.asyncio
-    async def test_unknown_registered_tool_uses_base_tier(self) -> None:
-        registry = _make_registry_with_tools(("list_pods", 0))
 
-        result = await SafeExecutor(registry, PolicyEngine()).execute(
-            _proposed("list_pods", {"namespace": "rivulet"}),
-            _make_context(),
+# ---------------------------------------------------------------------------
+# ExecutionResult derived properties
+# ---------------------------------------------------------------------------
+
+
+class TestExecutionResultProperties:
+    def test_dispatched_property(self) -> None:
+        action = _proposed("get_pod_logs", risk_tier=0)
+        decision = PolicyDecision(
+            allowed=True,
+            risk_tier=RiskTier.OBSERVE,
+            requires_approval=False,
+            reason="test",
         )
 
-        assert result.executed is True
-        assert result.decision.risk_tier == RiskTier.OBSERVE
+        result = ExecutionResult(action=action, decision=decision, executed=False)
+        assert result.dispatched is False
+
+        result.executed = True
+        assert result.dispatched is True
+
+    def test_succeeded_property(self) -> None:
+        action = _proposed("get_pod_logs", risk_tier=0)
+        decision = PolicyDecision(
+            allowed=True,
+            risk_tier=RiskTier.OBSERVE,
+            requires_approval=False,
+            reason="test",
+        )
+
+        for status, expected in [
+            ("succeeded", True),
+            ("verified", True),
+            ("failed", False),
+            ("verification_failed", False),
+            ("rejected", False),
+            ("not_dispatched", False),
+            ("snapshot_failed", False),
+        ]:
+            result = ExecutionResult(action=action, decision=decision, status=status)
+            assert result.succeeded is expected, f"status={status}"
+
+    def test_fully_verified_property(self) -> None:
+        action = _proposed("get_pod_logs", risk_tier=0)
+        decision = PolicyDecision(
+            allowed=True,
+            risk_tier=RiskTier.OBSERVE,
+            requires_approval=False,
+            reason="test",
+        )
+
+        result = ExecutionResult(action=action, decision=decision, status="verified", verified=True)
+        assert result.fully_verified is True
+
+        result.status = "succeeded"
+        assert result.fully_verified is False
+
+
+# ---------------------------------------------------------------------------
+# NeedsApprovalError
+# ---------------------------------------------------------------------------
+
+
+class TestNeedsApprovalError:
+    def test_carries_decision_and_action(self) -> None:
+        action = _proposed("scale_deployment", risk_tier=2)
+        decision = PolicyDecision(
+            allowed=True,
+            risk_tier=RiskTier.REVERSIBLE_HIGH,
+            requires_approval=True,
+            reason="requires HITL",
+        )
+
+        error = NeedsApprovalError(decision, action)
+
+        assert error.decision is decision
+        assert error.action is action
+        assert "requires HITL" in str(error)

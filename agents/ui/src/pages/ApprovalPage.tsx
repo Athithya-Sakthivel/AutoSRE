@@ -50,9 +50,18 @@ export function ApprovalsPage(): JSX.Element {
             <EmptyState
               title="No pending approvals"
               description="All incidents are either running autonomously or have been resolved. Tier-2+ actions will appear here when the agent proposes them."
+              icon={<span className="text-2xl">✓</span>}
             />
           ) : (
             <div className="space-y-3">
+              <div className="rounded-lg border border-status-awaiting/30 bg-status-awaiting/5 p-4">
+                <p className="text-sm text-status-awaiting">
+                  <span className="font-semibold">{awaiting.length}</span>{" "}
+                  incident{awaiting.length !== 1 ? "s" : ""} awaiting your
+                  approval. Review the proposed actions and approve or reject
+                  them.
+                </p>
+              </div>
               {awaiting.map((incident) => (
                 <IncidentCard
                   key={incident.incident_id}

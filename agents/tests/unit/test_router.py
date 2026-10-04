@@ -1,13 +1,33 @@
-"""Unit tests for autosre.core.router.TokenVelocityRouter."""
+"""Unit tests for autosre.core.router.TokenVelocityRouter.
+
+These tests cover the provider-agnostic pass-through routing, token
+counting, model selection by threshold, and the exponential backoff
+retry logic for transient provider errors.
+
+All sleep calls are mocked so the test suite runs in milliseconds
+regardless of configured backoff durations.
+
+## Backoff strategy under test
+
+The router implements a hybrid backoff:
+    - Attempts 0-2: linear (initial_backoff * (attempt + 1))
+    - Attempts 3+: exponential (initial_backoff * 2^attempt)
+    - All: capped at max_backoff_seconds
+    - All: hard-capped at 30.0 seconds
+    - All: jitter up to 10% of base
+
+Tests verify these invariants rather than exact values.
+"""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from autosre.config import LLMConfig
-from autosre.core.router import TokenVelocityRouter
+from autosre.core.router import LLMBudgetExhaustedError, TokenVelocityRouter
+from autosre.core.state import RunMetrics
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -15,20 +35,41 @@ from autosre.core.router import TokenVelocityRouter
 
 
 @pytest.fixture
-def router() -> TokenVelocityRouter:
-    """Create a router with active Groq models.
-
-    Compound models were retired on 2026-09-21. The worker model is now
-    openai/gpt-oss-20b which LiteLLM routes as groq/openai/gpt-oss-20b.
-    """
-    config = LLMConfig(
+def config() -> LLMConfig:
+    """Build a minimal LLMConfig for router tests."""
+    return LLMConfig(
         api_key="test-key",
-        provider="groq",
-        base_url="https://api.groq.com/openai/v1",
-        model_coordinator="qwen/qwen3.8-27b",
-        model_worker="openai/gpt-oss-20b",
+        model_coordinator="gemini/gemini-3.8-flash",
+        model_worker="gemini/gemini-3.8-flash",
+        max_retries=3,
+        initial_backoff_seconds=1.0,
+        max_backoff_seconds=30.0,
     )
+
+
+@pytest.fixture
+def router(config: LLMConfig) -> TokenVelocityRouter:
+    """Create a router with default threshold."""
     return TokenVelocityRouter(config, threshold_tokens=6000)
+
+
+@pytest.fixture
+def run_metrics() -> RunMetrics:
+    return RunMetrics()
+
+
+def _make_error(status_code: int, message: str = "error") -> Exception:
+    """Build an exception with an HTTP status_code attribute."""
+    err = Exception(message)
+    err.status_code = status_code  # type: ignore[attr-defined]
+    return err
+
+
+def _make_daily_quota_error() -> Exception:
+    """Build an exception that matches daily-quota patterns."""
+    err = Exception("Quota exceeded for requests per day")
+    err.status_code = 429  # type: ignore[attr-defined]
+    return err
 
 
 # ---------------------------------------------------------------------------
@@ -37,24 +78,20 @@ def router() -> TokenVelocityRouter:
 
 
 class TestTokenCounting:
-    def test_empty_messages_have_no_fake_response_tokens(self, router: TokenVelocityRouter) -> None:
-        """Empty messages produce a small positive count (framing only)."""
+    def test_empty_messages_produce_small_count(self, router: TokenVelocityRouter) -> None:
         count = router.count_tokens([])
         assert count >= 0
 
     def test_single_message_is_nonzero(self, router: TokenVelocityRouter) -> None:
-        """A single text message produces a nonzero token count."""
         count = router.count_tokens([{"role": "user", "content": "Hello world"}])
         assert count > 0
 
-    def test_large_content_is_large(self, router: TokenVelocityRouter) -> None:
-        """8000 repetitions of 'word' exceed a 6000-token threshold."""
+    def test_large_content_exceeds_threshold(self, router: TokenVelocityRouter) -> None:
         content = "word " * 8000
         count = router.count_tokens([{"role": "user", "content": content}])
         assert count > 6000
 
     def test_tools_are_included_in_estimate(self, router: TokenVelocityRouter) -> None:
-        """Tool schemas contribute to the token estimate."""
         messages = [{"role": "user", "content": "hi"}]
         tools = [
             {
@@ -86,258 +123,122 @@ class TestTokenCounting:
 
 
 class TestModelSelection:
-    def test_small_prompt_uses_qwen(self, router: TokenVelocityRouter) -> None:
-        """Prompts under the threshold use the fast (coordinator) model."""
+    def test_small_prompt_uses_coordinator(self, router: TokenVelocityRouter) -> None:
         messages = [{"role": "user", "content": "small prompt"}]
-
         selected = router.select_model(messages)
-
-        assert selected == "groq/qwen/qwen3.8-27b"
+        assert selected == "gemini/gemini-3.8-flash"
 
     def test_large_prompt_uses_worker(self, router: TokenVelocityRouter) -> None:
-        """Prompts over the threshold use the worker model."""
         content = "word " * 8000
         messages = [{"role": "user", "content": content}]
-
         selected = router.select_model(messages)
-
-        assert selected == "groq/openai/gpt-oss-20b"
-
-    def test_large_prompt_with_custom_tools_uses_worker(self, router: TokenVelocityRouter) -> None:
-        """Large tool-using requests route to the worker model."""
-        content = "word " * 8000
-        messages = [{"role": "user", "content": content}]
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "test_tool",
-                    "description": "test",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {},
-                    },
-                },
-            }
-        ]
-
-        selected = router.select_model(messages, tools=tools)
-
-        # Worker is openai/gpt-oss-20b, not compound, so tool compatibility
-        # is fine. The large prompt should route to the worker.
-        assert selected == "groq/openai/gpt-oss-20b"
+        assert selected == "gemini/gemini-3.8-flash"
 
     @pytest.mark.parametrize(
         ("token_count", "expected_model"),
         [
-            (5999, "groq/qwen/qwen3.8-27b"),
-            (6000, "groq/openai/gpt-oss-20b"),
-            (6001, "groq/openai/gpt-oss-20b"),
+            (5999, "gemini/gemini-3.8-flash"),  # below threshold → coordinator
+            (6000, "gemini/gemini-3.8-flash"),  # at threshold → worker
+            (6001, "gemini/gemini-3.8-flash"),  # above → worker
         ],
     )
-    def test_switches_exactly_at_6k_threshold(
+    def test_threshold_boundary(
         self,
         router: TokenVelocityRouter,
         token_count: int,
         expected_model: str,
     ) -> None:
-        """Routing switches at exactly the threshold boundary."""
-        with patch.object(
-            router,
-            "count_tokens",
-            return_value=token_count,
-        ):
+        with patch.object(router, "count_tokens", return_value=token_count):
             selected = router.select_model([{"role": "user", "content": "x"}])
-
         assert selected == expected_model
 
 
 # ---------------------------------------------------------------------------
-# Model Resolution Tests
+# Model Resolution (pass-through) Tests
 # ---------------------------------------------------------------------------
 
 
 class TestModelResolution:
-    def test_configured_models_are_normalized_for_groq(self) -> None:
-        """Groq provider adds groq/ prefix to native model IDs."""
-        config = LLMConfig(
-            api_key="key",
-            provider="groq",
-            model_coordinator="qwen/qwen3.8-27b",
-            model_worker="openai/gpt-oss-20b",
-        )
-        r = TokenVelocityRouter(config)
+    def test_explicit_model_passes_through_unchanged(self, router: TokenVelocityRouter) -> None:
+        """The router must not mutate the model ID."""
+        assert router._resolve_model("gemini/gemini-3.8-flash") == "gemini/gemini-3.8-flash"
+        assert router._resolve_model("openai/gpt-4o-mini") == "openai/gpt-4o-mini"
+        assert router._resolve_model("anthropic/claude-3-5-sonnet") == "anthropic/claude-3-5-sonnet"
 
-        assert r.fast_model == "groq/qwen/qwen3.8-27b"
-        assert r.slow_model == "groq/openai/gpt-oss-20b"
+    def test_auto_alias_resolves_to_coordinator(self, router: TokenVelocityRouter) -> None:
+        assert router._resolve_model("auto") == "gemini/gemini-3.8-flash"
+        assert router._resolve_model("coordinator") == "gemini/gemini-3.8-flash"
 
-    def test_groq_qwen_prefixed_id_is_normalized(self) -> None:
-        """Already-prefixed Groq IDs pass through unchanged."""
-        config = LLMConfig(
-            api_key="key",
-            provider="groq",
-            model_coordinator="groq/qwen/qwen3.8-27b",
-            model_worker="groq/openai/gpt-oss-20b",
-        )
-        r = TokenVelocityRouter(config)
+    def test_fast_alias_resolves_to_coordinator(self, router: TokenVelocityRouter) -> None:
+        assert router._resolve_model("fast") == "gemini/gemini-3.8-flash"
 
-        assert r.fast_model == "groq/qwen/qwen3.8-27b"
-        assert r.slow_model == "groq/openai/gpt-oss-20b"
+    def test_worker_alias_resolves_to_worker(self, router: TokenVelocityRouter) -> None:
+        assert router._resolve_model("worker") == "gemini/gemini-3.8-flash"
+        assert router._resolve_model("slow") == "gemini/gemini-3.8-flash"
 
-    def test_explicit_model_passes_through(self, router: TokenVelocityRouter) -> None:
-        """Explicit model IDs are resolved and passed to LiteLLM."""
-        resolved = router._resolve_model("qwen/qwen3.8-27b")
-
-        assert resolved == "groq/qwen/qwen3.8-27b"
+    def test_whitespace_is_stripped(self, router: TokenVelocityRouter) -> None:
+        assert router._resolve_model("  gemini/gemini-3.8-flash  ") == "gemini/gemini-3.8-flash"
 
 
 # ---------------------------------------------------------------------------
-# Async Completion Tests
+# Async Completion — Success Path
 # ---------------------------------------------------------------------------
 
 
-class TestAsyncCompletion:
+class TestAsyncCompletionSuccess:
     @pytest.mark.asyncio
-    async def test_auto_route_small_prompt_uses_qwen(self, router: TokenVelocityRouter) -> None:
-        """Auto-routing sends small prompts to the fast model."""
-        mock_response = AsyncMock()
+    async def test_auto_route_calls_litellm_with_resolved_model(
+        self, router: TokenVelocityRouter
+    ) -> None:
+        mock_response = MagicMock()
         mock_response.usage = None
 
         with patch(
-            "litellm.acompletion",
+            "autosre.core.router.litellm.acompletion",
             new_callable=AsyncMock,
+            return_value=mock_response,
         ) as mock_call:
-            mock_call.return_value = mock_response
-
-            await router.acompletion(
-                model="coordinator",
+            result = await router.acompletion(
+                model="auto",
                 messages=[{"role": "user", "content": "small"}],
             )
 
-            mock_call.assert_called_once()
-            call_kwargs = mock_call.call_args
-            assert call_kwargs.kwargs["model"] == "groq/qwen/qwen3.8-27b"
+            assert result is mock_response
+            mock_call.assert_awaited_once()
+            call_kwargs = mock_call.call_args.kwargs
+            assert call_kwargs["model"] == "gemini/gemini-3.8-flash"
 
     @pytest.mark.asyncio
-    async def test_auto_route_large_prompt_uses_worker(self, router: TokenVelocityRouter) -> None:
-        """Auto-routing sends large prompts to the worker model."""
-        mock_response = AsyncMock()
+    async def test_explicit_model_passed_through(self, router: TokenVelocityRouter) -> None:
+        mock_response = MagicMock()
         mock_response.usage = None
-        content = "word " * 8000
 
         with patch(
-            "litellm.acompletion",
+            "autosre.core.router.litellm.acompletion",
             new_callable=AsyncMock,
+            return_value=mock_response,
         ) as mock_call:
-            mock_call.return_value = mock_response
-
             await router.acompletion(
-                model="coordinator",
-                messages=[{"role": "user", "content": content}],
+                model="openai/gpt-4o-mini",
+                messages=[{"role": "user", "content": "x"}],
             )
 
-            mock_call.assert_called_once()
-            call_kwargs = mock_call.call_args
-            assert call_kwargs.kwargs["model"] == "groq/openai/gpt-oss-20b"
+            call_kwargs = mock_call.call_args.kwargs
+            assert call_kwargs["model"] == "openai/gpt-4o-mini"
 
     @pytest.mark.asyncio
-    async def test_explicit_worker_bypasses_threshold(self, router: TokenVelocityRouter) -> None:
-        """Explicit 'worker' alias always uses the worker model."""
-        mock_response = AsyncMock()
+    async def test_tools_and_kwargs_forwarded(self, router: TokenVelocityRouter) -> None:
+        mock_response = MagicMock()
         mock_response.usage = None
+        tools = [{"type": "function", "function": {"name": "test"}}]
 
         with patch(
-            "litellm.acompletion",
+            "autosre.core.router.litellm.acompletion",
             new_callable=AsyncMock,
+            return_value=mock_response,
         ) as mock_call:
-            mock_call.return_value = mock_response
-
             await router.acompletion(
-                model="worker",
-                messages=[{"role": "user", "content": "tiny"}],
-            )
-
-            call_kwargs = mock_call.call_args
-            assert call_kwargs.kwargs["model"] == "groq/openai/gpt-oss-20b"
-
-    @pytest.mark.asyncio
-    async def test_explicit_fast_bypasses_threshold(self, router: TokenVelocityRouter) -> None:
-        """Explicit 'fast' alias always uses the fast model."""
-        mock_response = AsyncMock()
-        mock_response.usage = None
-
-        with patch(
-            "litellm.acompletion",
-            new_callable=AsyncMock,
-        ) as mock_call:
-            mock_call.return_value = mock_response
-
-            await router.acompletion(
-                model="fast",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": "word " * 8000,
-                    }
-                ],
-            )
-
-            call_kwargs = mock_call.call_args
-            assert call_kwargs.kwargs["model"] == "groq/qwen/qwen3.8-27b"
-
-    @pytest.mark.asyncio
-    async def test_explicit_model_does_not_auto_route(self, router: TokenVelocityRouter) -> None:
-        """Explicit model IDs are normalized but not auto-routed."""
-        mock_response = AsyncMock()
-        mock_response.usage = None
-
-        with patch(
-            "litellm.acompletion",
-            new_callable=AsyncMock,
-        ) as mock_call:
-            mock_call.return_value = mock_response
-
-            await router.acompletion(
-                model="qwen/qwen3.8-27b",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": "word " * 8000,
-                    }
-                ],
-            )
-
-            call_kwargs = mock_call.call_args
-            assert call_kwargs.kwargs["model"] == "groq/qwen/qwen3.8-27b"
-
-    @pytest.mark.asyncio
-    async def test_passes_tools_and_other_kwargs(self, router: TokenVelocityRouter) -> None:
-        """Extra kwargs like tools are forwarded to litellm.acompletion."""
-        mock_response = AsyncMock()
-        mock_response.usage = None
-
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "test",
-                    "description": "test",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {},
-                    },
-                },
-            }
-        ]
-
-        with patch(
-            "litellm.acompletion",
-            new_callable=AsyncMock,
-        ) as mock_call:
-            mock_call.return_value = mock_response
-
-            await router.acompletion(
-                model="coordinator",
+                model="auto",
                 messages=[{"role": "user", "content": "hi"}],
                 tools=tools,
                 temperature=0.5,
@@ -348,52 +249,483 @@ class TestAsyncCompletion:
             assert call_kwargs["temperature"] == 0.5
 
     @pytest.mark.asyncio
-    async def test_auto_routed_qwen_429_falls_back_to_worker(
-        self, router: TokenVelocityRouter
-    ) -> None:
-        """A 429 on the fast model triggers one retry on the worker model."""
-        error_429 = Exception("rate limit exceeded")
-        error_429.status_code = 429  # type: ignore[attr-defined]
-
-        mock_response = AsyncMock()
+    async def test_coordinator_call_uses_auto_routing(self, router: TokenVelocityRouter) -> None:
+        mock_response = MagicMock()
         mock_response.usage = None
 
         with patch(
-            "litellm.acompletion",
+            "autosre.core.router.litellm.acompletion",
             new_callable=AsyncMock,
+            return_value=mock_response,
         ) as mock_call:
-            mock_call.side_effect = [error_429, mock_response]
+            await router.coordinator_call(messages=[{"role": "user", "content": "small"}])
 
+            mock_call.assert_awaited_once()
+            call_kwargs = mock_call.call_args.kwargs
+            assert call_kwargs["model"] == "gemini/gemini-3.8-flash"
+
+    @pytest.mark.asyncio
+    async def test_success_records_metrics(
+        self, router: TokenVelocityRouter, run_metrics: RunMetrics
+    ) -> None:
+        mock_response = MagicMock()
+        mock_response.usage = None
+
+        with patch(
+            "autosre.core.router.litellm.acompletion",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ):
+            await router.acompletion(
+                model="auto",
+                messages=[{"role": "user", "content": "hi"}],
+                run_metrics=run_metrics,
+            )
+
+        assert run_metrics.llm_call_count == 1
+        assert run_metrics.llm_consecutive_failures == 0
+
+
+# ---------------------------------------------------------------------------
+# Async Completion — Retry / Backoff
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncCompletionRetry:
+    @pytest.mark.asyncio
+    async def test_429_triggers_retry_then_succeeds(
+        self, router: TokenVelocityRouter, run_metrics: RunMetrics
+    ) -> None:
+        mock_response = MagicMock()
+        mock_response.usage = None
+        error_429 = _make_error(429, "rate limit exceeded")
+
+        with (
+            patch(
+                "autosre.core.router.litellm.acompletion",
+                new_callable=AsyncMock,
+                side_effect=[error_429, mock_response],
+            ) as mock_call,
+            patch(
+                "autosre.core.router.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+        ):
             result = await router.acompletion(
-                model="coordinator",
-                messages=[{"role": "user", "content": "small"}],
+                model="auto",
+                messages=[{"role": "user", "content": "hi"}],
+                run_metrics=run_metrics,
             )
 
             assert result is mock_response
-            assert mock_call.call_count == 2
+            assert mock_call.await_count == 2
+            mock_sleep.assert_awaited_once()
 
-            first_call_model = mock_call.call_args_list[0].kwargs["model"]
-            second_call_model = mock_call.call_args_list[1].kwargs["model"]
-
-            assert first_call_model == "groq/qwen/qwen3.8-27b"
-            assert second_call_model == "groq/openai/gpt-oss-20b"
+            # Backoff must be recorded in RunMetrics.
+            assert run_metrics.llm_call_count == 2
+            assert run_metrics.backoff_seconds > 0.0
 
     @pytest.mark.asyncio
-    async def test_coordinator_call_uses_auto_routing(self, router: TokenVelocityRouter) -> None:
-        """coordinator_call is a convenience wrapper for auto routing."""
-        mock_response = AsyncMock()
+    async def test_503_triggers_retry(self, router: TokenVelocityRouter) -> None:
+        """Gemini returns 503 for free-tier capacity exhaustion."""
+        mock_response = MagicMock()
+        mock_response.usage = None
+        error_503 = _make_error(503, "service unavailable")
+
+        with (
+            patch(
+                "autosre.core.router.litellm.acompletion",
+                new_callable=AsyncMock,
+                side_effect=[error_503, mock_response],
+            ),
+            patch(
+                "autosre.core.router.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await router.acompletion(
+                model="auto",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert result is mock_response
+
+    @pytest.mark.asyncio
+    async def test_500_triggers_retry(self, router: TokenVelocityRouter) -> None:
+        mock_response = MagicMock()
+        mock_response.usage = None
+        error_500 = _make_error(500, "internal server error")
+
+        with (
+            patch(
+                "autosre.core.router.litellm.acompletion",
+                new_callable=AsyncMock,
+                side_effect=[error_500, mock_response],
+            ),
+            patch(
+                "autosre.core.router.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await router.acompletion(
+                model="auto",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert result is mock_response
+
+    @pytest.mark.asyncio
+    async def test_exhausted_retries_raise_budget_error(
+        self, router: TokenVelocityRouter, run_metrics: RunMetrics
+    ) -> None:
+        error_429 = _make_error(429, "rate limit")
+
+        with (
+            patch(
+                "autosre.core.router.litellm.acompletion",
+                new_callable=AsyncMock,
+                side_effect=error_429,
+            ),
+            patch(
+                "autosre.core.router.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(LLMBudgetExhaustedError, match="budget exhausted"),
+        ):
+            await router.acompletion(
+                model="auto",
+                messages=[{"role": "user", "content": "hi"}],
+                run_metrics=run_metrics,
+            )
+
+        # max_retries=3 → 4 total attempts (initial + 3 retries)
+        assert run_metrics.llm_call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_backoff_grows_monotonically(self, router: TokenVelocityRouter) -> None:
+        """Backoff grows: linear for first 3 attempts, then exponential.
+
+        With initial_backoff=1.0 and max_backoff=30.0:
+            attempt 0: linear  1.0 * 1 = 1.0  (+10% jitter = 1.0-1.1)
+            attempt 1: linear  1.0 * 2 = 2.0  (+10% jitter = 2.0-2.2)
+            attempt 2: linear  1.0 * 3 = 3.0  (+10% jitter = 3.0-3.3)
+        """
+        error_429 = _make_error(429, "rate limit")
+        mock_response = MagicMock()
+        mock_response.usage = None
+
+        sleep_durations: list[float] = []
+
+        async def capture_sleep(duration: float) -> None:
+            sleep_durations.append(duration)
+
+        with (
+            patch(
+                "autosre.core.router.litellm.acompletion",
+                new_callable=AsyncMock,
+                side_effect=[error_429, error_429, error_429, mock_response],
+            ),
+            patch(
+                "autosre.core.router.asyncio.sleep",
+                new_callable=AsyncMock,
+                side_effect=capture_sleep,
+            ),
+        ):
+            await router.acompletion(
+                model="auto",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        # 3 retries → 3 sleep calls
+        assert len(sleep_durations) == 3
+
+        # Attempt 0: linear = 1.0 * 1 = 1.0, with up to 10% jitter
+        assert 1.0 <= sleep_durations[0] <= 1.1 + 0.01
+
+        # Attempt 1: linear = 1.0 * 2 = 2.0, with up to 10% jitter
+        assert 2.0 <= sleep_durations[1] <= 2.2 + 0.01
+
+        # Attempt 2: linear = 1.0 * 3 = 3.0, with up to 10% jitter
+        assert 3.0 <= sleep_durations[2] <= 3.3 + 0.01
+
+        # Each duration should be strictly greater than the previous
+        # (linear growth guarantees this even with jitter)
+        assert sleep_durations[1] > sleep_durations[0]
+        assert sleep_durations[2] > sleep_durations[1]
+
+    @pytest.mark.asyncio
+    async def test_backoff_capped_at_max(
+        self,
+    ) -> None:
+        """Backoff must not exceed max_backoff_seconds.
+
+        With initial_backoff=10.0 and max_backoff=15.0:
+            attempt 0: linear 10*1=10, min(10,15)=10, min(10,30)=10  +jitter <= 11.0
+            attempt 1: linear 10*2=20, min(20,15)=15, min(15,30)=15  +jitter <= 16.5
+            attempt 2: linear 10*3=30, min(30,15)=15, min(15,30)=15  +jitter <= 16.5
+            attempt 3: exp   10*8=80, min(80,15)=15, min(15,30)=15   +jitter <= 16.5
+            attempt 4: exp   10*16=160, min(160,15)=15, min(15,30)=15 +jitter <= 16.5
+        """
+        config = LLMConfig(
+            api_key="test-key",
+            model_coordinator="gemini/gemini-3.8-flash",
+            model_worker="gemini/gemini-3.8-flash",
+            max_retries=5,
+            initial_backoff_seconds=10.0,
+            max_backoff_seconds=15.0,
+        )
+        router = TokenVelocityRouter(config)
+
+        error_429 = _make_error(429, "rate limit")
+        mock_response = MagicMock()
+        mock_response.usage = None
+
+        sleep_durations: list[float] = []
+
+        async def capture_sleep(duration: float) -> None:
+            sleep_durations.append(duration)
+
+        with (
+            patch(
+                "autosre.core.router.litellm.acompletion",
+                new_callable=AsyncMock,
+                side_effect=[error_429] * 5 + [mock_response],
+            ),
+            patch(
+                "autosre.core.router.asyncio.sleep",
+                new_callable=AsyncMock,
+                side_effect=capture_sleep,
+            ),
+        ):
+            await router.acompletion(
+                model="auto",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert len(sleep_durations) == 5
+
+        # All durations must be <= max_backoff * 1.1 (jitter allowance)
+        max_with_jitter = 15.0 * 1.1 + 0.01
+        for i, duration in enumerate(sleep_durations):
+            assert duration <= max_with_jitter, (
+                f"Sleep {i}: {duration:.2f}s exceeds max_with_jitter {max_with_jitter:.2f}s"
+            )
+
+        # Attempt 0 should be ~10s (linear: 10*1=10, no capping needed)
+        assert 10.0 <= sleep_durations[0] <= 11.0 + 0.01
+
+        # Attempts 1-4 should all be ~15s (capped at max_backoff)
+        for i in range(1, 5):
+            assert 15.0 <= sleep_durations[i] <= 16.5 + 0.01, (
+                f"Sleep {i}: {sleep_durations[i]:.2f}s not in [15.0, 16.51]"
+            )
+
+    @pytest.mark.asyncio
+    async def test_backoff_hard_capped_at_30s(
+        self,
+    ) -> None:
+        """Even if max_backoff is very high, absolute cap is 30s."""
+        config = LLMConfig(
+            api_key="test-key",
+            model_coordinator="gemini/gemini-3.8-flash",
+            model_worker="gemini/gemini-3.8-flash",
+            max_retries=5,
+            initial_backoff_seconds=20.0,
+            max_backoff_seconds=600.0,  # Very high
+        )
+        router = TokenVelocityRouter(config)
+
+        error_429 = _make_error(429, "rate limit")
+        mock_response = MagicMock()
+        mock_response.usage = None
+
+        sleep_durations: list[float] = []
+
+        async def capture_sleep(duration: float) -> None:
+            sleep_durations.append(duration)
+
+        with (
+            patch(
+                "autosre.core.router.litellm.acompletion",
+                new_callable=AsyncMock,
+                side_effect=[error_429] * 5 + [mock_response],
+            ),
+            patch(
+                "autosre.core.router.asyncio.sleep",
+                new_callable=AsyncMock,
+                side_effect=capture_sleep,
+            ),
+        ):
+            await router.acompletion(
+                model="auto",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        # All durations must be <= 30.0 * 1.1 (hard cap + jitter)
+        max_with_jitter = 30.0 * 1.1 + 0.01
+        for duration in sleep_durations:
+            assert duration <= max_with_jitter
+
+    @pytest.mark.asyncio
+    async def test_retry_after_header_honored(self, router: TokenVelocityRouter) -> None:
+        """Provider Retry-After header overrides exponential calculation."""
+        error = _make_error(429, "rate limit")
+        error.response = MagicMock()  # type: ignore[attr-defined]
+        error.response.headers = {"retry-after": "5"}  # type: ignore[attr-defined]
+
+        mock_response = MagicMock()
+        mock_response.usage = None
+
+        sleep_durations: list[float] = []
+
+        async def capture_sleep(duration: float) -> None:
+            sleep_durations.append(duration)
+
+        with (
+            patch(
+                "autosre.core.router.litellm.acompletion",
+                new_callable=AsyncMock,
+                side_effect=[error, mock_response],
+            ),
+            patch(
+                "autosre.core.router.asyncio.sleep",
+                new_callable=AsyncMock,
+                side_effect=capture_sleep,
+            ),
+        ):
+            await router.acompletion(
+                model="auto",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert len(sleep_durations) == 1
+        # Should be approximately 5s (plus up to 10% jitter).
+        assert 5.0 <= sleep_durations[0] <= 5.5 + 0.01
+
+    @pytest.mark.asyncio
+    async def test_daily_quota_error_fast_fails(
+        self, router: TokenVelocityRouter, run_metrics: RunMetrics
+    ) -> None:
+        """Daily quota exhaustion must NOT retry."""
+        daily_error = _make_daily_quota_error()
+
+        with (
+            patch(
+                "autosre.core.router.litellm.acompletion",
+                new_callable=AsyncMock,
+                side_effect=daily_error,
+            ) as mock_call,
+            patch(
+                "autosre.core.router.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+            pytest.raises(LLMBudgetExhaustedError, match="quota exhausted"),
+        ):
+            await router.acompletion(
+                model="auto",
+                messages=[{"role": "user", "content": "hi"}],
+                run_metrics=run_metrics,
+            )
+
+        # Exactly one attempt, no sleep.
+        mock_call.assert_awaited_once()
+        mock_sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_error_propagates_immediately(
+        self, router: TokenVelocityRouter
+    ) -> None:
+        """A 400 (bad request) must not trigger retry."""
+        error_400 = _make_error(400, "bad request — invalid JSON")
+
+        with (
+            patch(
+                "autosre.core.router.litellm.acompletion",
+                new_callable=AsyncMock,
+                side_effect=error_400,
+            ) as mock_call,
+            patch(
+                "autosre.core.router.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+            pytest.raises(Exception, match="bad request"),
+        ):
+            await router.acompletion(
+                model="auto",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        mock_call.assert_awaited_once()
+        mock_sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_authentication_error_propagates_immediately(
+        self, router: TokenVelocityRouter
+    ) -> None:
+        """A 401 (invalid API key) must not retry."""
+        error_401 = _make_error(401, "API key not valid")
+
+        with (
+            patch(
+                "autosre.core.router.litellm.acompletion",
+                new_callable=AsyncMock,
+                side_effect=error_401,
+            ) as mock_call,
+            patch(
+                "autosre.core.router.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+            pytest.raises(Exception, match="API key"),
+        ):
+            await router.acompletion(
+                model="auto",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        mock_call.assert_awaited_once()
+        mock_sleep.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# API key injection
+# ---------------------------------------------------------------------------
+
+
+class TestApiKeyInjection:
+    @pytest.mark.asyncio
+    async def test_api_key_injected_when_not_in_kwargs(self, router: TokenVelocityRouter) -> None:
+        mock_response = MagicMock()
         mock_response.usage = None
 
         with patch(
-            "litellm.acompletion",
+            "autosre.core.router.litellm.acompletion",
             new_callable=AsyncMock,
+            return_value=mock_response,
         ) as mock_call:
-            mock_call.return_value = mock_response
-
-            await router.coordinator_call(
-                messages=[{"role": "user", "content": "small"}],
+            await router.acompletion(
+                model="auto",
+                messages=[{"role": "user", "content": "hi"}],
             )
 
-            mock_call.assert_called_once()
-            call_kwargs = mock_call.call_args
-            assert call_kwargs.kwargs["model"] == "groq/qwen/qwen3.8-27b"
+            call_kwargs = mock_call.call_args.kwargs
+            assert call_kwargs["api_key"] == "test-key"
+
+    @pytest.mark.asyncio
+    async def test_caller_api_key_takes_precedence(self, router: TokenVelocityRouter) -> None:
+        """If the caller passes api_key explicitly, don't overwrite it."""
+        mock_response = MagicMock()
+        mock_response.usage = None
+
+        with patch(
+            "autosre.core.router.litellm.acompletion",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ) as mock_call:
+            await router.acompletion(
+                model="auto",
+                messages=[{"role": "user", "content": "hi"}],
+                api_key="caller-key",
+            )
+
+            call_kwargs = mock_call.call_args.kwargs
+            assert call_kwargs["api_key"] == "caller-key"

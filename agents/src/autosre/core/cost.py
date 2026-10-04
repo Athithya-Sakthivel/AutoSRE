@@ -1,12 +1,11 @@
 """Cost calculation utilities for LLM token usage.
 
-The calculator is intentionally small and provider-agnostic at the call site.
-For Groq's supported prompt-caching models, ``prompt_tokens_details.cached_tokens``
-contains the number of prompt tokens billed at the 50% cached-input rate.
+Provider-agnostic calculator. Reads standard OpenAI-compatible usage
+objects (``prompt_tokens``, ``completion_tokens``) and applies per-1K
+rates from the LLMConfig.
 
-Important: ``prompt_tokens`` is the total input-token count and therefore already
-includes cached tokens. Cached tokens must be subtracted before applying the full
-input-token price, then priced separately at the cached-input rate.
+On free tiers (Gemini, etc.), the configured rates may be 0.0. The
+calculator handles zero-cost gracefully without division-by-zero errors.
 """
 
 from __future__ import annotations
@@ -15,8 +14,6 @@ from collections.abc import Mapping
 from typing import Any
 
 from autosre.config import LLMConfig
-
-_CACHE_DISCOUNT = 0.5
 
 
 def _usage_value(usage: Any, name: str, default: Any = None) -> Any:
@@ -38,16 +35,21 @@ def _non_negative_int(value: Any) -> int:
 
 
 def _cached_prompt_tokens(usage: Any) -> int:
-    """Extract Groq/OpenAI-compatible cached prompt tokens."""
+    """Extract cached prompt tokens from an OpenAI-compatible usage object.
+
+    Returns 0 when the provider does not report cached tokens (common
+    on free tiers or providers without prompt caching).
+    """
     details = _usage_value(usage, "prompt_tokens_details")
     if details is None:
         return 0
 
-    raw_cached = (
-        details.get("cached_tokens", 0)
-        if isinstance(details, Mapping)
-        else getattr(details, "cached_tokens", 0)
-    )
+    raw_cached: Any
+    if isinstance(details, Mapping):
+        raw_cached = details.get("cached_tokens", 0)
+    else:
+        raw_cached = getattr(details, "cached_tokens", 0)
+
     return _non_negative_int(raw_cached)
 
 
@@ -59,12 +61,10 @@ def calculate_cost(
     """Calculate input/output cost from a LiteLLM usage object.
 
     Args:
-        usage: LiteLLM usage object or mapping. ``prompt_tokens_details.cached_tokens``
-            is read when present.
-        model_name: The resolved model identifier returned by LiteLLM. It may be
-            represented as a native Groq ID or with LiteLLM's ``groq/`` prefix.
-        config: LLM configuration containing per-1K-token pricing. ``None`` keeps
-            the token counts but returns zero cost, which is useful in tests.
+        usage: LiteLLM usage object or mapping.
+        model_name: The resolved model identifier returned by LiteLLM.
+        config: LLM configuration containing per-1K-token pricing.
+            ``None`` keeps the token counts but returns zero cost.
 
     Returns:
         ``(prompt_tokens, completion_tokens, cached_tokens, cost_usd)``.
@@ -75,9 +75,7 @@ def calculate_cost(
     prompt_tokens = _non_negative_int(_usage_value(usage, "prompt_tokens", 0))
     completion_tokens = _non_negative_int(_usage_value(usage, "completion_tokens", 0))
 
-    # Groq reports cached tokens inside prompt_tokens_details and those tokens are
-    # included in prompt_tokens. Clamp defensively so malformed provider data can
-    # never produce a negative uncached-token count or overcharge the request.
+    # Defensively clamp cached tokens to not exceed total prompt tokens.
     cached_tokens = min(_cached_prompt_tokens(usage), prompt_tokens)
 
     if config is None:
@@ -90,12 +88,14 @@ def calculate_cost(
         input_cost_per_1k = float(config.input_cost_per_1k_worker)
         output_cost_per_1k = float(config.output_cost_per_1k_worker)
 
+    # On free tiers, both rates are 0.0. The math still works: 0 * N = 0.
+    # Cached tokens are priced the same as uncached tokens on most
+    # providers; override this in config if your provider offers a
+    # cache discount.
     uncached_prompt_tokens = prompt_tokens - cached_tokens
 
     input_cost = (uncached_prompt_tokens / 1000.0) * input_cost_per_1k
-
-    cached_input_cost = (cached_tokens / 1000.0) * input_cost_per_1k * _CACHE_DISCOUNT
-
+    cached_input_cost = (cached_tokens / 1000.0) * input_cost_per_1k
     output_cost = (completion_tokens / 1000.0) * output_cost_per_1k
 
     total_cost = input_cost + cached_input_cost + output_cost
@@ -109,13 +109,12 @@ def calculate_cost(
 
 
 def _canonical_model_id(model_name: Any) -> str:
-    """Normalize a LiteLLM Groq model ID for comparison."""
-    value = str(model_name or "").strip().lower()
+    """Normalize a LiteLLM model ID for comparison.
 
-    if value.startswith("groq/"):
-        value = value[len("groq/") :]
-
-    return value
+    Strips whitespace and lowercases for case-insensitive matching.
+    Provider-agnostic: does not strip any specific prefix.
+    """
+    return str(model_name or "").strip().lower()
 
 
 def _is_coordinator_model(
@@ -124,13 +123,9 @@ def _is_coordinator_model(
 ) -> bool:
     """Return whether ``model_name`` identifies the configured coordinator.
 
-    The comparison accepts the common representations produced by this project:
-
-        openai/gpt-oss-20b
-        groq/openai/gpt-oss-20b
-
-    The final path segment is also accepted for compatibility with older
-    configuration that omitted the provider namespace.
+    Accepts any provider prefix. Compares the full canonical ID first,
+    then falls back to comparing the final path segment for robustness
+    against provider-prefix drift.
     """
     coordinator = _canonical_model_id(config.model_coordinator)
     resolved = _canonical_model_id(model_name)
@@ -141,4 +136,8 @@ def _is_coordinator_model(
     if resolved == coordinator:
         return True
 
+    # Fallback: compare the model portion after the last slash.
     return resolved.rsplit("/", 1)[-1] == coordinator.rsplit("/", 1)[-1]
+
+
+__all__ = ["calculate_cost"]

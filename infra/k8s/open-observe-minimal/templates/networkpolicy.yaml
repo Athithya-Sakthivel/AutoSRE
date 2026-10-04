@@ -6,21 +6,32 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "open-observe-minimal.labels" . | nindent 4 }}
+
 spec:
   podSelector:
     matchLabels:
       {{- include "open-observe-minimal.selectorLabels" . | nindent 6 }}
+
+  # OpenObserve both receives telemetry and sends alert notifications,
+  # so both ingress and egress must be explicitly defined.
   policyTypes: [Ingress, Egress]
+
   ingress:
+    # Allow pods in the same namespace to reach OpenObserve's HTTP API.
     - from:
         - podSelector: {}
+
+        # Permit any explicitly configured additional trusted sources.
         {{- with .Values.networkPolicy.additionalFrom }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+
       ports:
         - protocol: TCP
           port: 5080
+
   egress:
+    # DNS is required for service-name resolution inside the cluster.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -28,6 +39,24 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
+
+    # HTTPS egress is retained for external integrations and image/metadata
+    # paths that may require TLS connections.
     - ports:
         - { protocol: TCP, port: 443 }
+
+    # OpenObserve alert destinations POST directly to the AutoSRE agent.
+    #
+    # Destination:
+    #   http://autosre-agent.sre.svc.cluster.local:8000/alerts
+    #
+    # The namespaceSelector limits this rule to workloads in the "sre"
+    # namespace while allowing TCP/8000 traffic to the agent service.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: sre
+      ports:
+        - protocol: TCP
+          port: 8000
 {{- end }}

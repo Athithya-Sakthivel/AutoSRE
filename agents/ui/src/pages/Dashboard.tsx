@@ -1,14 +1,3 @@
-/**
- * Dashboard page.
- *
- * Layout:
- *   - KPI strip: Active, Awaiting Approval, No Action, Avg Active MTTR, Total Cost
- *   - Two-column: Active incidents (left), Recently Resolved (right)
- *
- * Stale incidents (running for more than one hour) are visually flagged.
- * They indicate the agent is stuck and warrant operator investigation.
- */
-
 import type { JSX } from "react";
 import { useNavigate } from "react-router";
 import { useIncidentList } from "../hooks/useIncidents";
@@ -16,27 +5,13 @@ import { IncidentCard } from "../components/IncidentCard";
 import { EmptyState } from "../components/EmptyState";
 import { SkeletonCardList } from "../components/LoadingState";
 import { formatCost, formatCount, formatDuration } from "../lib/utils";
-import type { Incident, IncidentStatus } from "../lib/types";
+import type { Incident } from "../lib/types";
 
 // Stale threshold: incidents running for over an hour are flagged.
 const STALE_THRESHOLD_MS = 60 * 60 * 1000;
 
-function isTerminal(status: IncidentStatus): boolean {
-  return (
-    status === "resolved" ||
-    status === "failed" ||
-    status === "no_action" ||
-    status === "blocked" ||
-    status === "complete"
-  );
-}
-
-function isNoAction(status: IncidentStatus): boolean {
-  return status === "no_action";
-}
-
 function isStale(incident: Incident): boolean {
-  if (incident.status !== "running") {
+  if (incident.status !== "running" && incident.status !== "investigating") {
     return false;
   }
   const started = new Date(incident.started_at).getTime();
@@ -60,17 +35,31 @@ export function DashboardPage(): JSX.Element {
 
   const items = query.data?.items ?? [];
 
-  const active = items.filter((incident) => !isTerminal(incident.status));
+  // Categorize incidents by status
+  const active = items.filter(
+    (incident) =>
+      incident.status === "running" ||
+      incident.status === "investigating" ||
+      incident.status === "awaiting_approval",
+  );
+
+  const awaitingApproval = items.filter(
+    (incident) => incident.status === "awaiting_approval",
+  );
+
+  const noAction = items
+    .filter((incident) => incident.status === "no_action")
+    .slice(0, 10);
+
+  const failed = items
+    .filter((incident) => incident.status === "failed")
+    .slice(0, 10);
+
   const resolved = items
     .filter((incident) => incident.status === "resolved")
     .slice(0, 10);
-  const awaitingCount = items.filter(
-    (incident) => incident.status === "awaiting_approval",
-  ).length;
-  const noActionCount = items.filter((incident) =>
-    isNoAction(incident.status),
-  ).length;
 
+  // Calculate metrics
   const totalCost = items.reduce((sum, incident) => sum + incident.cost_usd, 0);
 
   const resolvedForMttr = items.filter(
@@ -105,7 +94,8 @@ export function DashboardPage(): JSX.Element {
         </button>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+      {/* KPI Cards */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <StatCard
           label="Active"
           value={formatCount(active.length)}
@@ -113,13 +103,22 @@ export function DashboardPage(): JSX.Element {
         />
         <StatCard
           label="Awaiting Approval"
-          value={formatCount(awaitingCount)}
-          color={awaitingCount > 0 ? "text-status-awaiting" : "text-slate-400"}
+          value={formatCount(awaitingApproval.length)}
+          color={
+            awaitingApproval.length > 0
+              ? "text-status-awaiting"
+              : "text-slate-400"
+          }
         />
         <StatCard
           label="No Action"
-          value={formatCount(noActionCount)}
-          color={noActionCount > 0 ? "text-slate-300" : "text-slate-400"}
+          value={formatCount(noAction.length)}
+          color={noAction.length > 0 ? "text-slate-300" : "text-slate-400"}
+        />
+        <StatCard
+          label="Failed"
+          value={formatCount(failed.length)}
+          color={failed.length > 0 ? "text-status-failed" : "text-slate-400"}
         />
         <StatCard
           label="Avg Active MTTR"
@@ -133,6 +132,7 @@ export function DashboardPage(): JSX.Element {
         />
       </div>
 
+      {/* Error State */}
       {query.isError && (
         <div className="rounded-lg border border-status-failed/30 bg-status-failed/5 p-4 text-sm text-status-failed">
           <span className="font-medium">Failed to load incidents: </span>
@@ -147,11 +147,14 @@ export function DashboardPage(): JSX.Element {
         </div>
       )}
 
+      {/* Loading State */}
       {query.isPending && <SkeletonCardList count={4} />}
 
+      {/* Success State */}
       {query.isSuccess && (
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
-          <div className="space-y-3 lg:col-span-3">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+          {/* Active Incidents */}
+          <div className="space-y-3">
             <h2 className="text-sm font-semibold text-slate-300">
               Active ({active.length})
             </h2>
@@ -175,9 +178,10 @@ export function DashboardPage(): JSX.Element {
             )}
           </div>
 
-          <div className="space-y-3 lg:col-span-2">
+          {/* Recently Resolved */}
+          <div className="space-y-3">
             <h2 className="text-sm font-semibold text-slate-300">
-              Recently Resolved
+              Recently Resolved ({resolved.length})
             </h2>
 
             {resolved.length === 0 ? (
@@ -195,6 +199,54 @@ export function DashboardPage(): JSX.Element {
                     compact
                   />
                 ))}
+              </div>
+            )}
+          </div>
+
+          {/* Failed & No Action */}
+          <div className="space-y-6">
+            {/* Recently Failed */}
+            <div className="space-y-3">
+              <h2 className="text-sm font-semibold text-slate-300">
+                Recently Failed ({failed.length})
+              </h2>
+
+              {failed.length === 0 ? (
+                <EmptyState
+                  title="No failed incidents"
+                  description="Failed incidents will appear here when the agent cannot resolve an issue."
+                />
+              ) : (
+                <div className="space-y-2">
+                  {failed.map((incident) => (
+                    <IncidentCard
+                      key={incident.incident_id}
+                      incident={incident}
+                      onSelect={handleSelect}
+                      compact
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* No Action */}
+            {noAction.length > 0 && (
+              <div className="space-y-3">
+                <h2 className="text-sm font-semibold text-slate-300">
+                  No Action ({noAction.length})
+                </h2>
+
+                <div className="space-y-2">
+                  {noAction.map((incident) => (
+                    <IncidentCard
+                      key={incident.incident_id}
+                      incident={incident}
+                      onSelect={handleSelect}
+                      compact
+                    />
+                  ))}
+                </div>
               </div>
             )}
           </div>

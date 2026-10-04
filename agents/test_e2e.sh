@@ -19,6 +19,7 @@
 #
 # Usage
 # -----
+#   cd agents
 #   bash test_e2e.sh
 #   bash test_e2e.sh --test-locally
 #   bash test_e2e.sh --test-locally --incident-id=INC-003
@@ -28,7 +29,27 @@
 # -----------
 #   LLM_API_KEY              Required for --run and --test-locally.
 #                            Mapped to AUTOSRE_LLM__API_KEY below.
+#                            Must be a Google AI Studio API key (AIza...).
 #   AUTOSRE_ADMIN__SECRET    Optional; harness generates one if unset.
+#
+# LLM provider
+# ------------
+#   The harness uses Google Gemini via LiteLLM's ``gemini/`` provider
+#   route. Model IDs use the canonical LiteLLM form:
+#
+#       gemini/gemini-3.8-flash
+#
+#   LiteLLM infers the provider from the prefix and routes to the
+#   Google AI Studio endpoint automatically. No base_url override is
+#   needed for standard Gemini API access.
+#
+#   Cost variables are set to Gemini's published Standard-tier rates
+#   so the eval harness can project production costs accurately, even
+#   though the free tier bills $0.00.
+#
+#   Retry and backoff parameters control how the agent handles Gemini
+#   free-tier rate limits (RPM/TPM/RPD). All backoff sleep time is
+#   recorded in RunMetrics so MTTR reporting excludes provider waits.
 #
 # Slack (optional)
 # ----------------
@@ -50,7 +71,6 @@
 #   The harness exports Slack vars ONLY when AUTOSRE_SLACK__BOT_TOKEN is
 #   non-empty. Empty-string exports would trigger Settings() validation
 #   and fail startup.
-#
 #
 # Strong defaults for --test-locally (override via env)
 # -----------------------------------------------------
@@ -78,7 +98,7 @@ MODE="run"
 INCIDENT_ID=""
 
 usage() {
-    sed -n '2,72p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,80p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -130,39 +150,73 @@ PORT_FORWARDS=(
 
 mkdir -p "$PF_LOG_DIR"
 
-# -----------------------------------------------------------------------------
-# LLM provider configuration
-# -----------------------------------------------------------------------------
 
-export AUTOSRE_LLM__PROVIDER="${AUTOSRE_LLM__PROVIDER:-groq}"
-export AUTOSRE_LLM__BASE_URL="${AUTOSRE_LLM__BASE_URL:-https://api.groq.com/openai/v1}"
-export AUTOSRE_LLM__MODEL_COORDINATOR="${AUTOSRE_LLM__MODEL_COORDINATOR:-qwen/qwen3.8-27b}"
-export AUTOSRE_LLM__MODEL_WORKER="${AUTOSRE_LLM__MODEL_WORKER:-openai/gpt-oss-20b}"
+# -----------------------------------------------------------------------------
+# LLM provider configuration — Google Gemini via LiteLLM
+# -----------------------------------------------------------------------------
+#
+# Model IDs use the LiteLLM canonical form: gemini/<google-model-id>.
+# LiteLLM infers the provider from the "gemini/" prefix and routes to
+# the Google AI Studio endpoint. No base_url override is needed.
+#
+# Both coordinator and worker default to the same model because Gemini
+# 3.8 Flash has identical pricing and context window for both tiers.
+# The router still functions correctly as a pass-through; split to a
+# cheaper model later when paid-tier pricing diverges.
+#
+# API key: a single Google AI Studio key (AIza...) serves both the
+# agent and the DeepEval judge. No separate GROQ_API_KEY is needed.
+
+# Model selection. Override to test alternative Gemini models:
+#   gemini/gemini-3.5-flash-lite   (higher RPD on free tier)
+#   gemini/gemini-3.7-flash        (same pricing as 3.8)
+export AUTOSRE_LLM__MODEL_COORDINATOR="${AUTOSRE_LLM__MODEL_COORDINATOR:-gemini/gemini-3.8-flash}"
+export AUTOSRE_LLM__MODEL_WORKER="${AUTOSRE_LLM__MODEL_WORKER:-gemini/gemini-3.5-flash-lite}"
+
+# API key. Accepts either LLM_API_KEY (legacy) or AUTOSRE_LLM__API_KEY.
 export AUTOSRE_LLM__API_KEY="${AUTOSRE_LLM__API_KEY:-${LLM_API_KEY:-}}"
 
-export AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR:-0.0008}"
-export AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR:-0.004}"
-export AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER:-0.000075}"
-export AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER:-0.0003}"
+# Token pricing (USD / 1K tokens) — Gemini 3.x Standard tier.
+# Free tier bills $0.00, but the eval harness uses these rates to
+# project production costs and validate cost-efficiency constraints.
+# Google raises prices on Jan 1, 2027: update to $0.0015 / $0.0075.
+export AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR:-0.00075}"
+export AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR:-0.00375}"
+export AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER:-0.00075}"
+export AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER:-0.00375}"
+
+# Retry and backoff for transient provider errors (429, 500, 503).
+# Gemini free tier enforces RPM/TPM/RPD limits. The router retries
+# with exponential backoff + jitter and records all sleep time in
+# RunMetrics so MTTR reporting excludes provider waits.
+export AUTOSRE_LLM__MAX_RETRIES="${AUTOSRE_LLM__MAX_RETRIES:-5}"
+export AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS="${AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS:-2.0}"
+export AUTOSRE_LLM__MAX_BACKOFF_SECONDS="${AUTOSRE_LLM__MAX_BACKOFF_SECONDS:-60.0}"
+
+# Confidence thresholds control when the agent proposes actions.
+# Since demo incidents are intentionally triggered with clear signals,
+# lower thresholds are appropriate. For production, raise these.
+export AUTOSRE_SAFETY__CONFIDENCE_PROPOSE="${AUTOSRE_SAFETY__CONFIDENCE_PROPOSE:-0.55}"
+export AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH="${AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH:-0.80}"
+export AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP="${AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP:-0.40}"
+export AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT="${AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT:-0.05}"
 
 # -----------------------------------------------------------------------------
 # Eval judge configuration
 # -----------------------------------------------------------------------------
-# The judge uses the openai/ prefix with an explicit base_url override.
-# LiteLLM's OpenAI adapter honors base_url and routes the request to
-# Groq's OpenAI-compatible endpoint. This avoids LiteLLM's Groq-specific
-# adapter and its provider-detection bug (issue #14807).
-# The API key is read from settings by eval/conftest.py.
+# The judge uses the same Gemini model as the agent. DeepEval's
+# LiteLLMModel constructor accepts the canonical LiteLLM model ID
+# and passes it through to litellm.completion(). No base_url override
+# is needed for standard Google AI Studio access.
+#
+# The judge does NOT set temperature=0. Google's Gemini 3 documentation
+# warns that lowering temperature below the default (1.0) can degrade
+# reasoning quality and cause infinite generation loops. Instead, we
+# use generation_kwargs.reasoning_effort to control depth.
 
-export AUTOSRE_EVAL__JUDGE_MODEL="${AUTOSRE_EVAL__JUDGE_MODEL:-groq/openai/gpt-oss-20b}"
-export AUTOSRE_EVAL__JUDGE_BASE_URL="${AUTOSRE_EVAL__JUDGE_BASE_URL:-$AUTOSRE_LLM__BASE_URL}"
+export AUTOSRE_EVAL__JUDGE_MODEL="${AUTOSRE_EVAL__JUDGE_MODEL:-gemini/gemini-3.5-flash-lite}"
 export AUTOSRE_EVAL__JUDGE_API_KEY="${AUTOSRE_EVAL__JUDGE_API_KEY:-$AUTOSRE_LLM__API_KEY}"
 
-# The Groq adapter reads GROQ_API_KEY from the environment. The agent's
-# own LLM calls do not need this because TokenVelocityRouter passes
-# api_key explicitly; the judge does because DeepEval's LiteLLMModel
-# routes through LiteLLM's native Groq provider.
-export GROQ_API_KEY="${GROQ_API_KEY:-$AUTOSRE_LLM__API_KEY}"
 
 # -----------------------------------------------------------------------------
 # Slack configuration (optional, opt-in by bot token presence)
@@ -368,9 +422,10 @@ if [[ "$MODE" != "ci" ]]; then
     pass "LLM API key present"
 fi
 
-log "LLM provider:   $AUTOSRE_LLM__PROVIDER"
 log "Coordinator:    $AUTOSRE_LLM__MODEL_COORDINATOR"
 log "Worker:         $AUTOSRE_LLM__MODEL_WORKER"
+log "Max retries:    $AUTOSRE_LLM__MAX_RETRIES"
+log "Backoff:        ${AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS}s..${AUTOSRE_LLM__MAX_BACKOFF_SECONDS}s"
 if [[ "$MODE" != "run" ]]; then
     log "Judge model:    $AUTOSRE_EVAL__JUDGE_MODEL"
 fi
@@ -953,6 +1008,7 @@ PY
 else
     header "PHASE 9: Contract Verification (skipped — $MODE mode)"
 fi
+
 # =============================================================================
 # PHASE 10 — Interactive banner (run mode only)
 # =============================================================================

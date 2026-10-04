@@ -1,11 +1,7 @@
-# Webhook destination. All 12 alerts share this.
+# OpenObserve alert delivery destination.
 #
-# Notes:
-#   - `method` is lowercase per the schema enum: post | put | get
-#   - `type` = "http" for webhooks (default is http)
-#   - `template` binds the destination to the alert template defined in
-#     templates.tf. Without it, O2 treats the destination as a pipeline
-#     destination and rejects it as an alert target.
+# The destination is Terraform-managed. It points at the AutoSRE agent, while
+# stream creation remains completely outside Terraform.
 
 resource "openobserve_alert_destination" "autosre_webhook" {
   name     = "autosre-agent-webhook"
@@ -17,4 +13,8 @@ resource "openobserve_alert_destination" "autosre_webhook" {
   headers = {
     "Content-Type" = "application/json"
   }
+
+  depends_on = [
+    openobserve_alert_template.autosre_webhook
+  ]
 }

@@ -5,30 +5,40 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "otel-daemonset.labels" . | nindent 4 }}
+
 data:
   config.yaml: |
     receivers:
-      # Node-local kubelet metrics. Each DaemonSet pod scrapes its own node.
-      # Receiver renamed from kubeletstats to kubelet_stats in v0.152.0.
-      # The deprecated alias kubeletstats remains available but is not used.
+      # ------------------------------------------------------------------------
+      # Node-local Kubernetes metrics
+      # ------------------------------------------------------------------------
       #
-      # The endpoint uses the node's host IP from the downward API rather
-      # than the node name. The node name requires DNS resolution, which
-      # fails in clusters that do not resolve node hostnames from pods.
+      # Each DaemonSet pod scrapes the kubelet on the same node.
+      #
+      # kubelet_stats is the current component name. The endpoint uses the
+      # host IP injected by the DaemonSet downward API.
+      #
+      # The two *_limit_utilization metrics below are the metric streams used
+      # by the OpenObserve PromQL alerts.
       kubelet_stats:
         collection_interval: {{ .Values.collectionInterval }}
         auth_type: serviceAccount
         endpoint: "https://${env:K8S_NODE_IP}:10250"
+
+        # Staging kind uses its node certificate setup without exposing a
+        # certificate-authority file to this collector. Authentication still
+        # uses the Kubernetes service account.
         insecure_skip_verify: true
+
         metric_groups:
           - node
           - pod
           - container
-        # Only the 12 essential metrics are enabled. Everything else is
-        # explicitly disabled to reduce volume and to avoid metric families
-        # that OpenObserve cannot serialize to Parquet.
+
+        # Keep the metric surface intentionally small. The enabled metrics are
+        # the ones required by the SRE alerting/investigation contract.
         metrics:
-          # Node resource usage
+          # Node resource usage.
           k8s.node.cpu.usage:
             enabled: true
           k8s.node.memory.usage:
@@ -38,7 +48,7 @@ data:
           k8s.node.network.io:
             enabled: true
 
-          # Pod resource usage and limits
+          # Pod resource usage and alerting metrics.
           k8s.pod.cpu.usage:
             enabled: true
           k8s.pod.memory.usage:
@@ -50,7 +60,7 @@ data:
           k8s.pod.uptime:
             enabled: true
 
-          # Container resource usage
+          # Container resource usage.
           container.cpu.usage:
             enabled: true
           container.memory.usage:
@@ -58,8 +68,13 @@ data:
           container.uptime:
             enabled: true
 
-          # Disabled: node paging faults trigger ArrowJsonEncodeError
-          # in OpenObserve 0.14.x when written to Parquet.
+          # --------------------------------------------------------------------
+          # Explicitly disabled metric families
+          # --------------------------------------------------------------------
+          #
+          # These metrics are not required by the SRE alert contract and the
+          # filesystem/page-fault families have historically caused serialization
+          # problems in the OpenObserve ingestion path.
           k8s.node.memory.page_faults:
             enabled: false
           k8s.node.memory.major_page_faults:
@@ -77,8 +92,6 @@ data:
           k8s.node.filesystem.capacity:
             enabled: false
 
-          # Disabled: container and pod filesystem metrics trigger
-          # ArrowJsonEncodeError in OpenObserve 0.14.x.
           container.filesystem.available:
             enabled: false
           container.filesystem.capacity:
@@ -92,7 +105,6 @@ data:
           k8s.pod.filesystem.usage:
             enabled: false
 
-          # Disabled: container memory details not required for SRE.
           container.memory.available:
             enabled: false
           container.memory.major_page_faults:
@@ -106,7 +118,6 @@ data:
           container.cpu.time:
             enabled: false
 
-          # Disabled: pod network and cpu details not required for SRE.
           k8s.pod.network.errors:
             enabled: false
           k8s.pod.network.io:
@@ -114,15 +125,119 @@ data:
           k8s.pod.cpu.time:
             enabled: false
 
+      # ------------------------------------------------------------------------
+      # Kubernetes container log collection
+      # ------------------------------------------------------------------------
+      #
+      # file_log is the current receiver name in Collector 0.160.0.
+      #
+      # The DaemonSet mounts:
+      #   host /var/log/pods
+      #       ->
+      #   container /var/log/pods
+      #
+      # so this receiver can read the node-local Kubernetes container logs.
+      file_log/kubernetes:
+        include:
+          - /var/log/pods/*/*/*.log
+
+        # Do not ingest the observability stack's own logs.
+        # The patterns intentionally target the pod directories by pod name.
+        exclude:
+          - /var/log/pods/*_openobserve-*_*/*/*.log
+          - /var/log/pods/*_otel-gateway-*_*/*/*.log
+          - /var/log/pods/*_otel-daemonset-daemonset-*_*/*/*.log
+
+        # Keep the source path available to the container parser so Kubernetes
+        # pod/container identity can be derived from the filepath.
+        include_file_path: true
+        include_file_name: false
+
+        # Read existing files on first startup. File offsets are tracked by the
+        # file_storage extension below so normal collector restarts do not need
+        # to replay the same offsets from scratch.
+        start_at: beginning
+        max_log_size: 1MiB
+
+        # Persist reader checkpoints through the collector's storage extension.
+        storage: file_storage/filelog
+
+        # Parse Kubernetes CRI/container log framing and recover Kubernetes
+        # metadata from the standard /var/log/pods path.
+        operators:
+          - id: container-parser
+            type: container
+            add_metadata_from_filepath: true
+
     processors:
-      # MUST be first. limit_mib is 80% of the 256Mi container limit.
-      # spike_limit_mib is 25% of limit_mib.
+      # ------------------------------------------------------------------------
+      # Memory protection
+      # ------------------------------------------------------------------------
+      #
+      # Keep memory below the 256Mi container limit supplied by the deploy
+      # script. The collector receives both kubelet metrics and host logs.
       memory_limiter:
         check_interval: 2s
         limit_mib: 204
         spike_limit_mib: 51
 
-      # Drops metric families that OpenObserve cannot serialize to Parquet.
+      # ------------------------------------------------------------------------
+      # Kubernetes metadata enrichment
+      # ------------------------------------------------------------------------
+      #
+      # This is particularly important for file logs. It ensures the routing
+      # connector below can consistently inspect:
+      #
+      #   resource.attributes["k8s.container.name"]
+      #
+      # and makes pod/namespace/container metadata available in OpenObserve.
+      k8s_attributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata:
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.namespace.name
+            - k8s.node.name
+            - k8s.deployment.name
+            - k8s.statefulset.name
+            - k8s.daemonset.name
+            - k8s.job.name
+            - k8s.cronjob.name
+            - k8s.container.name
+            - k8s.replicaset.name
+          labels:
+            - tag_name: app.kubernetes.io/name
+              key: app.kubernetes.io/name
+              from: pod
+            - tag_name: app.kubernetes.io/component
+              key: app.kubernetes.io/component
+              from: pod
+            - tag_name: app.kubernetes.io/part-of
+              key: app.kubernetes.io/part-of
+              from: pod
+
+        # Prefer strong pod identity first, then pod+namespace, then the
+        # network connection as the final fallback.
+        pod_association:
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.uid
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.name
+              - from: resource_attribute
+                name: k8s.namespace.name
+          - sources:
+              - from: connection
+
+      # ------------------------------------------------------------------------
+      # OpenObserve compatibility filter
+      # ------------------------------------------------------------------------
+      #
+      # Keep this identical to the gateway-side defensive filter so metric
+      # ingestion behavior is consistent across both collector tiers.
       filter/drop_openobserve_incompatible:
         error_mode: ignore
         metrics:
@@ -134,7 +249,11 @@ data:
               - "^container\\.filesystem\\.(available|capacity|usage)$"
               - "^k8s\\.pod\\.filesystem\\.(available|capacity|usage)$"
 
-      # Adds cluster identity to every metric for cross-cluster queries.
+      # ------------------------------------------------------------------------
+      # Cluster identity
+      # ------------------------------------------------------------------------
+      #
+      # Keep these resource attributes identical to the gateway.
       resource/add_cluster:
         attributes:
           - key: cluster.name
@@ -144,14 +263,49 @@ data:
             value: "production"
             action: upsert
 
+      # Batch before export to reduce HTTP request overhead.
       batch:
-        send_batch_size: 512
-        send_batch_max_size: 1024
+        send_batch_size: 256
+        send_batch_max_size: 512
         timeout: 5s
 
+    connectors:
+      # ------------------------------------------------------------------------
+      # Log routing contract
+      # ------------------------------------------------------------------------
+      #
+      # The DaemonSet and gateway intentionally use the same destination names:
+      #
+      #   postgres -> postgres_logs
+      #   valkey   -> valkey_logs
+      #   everything else -> app_logs
+      #
+      # OpenObserve receives these through the stream-name HTTP header on the
+      # dedicated exporters below.
+      routing/logs:
+        default_pipelines:
+          - logs/app
+
+        table:
+          - condition: resource.attributes["k8s.container.name"] == "postgres"
+            pipelines:
+              - logs/postgres
+
+          - condition: resource.attributes["k8s.container.name"] == "valkey"
+            pipelines:
+              - logs/valkey
+
     exporters:
-      # The component otlp_http exporter appends /v1/metrics to the base URL.
-      # The base URL is correct here without a signal path.
+      # ------------------------------------------------------------------------
+      # Metrics exporter
+      # ------------------------------------------------------------------------
+      #
+      # No stream-name header is used for metrics. OpenObserve creates metric
+      # stream identities from metric names. This is how the required metric
+      # streams become:
+      #
+      #   k8s_pod_cpu_limit_utilization
+      #   k8s_pod_memory_limit_utilization
       otlp_http/openobserve:
         endpoint: "{{ .Values.openobserve.endpoint }}"
         headers:
@@ -168,22 +322,147 @@ data:
           max_interval: 30s
           max_elapsed_time: 300s
 
+      # ------------------------------------------------------------------------
+      # Dedicated application log stream
+      # ------------------------------------------------------------------------
+      otlp_http/openobserve_app_logs:
+        endpoint: "{{ .Values.openobserve.endpoint }}"
+        headers:
+          Authorization: "Basic ${env:OPENOBSERVE_TOKEN}"
+          stream-name: app_logs
+        compression: gzip
+        timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 2
+          queue_size: 1024
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
+      # ------------------------------------------------------------------------
+      # Dedicated PostgreSQL log stream
+      # ------------------------------------------------------------------------
+      otlp_http/openobserve_postgres_logs:
+        endpoint: "{{ .Values.openobserve.endpoint }}"
+        headers:
+          Authorization: "Basic ${env:OPENOBSERVE_TOKEN}"
+          stream-name: postgres_logs
+        compression: gzip
+        timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 2
+          queue_size: 1024
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
+      # ------------------------------------------------------------------------
+      # Dedicated Valkey log stream
+      # ------------------------------------------------------------------------
+      otlp_http/openobserve_valkey_logs:
+        endpoint: "{{ .Values.openobserve.endpoint }}"
+        headers:
+          Authorization: "Basic ${env:OPENOBSERVE_TOKEN}"
+          stream-name: valkey_logs
+        compression: gzip
+        timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 2
+          queue_size: 1024
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
     extensions:
+      # Collector readiness/liveness endpoint.
       health_check:
         endpoint: 0.0.0.0:13133
 
+      # Checkpoint storage for the Kubernetes file-log receiver.
+      #
+      # The DaemonSet mounts /tmp as writable because the container uses a
+      # read-only root filesystem.
+      file_storage/filelog:
+        directory: /tmp/otelcol-filelog
+        create_directory: true
+
     service:
-      extensions: [health_check]
+      extensions:
+        - health_check
+        - file_storage/filelog
+
       telemetry:
         logs:
           level: info
 
       pipelines:
+        # ----------------------------------------------------------------------
+        # Kubelet metrics
+        # ----------------------------------------------------------------------
         metrics:
-          receivers: [kubelet_stats]
+          receivers:
+            - kubelet_stats
           processors:
             - memory_limiter
             - filter/drop_openobserve_incompatible
             - resource/add_cluster
             - batch
-          exporters: [otlp_http/openobserve]
+          exporters:
+            - otlp_http/openobserve
+
+        # ----------------------------------------------------------------------
+        # Node-local Kubernetes logs
+        # ----------------------------------------------------------------------
+        #
+        # file_log reads /var/log/pods, the Kubernetes metadata processor
+        # enriches the records, then the routing connector selects one of the
+        # three dedicated OpenObserve streams.
+        logs/in:
+          receivers:
+            - file_log/kubernetes
+          processors:
+            - memory_limiter
+            - k8s_attributes
+            - resource/add_cluster
+            - batch
+          exporters:
+            - routing/logs
+
+        # Default application logs.
+        logs/app:
+          receivers:
+            - routing/logs
+          processors:
+            - resource/add_cluster
+            - batch
+          exporters:
+            - otlp_http/openobserve_app_logs
+
+        # PostgreSQL logs.
+        logs/postgres:
+          receivers:
+            - routing/logs
+          processors:
+            - resource/add_cluster
+            - batch
+          exporters:
+            - otlp_http/openobserve_postgres_logs
+
+        # Valkey logs.
+        logs/valkey:
+          receivers:
+            - routing/logs
+          processors:
+            - resource/add_cluster
+            - batch
+          exporters:
+            - otlp_http/openobserve_valkey_logs

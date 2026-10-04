@@ -18,7 +18,7 @@ RUN npm run build
 # =============================================================================
 # Stage 2: Python Builder
 # =============================================================================
-FROM docker.io/library/python:3.14.6-slim-bookworm@sha256:4c92ffcde4dd6f1ff72a24518f49fd4990b27134987dfa31a733badde66df9f8 AS py-builder
+FROM docker.io/library/python:3.14.8-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88 AS py-builder
 
 WORKDIR /app
 
@@ -54,7 +54,7 @@ RUN uv pip install dist/*.whl
 # =============================================================================
 # Stage 3: Production Runtime
 # =============================================================================
-FROM docker.io/library/python:3.14.6-slim-bookworm@sha256:4c92ffcde4dd6f1ff72a24518f49fd4990b27134987dfa31a733badde66df9f8
+FROM docker.io/library/python:3.14.8-slim-bookworm@sha256:c8137f4c460908c8763f281c8f22c431eb5c538514ba9553fc3a89c06b7cfb88
 
 # ---------------------------------------------------------------------------
 # Runtime user

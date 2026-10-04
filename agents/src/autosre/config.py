@@ -31,22 +31,18 @@ missing). Their absence fails fast at Settings() construction:
 
 Everything else has a safe default.
 
-## Judge model contract
+## Provider-agnostic model naming
 
-The eval judge is constructed by DeepEval's LiteLLMModel and passed to
-LiteLLM, which routes by the model-name prefix. The judge MUST use the
-``openai/`` prefix, not ``groq/``.
+Model IDs use the LiteLLM canonical form: ``<provider>/<model>``.
 
-Why: LiteLLM's OpenAI adapter honors an explicit ``api_base`` override,
-so ``model="openai/gpt-oss-20b"`` with ``base_url="https://api.groq.com/
-openai/v1"`` sends the request to Groq's OpenAI-compatible endpoint.
-This has been the documented pattern for OpenAI-compatible providers for
-years and does not touch LiteLLM's Groq-specific code path.
+    gemini/gemini-3.8-flash
+    openai/gpt-4o-mini
+    anthropic/claude-3-5-sonnet
 
-Using ``groq/openai/gpt-oss-20b`` activates LiteLLM's Groq adapter, which
-has a provider-detection bug (issue #14807) that strips the model to
-``gpt-oss-20b`` and reverts to the OpenAI endpoint — a 404. Do not use
-the ``groq/`` prefix for the judge, ever.
+The application passes these strings through to LiteLLM without
+modification. LiteLLM infers the provider from the prefix and routes
+to the correct endpoint. Do not set ``base_url`` unless you are routing
+through a LiteLLM proxy or a self-hosted gateway.
 
 ## Deployment environment sync
 
@@ -55,18 +51,14 @@ Two fields carry the deployment environment:
     Settings.deployment_environment         top-level, read by telemetry
     OTelConfig.deployment_environment       nested, read by OTel exporters
 
-A model_validator keeps them in sync. The rule is: an explicitly-set
-value wins; an unset side (equal to "development") follows the set side.
-This means either env var works:
-
-    AUTOSRE_DEPLOYMENT_ENVIRONMENT=staging
-    AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT=staging
+A model_validator keeps them in sync.
 
 ## Cost defaults
 
-Per-1K-token rates match Groq's public pricing for the default models.
-Override via AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR etc. when using
-a different provider.
+Per-1K-token rates default to 0.0 to reflect free-tier usage. Override
+via AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR etc. when using a paid
+tier or a different provider. The evaluation harness uses the
+configured values to project production costs.
 """
 
 from __future__ import annotations
@@ -84,21 +76,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _DEFAULT_DEPLOYMENT_ENVIRONMENT = "development"
 
-# Judge model uses the Groq provider prefix. The model-name portion may
-# contain a slash (openai/gpt-oss-20b); LiteLLM preserves it once the
-# provider is explicit. Without the groq/ prefix, LiteLLM infers
-# provider=openai and strips to gpt-oss-20b, which 404s.
-_DEFAULT_JUDGE_MODEL = "groq/openai/gpt-oss-20b"
-
-_DEFAULT_JUDGE_BASE_URL = "https://api.groq.com/openai/v1"
-
 # ---------------------------------------------------------------------------
 # LLM
 # ---------------------------------------------------------------------------
 
 
 class LLMConfig(BaseSettings):
-    """LLM provider and per-model pricing."""
+    """LLM provider and per-model pricing.
+
+    Provider-agnostic: the model ID carries the provider prefix
+    (e.g. ``gemini/gemini-3.8-flash``) and LiteLLM routes accordingly.
+    """
 
     model_config = SettingsConfigDict(
         env_prefix="AUTOSRE_LLM__",
@@ -110,47 +98,64 @@ class LLMConfig(BaseSettings):
         ...,
         description="API key for the LLM provider",
     )
-    provider: str = Field(
-        default="groq",
-        description="Provider name (groq, openai, anthropic, ...)",
-    )
-    base_url: str = Field(
-        default="https://api.groq.com/openai/v1",
-        description="Base URL for the provider's OpenAI-compatible endpoint",
+    base_url: str | None = Field(
+        default=None,
+        description=(
+            "Optional base URL override for LiteLLM proxy or self-hosted "
+            "gateway. Leave unset for standard provider endpoints."
+        ),
     )
 
-    # Model identifiers without provider prefix. The router prefixes
-    # these with `provider` at dispatch time: model_worker=
-    # openai/gpt-oss-20b + provider=groq becomes groq/openai/gpt-oss-20b.
     model_coordinator: str = Field(
-        default="qwen/qwen3.8-27b",
-        description="Fast model for coordinator-tier calls",
+        default="gemini/gemini-3.8-flash",
+        description="Fast model for coordinator-tier calls (triage, propose)",
     )
     model_worker: str = Field(
-        default="openai/gpt-oss-20b",
-        description="Heavy-context model for worker-tier calls",
+        default="gemini/gemini-3.8-flash",
+        description="Heavy-context model for worker-tier calls (investigate, hypothesize)",
     )
 
-    # Per-1K-token pricing used by core.cost.calculate_cost.
+    # Per-1K-token pricing. Defaults to 0.0 for free-tier usage.
+    # Override via env vars when using a paid tier.
     input_cost_per_1k_coordinator: float = Field(
-        default=0.0008,
+        default=0.0,
         ge=0.0,
         description="USD per 1K input tokens on the coordinator model",
     )
     output_cost_per_1k_coordinator: float = Field(
-        default=0.004,
+        default=0.0,
         ge=0.0,
         description="USD per 1K output tokens on the coordinator model",
     )
     input_cost_per_1k_worker: float = Field(
-        default=0.000075,
+        default=0.0,
         ge=0.0,
         description="USD per 1K input tokens on the worker model",
     )
     output_cost_per_1k_worker: float = Field(
-        default=0.0003,
+        default=0.0,
         ge=0.0,
         description="USD per 1K output tokens on the worker model",
+    )
+
+    # Retry and backoff configuration.
+    max_retries: int = Field(
+        default=5,
+        ge=0,
+        le=20,
+        description="Maximum retry attempts per LLM call on transient errors",
+    )
+    initial_backoff_seconds: float = Field(
+        default=2.0,
+        ge=0.1,
+        le=60.0,
+        description="Starting backoff interval for exponential retry",
+    )
+    max_backoff_seconds: float = Field(
+        default=60.0,
+        ge=1.0,
+        le=600.0,
+        description="Maximum backoff interval cap",
     )
 
 
@@ -163,13 +168,8 @@ class EvalConfig(BaseSettings):
     """DeepEval judge configuration.
 
     The judge is a separate LiteLLM call from the agent's own LLM calls.
-    It is constructed by DeepEval's LiteLLMModel and passed to LiteLLM
-    with an explicit ``base_url`` override.
-
-    The judge model MUST use the ``openai/`` prefix. LiteLLM's OpenAI
-    adapter honors the base_url override and sends requests to Groq's
-    OpenAI-compatible endpoint. The ``groq/`` prefix activates a
-    different (buggy) code path; see module docstring.
+    It is constructed by DeepEval's LiteLLMModel and passed to LiteLLM.
+    The model ID must use the canonical ``<provider>/<model>`` form.
     """
 
     model_config = SettingsConfigDict(
@@ -179,17 +179,17 @@ class EvalConfig(BaseSettings):
     )
 
     judge_model: str = Field(
-        default=_DEFAULT_JUDGE_MODEL,
+        default="gemini/gemini-3.5-flash-lite",
         description=(
-            "LiteLLM model ID for the DeepEval judge. Must use the "
-            "openai/ prefix; the base_url override redirects to Groq. "
-            "Environment: AUTOSRE_EVAL__JUDGE_MODEL"
+            "LiteLLM model ID for the DeepEval judge. Defaults to "
+            "gemini-3.5-flash-lite (500 RPD free tier) to avoid competing "
+            "with the agent for the gemini-3.8-flash quota (20 RPD)."
         ),
     )
-    judge_base_url: str = Field(
-        default=_DEFAULT_JUDGE_BASE_URL,
+    judge_base_url: str | None = Field(
+        default=None,
         description=(
-            "Explicit base URL for the judge's OpenAI-compatible endpoint. "
+            "Optional base URL override for the judge endpoint. "
             "Environment: AUTOSRE_EVAL__JUDGE_BASE_URL"
         ),
     )
@@ -216,7 +216,6 @@ class PostgresConfig(BaseSettings):
         extra="ignore",
     )
 
-    # Required — no default. Fails fast if not provided.
     password: SecretStr = Field(
         ...,
         description="Database password",
@@ -233,12 +232,7 @@ class PostgresConfig(BaseSettings):
     user: str = Field(default="app", description="Database user")
 
     def _encoded_password(self) -> str:
-        """URL-encode the password for embedding in a DSN.
-
-        Special characters (``@``, ``:``, ``/``, ``?``, ``#``) in a raw
-        password would otherwise truncate or corrupt the DSN when the
-        driver parses the userinfo section.
-        """
+        """URL-encode the password for embedding in a DSN."""
         return quote_plus(self.password.get_secret_value())
 
     @property
@@ -283,12 +277,7 @@ class AlertConfig(BaseSettings):
 
 
 class OpenObserveConfig(BaseSettings):
-    """OpenObserve credentials and endpoint.
-
-    Both ``email`` and ``password`` are required because every OpenObserve
-    API request uses Basic authentication. A service-account token can be
-    used as the password.
-    """
+    """OpenObserve credentials and endpoint."""
 
     model_config = SettingsConfigDict(
         env_prefix="AUTOSRE_OPENOBSERVE__",
@@ -334,33 +323,16 @@ class OTelConfig(BaseSettings):
     )
     deployment_environment: str = Field(
         default=_DEFAULT_DEPLOYMENT_ENVIRONMENT,
-        description=(
-            "OTel deployment.environment.name resource attribute. Kept in "
-            "sync with the top-level Settings.deployment_environment by a "
-            "model validator."
-        ),
+        description="OTel deployment.environment.name resource attribute",
     )
-
-    # The field name is `exporter_headers` (not the OTel-canonical
-    # `exporter_otlp_headers`) because this application scopes the field
-    # under AUTOSRE_OTEL__; the OTLP endpoint is supplied separately.
     exporter_headers: str = Field(
         default="",
-        description=(
-            "OTLP headers as comma-separated key=value pairs. "
-            "Format: 'key1=value1,key2=value2'. "
-            "Environment: AUTOSRE_OTEL__EXPORTER_HEADERS"
-        ),
+        description="OTLP headers as comma-separated key=value pairs",
     )
 
     @property
     def parsed_headers(self) -> dict[str, str]:
-        """Parse ``exporter_headers`` into a dict.
-
-        Format: ``key1=value1,key2=value2``. Malformed pairs (no ``=``)
-        are silently skipped so a single bad entry does not crash
-        exporter construction.
-        """
+        """Parse ``exporter_headers`` into a dict."""
         if not self.exporter_headers:
             return {}
 
@@ -373,21 +345,16 @@ class OTelConfig(BaseSettings):
 
 
 # ---------------------------------------------------------------------------
-# Safety limits
+# Safety limits and agent behaviour thresholds
 # ---------------------------------------------------------------------------
 
 
 class SafetyConfig(BaseSettings):
-    """Graph-level safety limits.
+    """Graph-level safety limits and investigation-control thresholds.
 
-    ``max_actions_per_incident`` is bounded by ``lt=100`` (exclusive):
-    values 1-99 are accepted, 100 is not. The bound rejects typo-driven
-    misconfigurations such as a digit accidentally added (10 -> 100).
-
-    ``max_wall_clock_seconds`` is enforced by asyncio.wait_for in the
-    runner. The bound 60-3600 excludes both accidentally short budgets
-    (which would abort every incident) and accidentally long ones
-    (which would let a stuck incident run unbounded).
+    All thresholds are configurable via ``AUTOSRE_SAFETY__*`` env vars.
+    Defaults are tuned for demo incidents (intentionally triggered with
+    clear signals). For production, raise confidence thresholds.
     """
 
     model_config = SettingsConfigDict(
@@ -396,23 +363,110 @@ class SafetyConfig(BaseSettings):
         extra="ignore",
     )
 
+    # -- Policy enforcement -------------------------------------------------
+
     max_risk_tier_autonomous: int = Field(
         default=1,
         ge=0,
         le=4,
-        description="Maximum risk tier executable without HITL",
+        description="Maximum risk tier executable without HITL approval",
     )
     max_actions_per_incident: int = Field(
         default=10,
         ge=1,
         lt=100,
-        description=("Maximum number of executed actions per incident (exclusive upper bound)"),
+        description="Maximum number of executed remediation actions per incident",
     )
     max_wall_clock_seconds: int = Field(
         default=600,
         ge=60,
         le=3600,
         description="Hard wall-clock budget per incident, in seconds",
+    )
+
+    # -- Investigation loop control ----------------------------------------
+
+    initial_iteration_budget: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description=(
+            "Starting iteration budget for the investigate/hypothesize loop. "
+            "Each loop iteration decrements this; when it hits 0 the agent "
+            "must decide (propose if confident, no_action otherwise)."
+        ),
+    )
+    stagnation_limit: int = Field(
+        default=2,
+        ge=1,
+        le=5,
+        description=(
+            "Maximum consecutive stagnant rounds (confidence improvement "
+            "below min_confidence_improvement) before forcing a decision."
+        ),
+    )
+    max_action_attempts: int = Field(
+        default=2,
+        ge=1,
+        le=5,
+        description=(
+            "Maximum times the agent can attempt to propose a remediation "
+            "action before completing with status=failed."
+        ),
+    )
+
+    # -- Confidence thresholds ---------------------------------------------
+
+    confidence_propose: float = Field(
+        default=0.55,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum hypothesis confidence to propose a remediation action. "
+            "Lowered from the prior 0.70 because demo incidents have clear "
+            "deterministic signals; raise to 0.70+ for production."
+        ),
+    )
+    confidence_fast_path: float = Field(
+        default=0.80,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Confidence threshold to skip further investigation and proceed "
+            "directly to propose. Only triggered on iteration 1 with evidence "
+            "from multiple independent tools."
+        ),
+    )
+    confidence_give_up: float = Field(
+        default=0.40,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Confidence below which the agent gives up after stagnation or "
+            "budget exhaustion and completes with status=no_action."
+        ),
+    )
+    min_confidence_improvement: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=0.5,
+        description=(
+            "Minimum confidence delta between hypothesize rounds to count as "
+            "progress. Below this, stagnation_count increments."
+        ),
+    )
+
+    # -- LLM call budget ----------------------------------------------------
+
+    max_llm_calls_per_incident: int = Field(
+        default=15,
+        ge=1,
+        le=100,
+        description=(
+            "Hard budget on LLM API calls per incident. The router raises "
+            "LLMBudgetExhaustedError when this is exceeded, preventing "
+            "runaway loops from burning through provider quotas."
+        ),
     )
 
 
@@ -422,15 +476,7 @@ class SafetyConfig(BaseSettings):
 
 
 class SlackConfig(BaseSettings):
-    """Slack integration credentials, split by transport.
-
-    Socket Mode:  bot_token + app_token.
-    HTTP mode:    bot_token + signing_secret.
-
-    The ``mode`` field selects which credential set is validated. The
-    validator also requires ``approver_user_ids`` when Slack is enabled:
-    an unrestricted approval channel is a security hole, not a feature.
-    """
+    """Slack integration credentials, split by transport."""
 
     model_config = SettingsConfigDict(
         env_prefix="AUTOSRE_SLACK__",
@@ -478,12 +524,7 @@ class SlackConfig(BaseSettings):
 
 
 class AdminConfig(BaseSettings):
-    """Admin control-plane credentials.
-
-    When ``secret`` is unset, ``/admin/*`` endpoints return 503. This is
-    the fail-safe default: an operator who forgets to set the secret
-    cannot accidentally expose pause/resume controls.
-    """
+    """Admin control-plane credentials."""
 
     model_config = SettingsConfigDict(
         env_prefix="AUTOSRE_ADMIN__",
@@ -493,10 +534,7 @@ class AdminConfig(BaseSettings):
 
     secret: SecretStr | None = Field(
         default=None,
-        description=(
-            "Bearer secret required by /admin/* endpoints. Unset disables "
-            "them. Environment: AUTOSRE_ADMIN__SECRET"
-        ),
+        description="Bearer secret required by /admin/* endpoints",
     )
 
 
@@ -506,11 +544,7 @@ class AdminConfig(BaseSettings):
 
 
 class Settings(BaseSettings):
-    """Aggregated application settings.
-
-    Constructs every nested config from AUTOSRE_* environment variables.
-    Missing required fields raise ValidationError at construction.
-    """
+    """Aggregated application settings."""
 
     model_config = SettingsConfigDict(
         env_prefix="AUTOSRE_",
@@ -529,30 +563,14 @@ class Settings(BaseSettings):
     slack: SlackConfig = Field(default_factory=SlackConfig)
     admin: AdminConfig = Field(default_factory=AdminConfig)
 
-    # Top-level deployment environment. Read by telemetry/otel.py to set
-    # the OTel resource attribute. Kept in sync with the nested field on
-    # OTelConfig by the model validator below.
     deployment_environment: str = Field(
         default=_DEFAULT_DEPLOYMENT_ENVIRONMENT,
-        description=(
-            "Deployment environment name. Either this field "
-            "(AUTOSRE_DEPLOYMENT_ENVIRONMENT) or the nested field "
-            "(AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT) may be set; both "
-            "converge to the same value."
-        ),
+        description="Deployment environment name",
     )
 
     @model_validator(mode="after")
     def _sync_deployment_environment(self) -> Settings:
-        """Keep the two deployment_environment fields consistent.
-
-        Precedence:
-            * If the top-level field is explicitly set (non-default),
-              the nested field is overwritten to match.
-            * Otherwise, if the nested field is explicitly set, the
-              top-level field is overwritten to match.
-            * If both are at the default, no change is made.
-        """
+        """Keep the two deployment_environment fields consistent."""
         top = self.deployment_environment
         otel = self.otel.deployment_environment
 
@@ -571,21 +589,12 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Return the process-wide Settings singleton.
-
-    Cached so env-var reads happen once. Tests must call
-    ``reset_settings_cache()`` after monkeypatching env vars.
-    """
+    """Return the process-wide Settings singleton."""
     return Settings()
 
 
 def reset_settings_cache() -> None:
-    """Clear the settings cache.
-
-    Required by test fixtures that monkeypatch AUTOSRE_* env vars.
-    Without this call, ``get_settings()`` returns the stale instance
-    constructed with the pre-monkeypatch environment.
-    """
+    """Clear the settings cache. Required by test fixtures."""
     get_settings.cache_clear()
 
 

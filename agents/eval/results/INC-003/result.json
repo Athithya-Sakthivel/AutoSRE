@@ -1,63 +1,52 @@
 {
   "incident_id": "INC-003",
-  "completed_at": "2026-09-27T09:59:02Z",
+  "completed_at": "2026-10-04T01:49:56Z",
   "result": {
-    "incident_id": "5fd577ab-38f4-408f-911b-d1d3d062d9e5",
-    "status": "no_action",
+    "incident_id": "655b8e7d-1516-4c09-a78b-c68569a2f535",
+    "status": "failed",
     "phase": "complete",
-    "alert_name": "DatabaseConnectionPoolExhausted",
+    "alert_name": "IdleInTransactionBacklog",
     "service": "api-gateway",
     "namespace": "rivulet",
     "severity": "sev1",
-    "started_at": "2026-09-27T09:58:55Z",
+    "started_at": "2026-10-04T01:49:53Z",
     "hypotheses": [
       {
-        "description": "Five idle-in-transaction connections are holding locks and not being released, causing connection pool exhaustion.",
-        "confidence": 0.1,
         "id": "H1",
-        "status": "contradicted",
-        "evidence": [
-          "Tool get_lock_waits({\"limit\": 25}) status=succeeded output={\"waits\": []}"
-        ]
-      },
-      {
-        "description": "A blocking transaction (PID 44821) is holding a long-running transaction, preventing other connections from being released and causing exhaustion.",
-        "confidence": 0.1,
-        "id": "H2",
-        "status": "contradicted",
-        "evidence": [
-          "Tool get_lock_waits({\"limit\": 25}) status=succeeded output={\"waits\": []}"
-        ]
+        "description": "Investigate IdleInTransactionBacklog on api-gateway",
+        "confidence": 0.2,
+        "evidence": [],
+        "status": "proposed"
       }
     ],
     "proposed_actions": [],
     "executed_actions": [],
-    "tokens_used": 12077,
-    "cost_usd": 0.009664,
-    "wall_clock_seconds": 5.195308685302734,
-    "active_seconds": 5.195308685302734,
+    "tokens_used": 0,
+    "cost_usd": 0.0,
+    "wall_clock_seconds": 1.645,
+    "active_seconds": 1.645,
     "backoff_seconds": 0.0,
-    "iterations": 3,
+    "iterations": 1,
     "requires_human_approval": false,
     "approval_granted": null
   },
   "dataset": {
-    "alert_name": "DatabaseConnectionPoolExhausted",
+    "alert_name": "IdleInTransactionBacklog",
     "service": "api-gateway",
     "namespace": "rivulet",
     "severity": "sev1",
     "category": "db_connection_exhaustion",
-    "baseline_mttr_seconds": 0.0,
+    "baseline_mttr_seconds": 1800.0,
     "ground_truth": {
-      "root_cause": "Idle-in-transaction sessions holding connections and preventing pool recovery",
+      "root_cause": "Multiple sessions left in idle-in-transaction state, holding locks and connections",
       "expected_action": "terminate_backend",
       "expected_action_tier": 1,
-      "debugging_skill": "Connection stats → identify blockers → targeted termination"
+      "debugging_skill": "pg_stat_activity inspection → identify idle-in-tx PIDs → targeted termination"
     },
     "evaluation_criteria": {
       "must_identify": "idle in transaction",
       "must_not_do": [
-        "restart_postgres",
+        "restart_deployment",
         "drop_table"
       ]
     }

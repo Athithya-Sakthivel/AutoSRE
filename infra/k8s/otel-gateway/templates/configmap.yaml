@@ -5,9 +5,13 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "otel-gateway.labels" . | nindent 4 }}
+
 data:
   config.yaml: |
     receivers:
+      # Gateway receives application OTLP telemetry from workloads.
+      # gRPC: 4317
+      # HTTP/protobuf: 4318
       otlp:
         protocols:
           grpc:
@@ -17,14 +21,16 @@ data:
             endpoint: 0.0.0.0:4318
 
     processors:
-      # MUST be first in every pipeline. Protects the process from OOM.
+      # Must run early in every pipeline so the collector protects itself
+      # from excessive memory usage before batching/export.
       memory_limiter:
         check_interval: 2s
         limit_mib: 768
         spike_limit_mib: 192
 
-      # Enriches application telemetry with Kubernetes metadata so that
-      # traces and logs can be correlated by pod, namespace, and deployment.
+      # Enrich incoming application telemetry with Kubernetes identity.
+      # This allows alerting and investigation queries to use pod,
+      # namespace, deployment, container, and related Kubernetes fields.
       k8s_attributes:
         auth_type: serviceAccount
         passthrough: false
@@ -52,21 +58,24 @@ data:
               key: app.kubernetes.io/part-of
               from: pod
         pod_association:
+          # Prefer the strongest pod identity when it is already present.
           - sources:
               - from: resource_attribute
                 name: k8s.pod.uid
+
+          # Fall back to pod name + namespace when UID is not available.
           - sources:
               - from: resource_attribute
                 name: k8s.pod.name
               - from: resource_attribute
                 name: k8s.namespace.name
+
+          # Final fallback for telemetry arriving over a network connection.
           - sources:
               - from: connection
 
-      # Drops server-side health-check spans BEFORE they reach OpenObserve.
-      # Matches purely on endpoint path — regardless of user agent. This
-      # prevents trace table pollution from kubelet probes, agent self-checks,
-      # test script curl calls, and Prometheus scrapes.
+      # Remove server-side health-check spans before they reach OpenObserve.
+      # This keeps routine Kubernetes probes and health endpoints out of traces.
       filter/drop_health_checks:
         error_mode: ignore
         trace_conditions:
@@ -94,9 +103,9 @@ data:
              span.attributes["http.target"] == "/readyz" or
              span.attributes["http.target"] == "/livez")
 
-      # Drops LangGraph checkpoint INSERT/UPDATE/SELECT spans. These are
-      # internal bookkeeping operations that clutter the trace view with
-      # dozens of identical DB spans per investigation.
+      # Remove repetitive PostgreSQL checkpoint bookkeeping spans.
+      # These are internal persistence operations rather than useful
+      # application-level traces for SRE investigations.
       filter/drop_checkpointer_noise:
         error_mode: ignore
         trace_conditions:
@@ -108,8 +117,8 @@ data:
              IsMatch(span.attributes["db.statement"], ".*checkpoint_writes.*") or
              IsMatch(span.attributes["db.statement"], ".*checkpoint_blobs.*"))
 
-      # Defensive filter for application-emitted metrics that collide with
-      # namespaces OpenObserve cannot serialize to Parquet.
+      # Defensive metric filter for metric families known to be incompatible
+      # with the OpenObserve storage path used by this staging stack.
       filter/drop_openobserve_incompatible:
         error_mode: ignore
         metrics:
@@ -121,7 +130,8 @@ data:
               - "^container\\.filesystem\\.(available|capacity|usage)$"
               - "^k8s\\.pod\\.filesystem\\.(available|capacity|usage)$"
 
-      # Adds cluster identity to every signal for cross-cluster queries.
+      # Add cluster-wide identity to every exported signal.
+      # The cluster name is supplied by Helm values.
       resource/add_cluster:
         attributes:
           - key: cluster.name
@@ -131,14 +141,36 @@ data:
             value: "production"
             action: upsert
 
-      # Batches signals before export. Positioned last so that the
-      # memory_limiter and filters run on individual records, not batches.
+      # Batch telemetry before export to reduce request overhead.
       batch:
         send_batch_size: 1024
         send_batch_max_size: 2048
         timeout: 5s
 
+    connectors:
+      # Logs are explicitly routed to dedicated OpenObserve streams.
+      #
+      # Default:
+      #   app logs -> app_logs
+      #
+      # PostgreSQL:
+      #   container name "postgres" -> postgres_logs
+      #
+      # Valkey:
+      #   container name "valkey" -> valkey_logs
+      routing/logs:
+        default_pipelines:
+          - logs/app
+        table:
+          - condition: resource.attributes["k8s.container.name"] == "postgres"
+            pipelines: [logs/postgres]
+          - condition: resource.attributes["k8s.container.name"] == "valkey"
+            pipelines: [logs/valkey]
+
     exporters:
+      # Shared exporter for traces and metrics.
+      # The OpenObserve endpoint is expected to point at the organization API
+      # base configured by the Helm values.
       otlp_http/openobserve:
         endpoint: "{{ .Values.openobserve.endpoint }}"
         headers:
@@ -155,13 +187,69 @@ data:
           max_interval: 30s
           max_elapsed_time: 300s
 
+      # Explicit log-stream exporters.
+      # The stream-name header is what keeps the three log classes isolated.
+      otlp_http/openobserve_app_logs:
+        endpoint: "{{ .Values.openobserve.endpoint }}"
+        headers:
+          Authorization: "Basic ${env:OPENOBSERVE_TOKEN}"
+          stream-name: app_logs
+        compression: gzip
+        timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 4
+          queue_size: 2048
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
+      otlp_http/openobserve_postgres_logs:
+        endpoint: "{{ .Values.openobserve.endpoint }}"
+        headers:
+          Authorization: "Basic ${env:OPENOBSERVE_TOKEN}"
+          stream-name: postgres_logs
+        compression: gzip
+        timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 4
+          queue_size: 2048
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
+      otlp_http/openobserve_valkey_logs:
+        endpoint: "{{ .Values.openobserve.endpoint }}"
+        headers:
+          Authorization: "Basic ${env:OPENOBSERVE_TOKEN}"
+          stream-name: valkey_logs
+        compression: gzip
+        timeout: 30s
+        sending_queue:
+          enabled: true
+          num_consumers: 4
+          queue_size: 2048
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
     extensions:
+      # Exposes the collector health endpoint on port 13133.
       health_check:
         endpoint: 0.0.0.0:13133
 
     service:
       extensions: [health_check]
 
+      # Export collector self-metrics to OpenObserve.
+      # This is collector telemetry, not application metric ingestion.
       telemetry:
         logs:
           level: info
@@ -178,6 +266,8 @@ data:
                         value: "Basic ${env:OPENOBSERVE_TOKEN}"
 
       pipelines:
+        # Application traces:
+        # enrich -> remove health checks/checkpointer noise -> export.
         traces:
           receivers: [otlp]
           processors:
@@ -189,6 +279,7 @@ data:
             - batch
           exporters: [otlp_http/openobserve]
 
+        # Application metrics received through OTLP.
         metrics:
           receivers: [otlp]
           processors:
@@ -198,11 +289,30 @@ data:
             - batch
           exporters: [otlp_http/openobserve]
 
-        logs:
+        # All incoming application logs first enter the routing connector.
+        logs/in:
           receivers: [otlp]
           processors:
             - memory_limiter
             - k8s_attributes
             - resource/add_cluster
             - batch
-          exporters: [otlp_http/openobserve]
+          exporters: [routing/logs]
+
+        # Default application log destination.
+        logs/app:
+          receivers: [routing/logs]
+          processors: [resource/add_cluster, batch]
+          exporters: [otlp_http/openobserve_app_logs]
+
+        # PostgreSQL log destination.
+        logs/postgres:
+          receivers: [routing/logs]
+          processors: [resource/add_cluster, batch]
+          exporters: [otlp_http/openobserve_postgres_logs]
+
+        # Valkey log destination.
+        logs/valkey:
+          receivers: [routing/logs]
+          processors: [resource/add_cluster, batch]
+          exporters: [otlp_http/openobserve_valkey_logs]

@@ -1,10 +1,11 @@
-# OpenObserve provider — v1.4.1.
+# OpenObserve provider configuration.
 #
-# Accepted arguments per the provider schema:
-#   endpoint, username, password, org_id
+# The endpoint is normally the localhost port-forward established by the
+# staging E2E script, for example:
+#   http://localhost:5080
 #
-# Do NOT add `organization` or `insecure` — they are not in the schema and
-# will fail with "Unsupported argument".
+# Stream lifecycle is intentionally NOT managed by this provider configuration.
+# Streams are created by scripts/staging/openobserve.sh before Terraform apply.
 
 provider "openobserve" {
   endpoint = var.o2_endpoint

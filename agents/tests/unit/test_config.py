@@ -65,10 +65,9 @@ class TestLLMConfig:
     def test_loads_with_required_vars(self) -> None:
         config = LLMConfig(api_key="test-key-12345")
         assert config.api_key.get_secret_value() == "test-key-12345"
-        assert config.base_url == "https://api.groq.com/openai/v1"
-        assert config.provider == "groq"
-        assert config.model_coordinator == "qwen/qwen3.8-27b"
-        assert config.model_worker == "openai/gpt-oss-20b"
+        assert config.base_url is None
+        assert config.model_coordinator == "gemini/gemini-3.8-flash"
+        assert config.model_worker == "gemini/gemini-3.8-flash"
 
     def test_fails_without_api_key(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
@@ -79,22 +78,75 @@ class TestLLMConfig:
     def test_custom_model_names(self) -> None:
         config = LLMConfig(
             api_key="key",
-            model_coordinator="anthropic/claude-3-sonnet",
-            model_worker="openai/gpt-4o-mini",
+            model_coordinator="openai/gpt-4o-mini",
+            model_worker="anthropic/claude-3-5-sonnet",
         )
-        assert config.model_coordinator == "anthropic/claude-3-sonnet"
-        assert config.model_worker == "openai/gpt-4o-mini"
+        assert config.model_coordinator == "openai/gpt-4o-mini"
+        assert config.model_worker == "anthropic/claude-3-5-sonnet"
 
     def test_custom_base_url(self) -> None:
         config = LLMConfig(api_key="key", base_url="http://localhost:8000/v1")
         assert config.base_url == "http://localhost:8000/v1"
 
-    def test_cost_defaults(self) -> None:
+    def test_base_url_defaults_to_none(self) -> None:
+        """base_url is optional; defaults to None for standard endpoints."""
         config = LLMConfig(api_key="key")
-        assert config.input_cost_per_1k_coordinator == 0.0008
-        assert config.output_cost_per_1k_coordinator == 0.004
-        assert config.input_cost_per_1k_worker == 0.000075
-        assert config.output_cost_per_1k_worker == 0.0003
+        assert config.base_url is None
+
+    def test_cost_defaults_are_zero_for_free_tier(self) -> None:
+        config = LLMConfig(api_key="key")
+        assert config.input_cost_per_1k_coordinator == 0.0
+        assert config.output_cost_per_1k_coordinator == 0.0
+        assert config.input_cost_per_1k_worker == 0.0
+        assert config.output_cost_per_1k_worker == 0.0
+
+    def test_cost_can_be_overridden_for_paid_tier(self) -> None:
+        config = LLMConfig(
+            api_key="key",
+            input_cost_per_1k_coordinator=0.00075,
+            output_cost_per_1k_coordinator=0.00375,
+            input_cost_per_1k_worker=0.00075,
+            output_cost_per_1k_worker=0.00375,
+        )
+        assert config.input_cost_per_1k_coordinator == 0.00075
+        assert config.output_cost_per_1k_coordinator == 0.00375
+        assert config.input_cost_per_1k_worker == 0.00075
+        assert config.output_cost_per_1k_worker == 0.00375
+
+    def test_negative_cost_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            LLMConfig(api_key="key", input_cost_per_1k_coordinator=-0.001)
+
+    def test_retry_defaults(self) -> None:
+        config = LLMConfig(api_key="key")
+        assert config.max_retries == 5
+        assert config.initial_backoff_seconds == 2.0
+        assert config.max_backoff_seconds == 60.0
+
+    def test_retry_bounds(self) -> None:
+        with pytest.raises(ValidationError):
+            LLMConfig(api_key="key", max_retries=-1)
+        with pytest.raises(ValidationError):
+            LLMConfig(api_key="key", max_retries=100)
+        with pytest.raises(ValidationError):
+            LLMConfig(api_key="key", initial_backoff_seconds=0.0)
+        with pytest.raises(ValidationError):
+            LLMConfig(api_key="key", initial_backoff_seconds=120.0)
+        with pytest.raises(ValidationError):
+            LLMConfig(api_key="key", max_backoff_seconds=0.5)
+        with pytest.raises(ValidationError):
+            LLMConfig(api_key="key", max_backoff_seconds=1000.0)
+
+    def test_retry_custom_values(self) -> None:
+        config = LLMConfig(
+            api_key="key",
+            max_retries=10,
+            initial_backoff_seconds=5.0,
+            max_backoff_seconds=120.0,
+        )
+        assert config.max_retries == 10
+        assert config.initial_backoff_seconds == 5.0
+        assert config.max_backoff_seconds == 120.0
 
 
 # ---------------------------------------------------------------------------
@@ -269,12 +321,6 @@ class TestSafetyConfig:
 
 # ---------------------------------------------------------------------------
 # SlackConfig
-#
-# The validator requires approver_user_ids when Slack is enabled. Passing
-# credentials alone is a misconfiguration: an unrestricted approval
-# channel is a security hole. Every enabled-path test passes an explicit
-# approver, and the tests that expect rejection use the missing-credential
-# path which fires before the approver check.
 # ---------------------------------------------------------------------------
 
 _TEST_APPROVERS = {"U0123456789"}
@@ -313,7 +359,6 @@ class TestSlackConfig:
         assert config.mode == "http"
 
     def test_socket_mode_rejects_missing_app_token(self) -> None:
-        """Socket mode without an app token is invalid."""
         with pytest.raises(ValidationError, match="mode=socket"):
             SlackConfig(
                 mode="socket",
@@ -322,7 +367,6 @@ class TestSlackConfig:
             )
 
     def test_http_mode_rejects_missing_signing_secret(self) -> None:
-        """HTTP mode without a signing secret is invalid."""
         with pytest.raises(ValidationError, match="mode=http"):
             SlackConfig(
                 mode="http",
@@ -331,7 +375,6 @@ class TestSlackConfig:
             )
 
     def test_enabled_without_approvers_is_rejected(self) -> None:
-        """Enabling Slack without an approver allowlist is a misconfiguration."""
         with pytest.raises(ValidationError, match="approver_user_ids"):
             SlackConfig(
                 mode="socket",
@@ -386,7 +429,6 @@ class TestSettings:
         monkeypatch.setenv("AUTOSRE_ALERT__WEBHOOK_SECRET", "secret")
         monkeypatch.setenv("AUTOSRE_OPENOBSERVE__EMAIL", "a@b.com")
         monkeypatch.setenv("AUTOSRE_OPENOBSERVE__PASSWORD", "pass")
-        # AUTOSRE_LLM__API_KEY deliberately unset.
         with pytest.raises(ValidationError):
             Settings()
 
@@ -395,7 +437,6 @@ class TestSettings:
         monkeypatch.setenv("AUTOSRE_ALERT__WEBHOOK_SECRET", "secret")
         monkeypatch.setenv("AUTOSRE_OPENOBSERVE__EMAIL", "a@b.com")
         monkeypatch.setenv("AUTOSRE_OPENOBSERVE__PASSWORD", "pass")
-        # AUTOSRE_POSTGRES__PASSWORD deliberately unset.
         with pytest.raises(ValidationError):
             Settings()
 
@@ -413,11 +454,29 @@ class TestSettings:
         assert settings.otel.deployment_environment == "staging"
 
     def test_nested_env_delimiter(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """`AUTOSRE_LLM__MODEL_COORDINATOR` maps to settings.llm.model_coordinator."""
+        """``AUTOSRE_LLM__MODEL_COORDINATOR`` maps to settings.llm.model_coordinator."""
         self._set_minimum_env(monkeypatch)
-        monkeypatch.setenv("AUTOSRE_LLM__MODEL_COORDINATOR", "custom/model")
+        monkeypatch.setenv("AUTOSRE_LLM__MODEL_COORDINATOR", "openai/gpt-4o-mini")
         settings = Settings()
-        assert settings.llm.model_coordinator == "custom/model"
+        assert settings.llm.model_coordinator == "openai/gpt-4o-mini"
+
+    def test_llm_retry_env_vars_propagate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._set_minimum_env(monkeypatch)
+        monkeypatch.setenv("AUTOSRE_LLM__MAX_RETRIES", "8")
+        monkeypatch.setenv("AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS", "3.0")
+        monkeypatch.setenv("AUTOSRE_LLM__MAX_BACKOFF_SECONDS", "120.0")
+        settings = Settings()
+        assert settings.llm.max_retries == 8
+        assert settings.llm.initial_backoff_seconds == 3.0
+        assert settings.llm.max_backoff_seconds == 120.0
+
+    def test_llm_cost_env_vars_propagate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._set_minimum_env(monkeypatch)
+        monkeypatch.setenv("AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR", "0.00075")
+        monkeypatch.setenv("AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR", "0.00375")
+        settings = Settings()
+        assert settings.llm.input_cost_per_1k_coordinator == 0.00075
+        assert settings.llm.output_cost_per_1k_coordinator == 0.00375
 
     def test_otel_headers_property_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_minimum_env(monkeypatch)

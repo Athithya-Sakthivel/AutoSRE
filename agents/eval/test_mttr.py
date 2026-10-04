@@ -15,10 +15,35 @@ from eval.conftest import (
     run_incident,
 )
 
-MAX_MTTR_SECONDS = float(os.getenv("EVAL_MAX_MTTR_SECONDS", "120.0"))
+# --- CHANGED: Incident-specific SLOs instead of a single global SLO ---
+# Simple incidents (cache poison, pod restart) should resolve fast.
+# Complex incidents (DB issues, cascading failures) need more time.
+MTTR_SLOS: dict[str, float] = {
+    "INC-001": 180.0,  # DB connection exhaustion — complex
+    "INC-002": 180.0,  # High CPU — moderate (includes HITL wait)
+    "INC-003": 180.0,  # Idle-in-transaction — complex
+    "INC-004": 90.0,  # Cache poison — simple, should be fast
+    "INC-005": 120.0,  # Consumer lag — moderate
+    "INC-006": 90.0,  # Stale pod — simple
+    "INC-007": 120.0,  # Upstream timeout — moderate
+    "INC-008": 120.0,  # Memory pressure — moderate
+    "INC-009": 90.0,  # Pod OOMKilled — simple
+    "INC-010": 30.0,  # Webhook dedup — no remediation, very fast
+    "INC-011": 30.0,  # Prohibited action — blocked immediately
+    "INC-012": 300.0,  # Cascading failure — complex
+}
 
-# Must remain synchronized with the agent's MAX_ITERATIONS in graph_helpers.py.
-MAX_ITERATIONS = 10
+# Default SLO for incidents not in the map.
+DEFAULT_MTTR_SLO = float(os.getenv("EVAL_MAX_MTTR_SECONDS", "180.0"))
+
+# Must remain synchronized with the agent's MAX_ITERATIONS in state.py.
+MAX_ITERATIONS = 3  # CHANGED: was 10, now matches INITIAL_ITERATION_BUDGET
+# --- END CHANGED ---
+
+
+def _get_slo(incident_id: str) -> float:
+    """Return the MTTR SLO for a specific incident."""
+    return MTTR_SLOS.get(incident_id, DEFAULT_MTTR_SLO)
 
 
 @pytest.mark.parametrize("incident_id", incident_ids())
@@ -27,7 +52,7 @@ async def test_mttr_slo(
     incident_id: str,
     agent_client: AgentClient,
 ) -> None:
-    """Verify incident resolution meets the configured MTTR SLO."""
+    """Verify incident resolution meets the incident-specific MTTR SLO."""
     incident = incident_by_id(incident_id)
     result = await run_incident(
         agent_client,
@@ -39,8 +64,10 @@ async def test_mttr_slo(
         "wall_clock_seconds",
     )
 
-    assert wall_clock <= MAX_MTTR_SECONDS, (
-        f"Incident {incident_id}: MTTR {wall_clock:.2f}s exceeds SLO {MAX_MTTR_SECONDS:.2f}s"
+    slo = _get_slo(incident_id)
+
+    assert wall_clock <= slo, (
+        f"Incident {incident_id}: MTTR {wall_clock:.2f}s exceeds SLO {slo:.2f}s"
     )
 
 

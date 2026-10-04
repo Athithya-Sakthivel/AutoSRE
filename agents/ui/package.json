@@ -1,7 +1,7 @@
 {
   "name": "autosre-ui",
   "private": true,
-  "version": "0.1.5",
+  "version": "0.1.6",
   "type": "module",
   "engines": {
     "node": "24.21.0",
@@ -15,7 +15,10 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,json}\" package.json",
-    "format:check": "prettier --check \"src/**/*.{ts,tsx,css,json}\" package.json"
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,css,json}\" package.json",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:debug": "playwright test --debug"
   },
   "dependencies": {
     "@tanstack/react-query": "5.103.2",
@@ -25,6 +28,7 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@playwright/test": "1.63.0",
     "@tailwindcss/vite": "4.3.3",
     "@types/node": "24.13.6",
     "@types/react": "19.3.0",

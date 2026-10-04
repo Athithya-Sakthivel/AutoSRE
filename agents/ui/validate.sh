@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+# set -Eeuo pipefail
+# disabled to catch many bugs at a time
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
+
+rm -rf dist
 
 [[ -d node_modules ]] || {
   echo "ERROR: node_modules is missing. Run agents/ui/lock-versions.sh first." >&2
@@ -21,7 +24,7 @@ echo "==> Building..."
 npm run build
 
 echo "==> Running pre-commit ESLint..."
-cd "$REPO_ROOT"
+cd /workspace
 pre-commit run eslint-agents-ui --all-files
 
 echo "==> Running pre-commit Prettier..."

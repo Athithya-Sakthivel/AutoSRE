@@ -1,18 +1,3 @@
-/**
- * Metrics dashboard page.
- *
- * Displays:
- *   - KPI strip: Total Incidents, Resolution Rate, Active MTTR, Total Cost
- *   - Prominent MTTR reduction banner (vs. dataset baseline)
- *   - Safety status
- *   - Time-series charts: MTTR, incident count, cost, tokens
- *   - Incidents by category
- *   - Top 5 most expensive incidents
- *
- * "Active MTTR" excludes provider rate-limit backoff. The tooltip on the
- * card explains the difference; the value is the honest work time.
- */
-
 import { useState } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { Link } from "react-router";
@@ -41,19 +26,13 @@ import {
 
 import type { MetricTimeRange } from "../lib/types";
 
-const RANGE_OPTIONS: ReadonlyArray<{
-  value: MetricTimeRange;
-  label: string;
-}> = [
-  { value: "1h", label: "1 Hour" },
-  { value: "24h", label: "24 Hours" },
-  { value: "7d", label: "7 Days" },
-  { value: "30d", label: "30 Days" },
-];
-
-// ---------------------------------------------------------------------------
-// Page
-// ---------------------------------------------------------------------------
+const RANGE_OPTIONS: ReadonlyArray<{ value: MetricTimeRange; label: string }> =
+  [
+    { value: "1h", label: "1 Hour" },
+    { value: "24h", label: "24 Hours" },
+    { value: "7d", label: "7 Days" },
+    { value: "30d", label: "30 Days" },
+  ];
 
 export function MetricsPage(): ReactElement {
   const [range, setRange] = useState<MetricTimeRange>("24h");
@@ -88,7 +67,10 @@ export function MetricsPage(): ReactElement {
 
   const categoryData = summary
     ? Object.entries(summary.incidents_by_category).map(
-        ([category, count]) => ({ category, count }),
+        ([category, count]) => ({
+          category,
+          count,
+        }),
       )
     : [];
 
@@ -162,7 +144,9 @@ export function MetricsPage(): ReactElement {
           <KpiCard
             label="Total Incidents"
             value={formatCount(summary.total_incidents)}
-            sublabel={`${formatCount(summary.resolved_count)} resolved · ${formatCount(summary.no_action_count)} no action`}
+            sublabel={`${formatCount(summary.resolved_count)} resolved · ${formatCount(
+              summary.no_action_count,
+            )} no action`}
           />
 
           <KpiCard
@@ -249,15 +233,6 @@ export function MetricsPage(): ReactElement {
 
       {timeseries && (
         <>
-          {timeseriesQuery.isFetching && (
-            <div
-              className="text-right text-[11px] text-slate-500"
-              aria-live="polite"
-            >
-              Updating chart data…
-            </div>
-          )}
-
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <ChartCard
               title="Active MTTR Over Time"
@@ -324,10 +299,6 @@ export function MetricsPage(): ReactElement {
   );
 }
 
-// ---------------------------------------------------------------------------
-// MTTR reduction banner
-// ---------------------------------------------------------------------------
-
 function MttrReductionBanner({
   summary,
 }: {
@@ -370,10 +341,6 @@ function MttrReductionBanner({
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
 
 function KpiCard({
   label,
@@ -568,15 +535,6 @@ function TopExpensiveTable({
               ))}
             </tbody>
           </table>
-
-          {query.isFetching && (
-            <div
-              className="border-t border-surface-border px-4 py-2 text-right text-[11px] text-slate-500"
-              aria-live="polite"
-            >
-              Updating…
-            </div>
-          )}
         </div>
       )}
     </div>

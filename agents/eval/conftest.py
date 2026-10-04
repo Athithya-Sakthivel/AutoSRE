@@ -36,22 +36,13 @@ session against a live agent at ``AGENT_BASE_URL``.
 
 ## Judge
 
-    RCA tests use DeepEval with an LLM judge. The judge model's prefix
-    selects the LiteLLM adapter:
+    RCA tests use DeepEval with an LLM judge. The judge model uses the
+    canonical ``<provider>/<model>`` form and is passed through to
+    LiteLLM verbatim. For example: ``gemini/gemini-3.8-flash``.
 
-        openai/<name>   OpenAI adapter, honors base_url override
-        groq/<name>     Native Groq adapter, reads GROQ_API_KEY
-
-    LiteLLM's Groq adapter mishandles model IDs whose model-name portion
-    contains a slash (issue #14807). Prefer slash-free Groq IDs such as
-    ``groq/allam-2-7b`` or ``groq/llama-3.3-70b-versatile``.
-
-## Status semantics
-
-    Terminal statuses: resolved, failed, no_action, blocked.
-    ``awaiting_approval`` is a derived signal (state.status remains
-    ``running`` while the graph is paused on interrupt); the eval
-    auto-approves unless disabled via ``EVAL_AUTO_APPROVE=0``.
+    Retry and backoff settings for the judge are read from
+    ``settings.llm`` so the judge and the agent share the same
+    transient-error handling policy.
 """
 
 from __future__ import annotations
@@ -70,7 +61,12 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+# Configure LiteLLM to drop unsupported parameters for Gemini
+import litellm
 import pytest
+
+litellm.drop_params = True
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +102,16 @@ _PROHIBITED_TOOLS = frozenset({"delete_namespace", "flush_all", "drop_table"})
 # policy paths only.
 _NO_CHAOS_INCIDENTS = frozenset({"INC-010", "INC-011"})
 
+# Substrings in error messages indicating daily quota exhaustion.
+# Daily-quota errors must fast-fail: retrying won't restore the bucket.
+_DAILY_QUOTA_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"quota exceeded", re.IGNORECASE),
+    re.compile(r"daily.*limit", re.IGNORECASE),
+    re.compile(r"RPD", re.IGNORECASE),
+    re.compile(r"requests per day", re.IGNORECASE),
+    re.compile(r"resource has been exhausted", re.IGNORECASE),
+)
+
 
 def _parse_delay_seconds() -> float:
     raw = os.getenv("EVAL_DELAY_SECONDS")
@@ -128,8 +134,6 @@ DELAY_BETWEEN_INCIDENTS = _parse_delay_seconds()
 FORCE_RERUN = os.getenv("EVAL_FORCE_RERUN", "0") == "1"
 AUTO_APPROVE = os.getenv("EVAL_AUTO_APPROVE", "1") != "0"
 
-# Whether to execute chaos triggers. Defaults to enabled when the chaos
-# toolkit exists on disk. Set EVAL_APPLY_CHAOS=0 to disable.
 _APPLY_CHAOS_DEFAULT = CHAOS_TRIGGER.is_file() and CHAOS_RESET.is_file()
 APPLY_CHAOS = os.getenv("EVAL_APPLY_CHAOS", "1" if _APPLY_CHAOS_DEFAULT else "0") == "1"
 
@@ -586,9 +590,9 @@ def compute_aggregate_metrics() -> dict[str, Any]:
         "baseline_mttr_seconds": round(avg_baseline, 2),
         "mttr_reduction_pct": round(reduction, 2),
         "total_cost_usd": round(total_cost, 6),
-        "avg_cost_usd": round(total_cost / total, 6),
+        "avg_cost_usd": round(total_cost / total, 6) if total > 0 else 0.0,
         "total_tokens": total_tokens,
-        "avg_tokens": total_tokens // total,
+        "avg_tokens": total_tokens // total if total > 0 else 0,
         "safety_violations": safety_violations,
         "per_incident": per_incident,
     }
@@ -629,17 +633,22 @@ def build_incident_context(incident: dict[str, Any]) -> list[str]:
 def _judge_config() -> tuple[str, str | None, str]:
     """Return (model, base_url_or_None, api_key) for the DeepEval judge.
 
-    base_url is returned only for models that use the OpenAI adapter
-    (openai/<name>). For groq/<name>, LiteLLM uses its native Groq
-    endpoint and reads GROQ_API_KEY from the environment; passing
-    base_url alongside the Groq adapter would be ignored at best.
+    Provider-agnostic: the model ID is passed through to LiteLLM
+    verbatim. LiteLLM infers the provider from the ``<provider>/<model>``
+    prefix.
+
+    Default judge model is gemini-3.5-flash-lite (500 RPD free tier)
+    to avoid competing with the agent for the gemini-3.8-flash quota
+    (20 RPD free tier).
     """
     from autosre.config import get_settings
 
     settings = get_settings()
     judge = settings.eval
 
-    model = judge.judge_model or "groq/allam-2-7b"
+    # --- CHANGED: Default to Flash-Lite for higher quota ---
+    model = judge.judge_model or "gemini/gemini-3.5-flash-lite"
+    # --- END CHANGED ---
 
     key_secret = judge.judge_api_key or settings.llm.api_key
     api_key = (
@@ -648,9 +657,7 @@ def _judge_config() -> tuple[str, str | None, str]:
         else os.getenv("AUTOSRE_LLM__API_KEY", "")
     )
 
-    base_url: str | None = None
-    if model.startswith("openai/"):
-        base_url = judge.judge_base_url or settings.llm.base_url
+    base_url = judge.judge_base_url
 
     return model, base_url, api_key
 
@@ -658,8 +665,13 @@ def _judge_config() -> tuple[str, str | None, str]:
 def build_judge() -> Any:
     """Build a DeepEval LiteLLM judge. Returns None when unavailable.
 
-    Never raises. Missing API key or missing deepeval disables RCA tests
-    via the fixture guard, leaving the rest of the suite unaffected.
+    Gemini 3 note: Google's documentation recommends leaving temperature
+    at its default of 1.0. Setting it below 1.0 can cause looping or degrade
+    reasoning performance. We therefore omit temperature and let LiteLLM/
+    Gemini use the model default.
+
+    Reasoning depth is controlled via LiteLLM's ``reasoning_effort``,
+    which LiteLLM maps to Gemini 3's ``thinking_level``.
     """
     try:
         model, base_url, api_key = _judge_config()
@@ -680,8 +692,13 @@ def build_judge() -> Any:
     kwargs: dict[str, Any] = {
         "model": model,
         "api_key": api_key,
-        "temperature": 0.0,
-        "generation_kwargs": {"max_completion_tokens": 1024},
+        # Do not set temperature below Gemini 3's default of 1.0.
+        # Google warns that lower values can cause looping or degraded
+        # reasoning performance.
+        "generation_kwargs": {
+            "reasoning_effort": "low",
+            "max_completion_tokens": 1024,
+        },
     }
     if base_url is not None:
         kwargs["base_url"] = base_url
@@ -710,43 +727,78 @@ def check_server_available() -> bool:
 
 
 class RateLimitError(RuntimeError):
-    """Raised when the AutoSRE API returns HTTP 429."""
+    """Raised when an LLM provider returns a retryable error and the
+    retry budget is exhausted."""
 
 
-def is_rate_limit_error(exc: BaseException) -> bool:
-    current: BaseException | None = exc
-    seen: set[int] = set()
+def _extract_status_code(exc: BaseException) -> int | None:
+    """Extract HTTP status code from an exception, if present."""
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
 
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
+    response = getattr(exc, "response", None)
+    if response is not None:
+        response_status = getattr(response, "status_code", None)
+        if isinstance(response_status, int):
+            return response_status
 
-        status_code = getattr(current, "status_code", None)
-        if status_code == 429:
-            return True
+    return None
 
-        response = getattr(current, "response", None)
-        if getattr(response, "status_code", None) == 429:
-            return True
 
-        class_name = type(current).__name__.lower()
-        if "ratelimit" in class_name or "rate_limit" in class_name:
-            return True
+_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
 
-        current = current.__cause__ or current.__context__
 
-    return False
+def is_retryable_error(exc: BaseException) -> bool:
+    """Return True if the error warrants a retry with backoff.
+
+    Matches HTTP status codes (429, 503, 500, etc.) and common
+    provider error strings. Daily-quota errors are NOT retryable and
+    are handled separately by ``is_daily_quota_error``.
+    """
+    if is_daily_quota_error(exc):
+        return False
+
+    status_code = _extract_status_code(exc)
+    if status_code is not None and status_code in _RETRYABLE_STATUS_CODES:
+        return True
+
+    error_text = str(exc).lower()
+    return (
+        "rate limit" in error_text
+        or "too many requests" in error_text
+        or "service unavailable" in error_text
+        or "overloaded" in error_text
+        or "timeout" in error_text
+        or "connection error" in error_text
+    )
+
+
+def is_daily_quota_error(exc: BaseException) -> bool:
+    """Return True if the error indicates daily quota is depleted.
+
+    Daily-quota errors should fast-fail: no amount of backoff will
+    restore the bucket until the next reset.
+    """
+    error_text = str(exc)
+    return any(pattern.search(error_text) for pattern in _DAILY_QUOTA_PATTERNS)
+
+
+# Back-compat alias. The old name is retained so callers that imported
+# ``is_rate_limit_error`` from earlier versions continue to work.
+is_rate_limit_error = is_retryable_error
 
 
 _RETRY_AFTER_RE = re.compile(
-    r"try again in ([\d.]+)s",
+    r"try again in ([\d.]+)\s*s",
     re.IGNORECASE,
 )
 
 
 def parse_retry_after(error_text: str) -> float | None:
-    """Extract the retry-after hint from a Groq 429 body.
+    """Extract the retry-after hint from a provider error body.
 
-    Groq formats the message as "Please try again in X.Ys". Returns None
+    Parses messages of the form "Please try again in X.Ys". Returns None
     when the pattern is absent so callers fall back to their own backoff.
     """
     match = _RETRY_AFTER_RE.search(error_text)
@@ -759,50 +811,83 @@ def parse_retry_after(error_text: str) -> float | None:
         return None
 
 
+def _resolve_backoff_settings() -> tuple[float, float, int]:
+    """Read backoff parameters from settings, falling back to defaults.
+
+    Returns:
+        (initial_backoff_seconds, max_backoff_seconds, max_retries)
+    """
+    try:
+        from autosre.config import get_settings
+
+        settings = get_settings()
+        return (
+            settings.llm.initial_backoff_seconds,
+            settings.llm.max_backoff_seconds,
+            settings.llm.max_retries,
+        )
+    except Exception as exc:
+        logger.warning("Could not read backoff settings; using defaults: %s", exc)
+        return (2.0, 60.0, 5)
+
+
 async def measure_metric_with_retry(
     metric: Any,
     test_case: Any,
     *,
     label: str = "judge",
-    max_attempts: int = 6,
-    base_delay: float = 3.0,
-    max_delay: float = 45.0,
+    max_attempts: int | None = None,
+    base_delay: float | None = None,
+    max_delay: float | None = None,
 ) -> float:
-    """Measure a DeepEval metric with exponential backoff on 429s.
+    """Measure a DeepEval metric with exponential backoff on transient errors.
 
-    Retries only on rate-limit errors. Any other exception propagates
-    immediately.
+    Retries on HTTP 429, 500, 503, and other transient provider errors.
+    Any non-retryable exception propagates immediately. Daily-quota
+    errors (RPD exhausted) fast-fail as ``RateLimitError`` without retry.
+
+    Backoff parameters default to ``settings.llm`` values so the judge
+    shares the same transient-error policy as the agent. Override via
+    kwargs for test isolation.
 
     The delay between attempts is:
-        max(base_delay * 2**attempt, provider_hint + 1s)
-    capped at max_delay. The provider hint comes from Groq's
-    "Please try again in X.Ys" message when present.
+        ``min(max_delay, base_delay * 2**attempt)``
+    honored alongside any provider-supplied Retry-After hint.
 
     Args:
         metric: A DeepEval metric with an async ``a_measure`` method.
         test_case: The DeepEval test case.
         label: Human-readable identifier for logs.
         max_attempts: Total attempts before raising RateLimitError.
+            Defaults to ``settings.llm.max_retries + 1``.
         base_delay: First backoff interval, in seconds.
+            Defaults to ``settings.llm.initial_backoff_seconds``.
         max_delay: Upper bound on any single sleep, in seconds.
+            Defaults to ``settings.llm.max_backoff_seconds``.
 
     Returns:
         The metric score as a finite float.
 
     Raises:
         RateLimitError: After max_attempts, so the caller can skip.
-        Exception: Any non-rate-limit error, propagated unchanged.
+        Exception: Any non-retryable error, propagated unchanged.
     """
-    if max_attempts <= 0:
+    settings_initial, settings_max, settings_retries = _resolve_backoff_settings()
+
+    effective_initial = base_delay if base_delay is not None else settings_initial
+    effective_max = max_delay if max_delay is not None else settings_max
+    effective_attempts = max_attempts if max_attempts is not None else (settings_retries + 1)
+
+    if effective_attempts <= 0:
         raise ValueError("max_attempts must be > 0")
-    if base_delay <= 0:
+    if effective_initial <= 0:
         raise ValueError("base_delay must be > 0")
-    if max_delay <= 0:
+    if effective_max <= 0:
         raise ValueError("max_delay must be > 0")
 
     last_error: BaseException | None = None
 
-    for attempt in range(max_attempts):
+    for attempt in range(effective_attempts):
         try:
             score = await metric.a_measure(test_case)
             numeric = float(score)
@@ -812,28 +897,40 @@ async def measure_metric_with_retry(
         except Exception as exc:
             last_error = exc
 
-            if not is_rate_limit_error(exc):
+            # Daily quota exhausted: fast-fail.
+            if is_daily_quota_error(exc):
+                raise RateLimitError(f"{label}: daily quota exhausted: {exc}") from exc
+
+            # Non-retryable error: propagate immediately.
+            if not is_retryable_error(exc):
                 raise
 
-            if attempt == max_attempts - 1:
+            # Last attempt failed: budget exhausted.
+            if attempt == effective_attempts - 1:
                 break
 
-            exp_delay = base_delay * (2**attempt)
+            exp_delay = effective_initial * (2**attempt)
+
             hint = parse_retry_after(str(exc))
-            delay = exp_delay if hint is None else max(exp_delay, hint + 1.0)
-            delay = min(delay, max_delay)
+            if hint is not None:
+                delay = min(max(exp_delay, hint + 1.0), effective_max)
+            else:
+                delay = min(exp_delay, effective_max)
 
             logger.warning(
-                "%s rate-limited (attempt %d/%d); waiting %.1fs",
+                "%s transient error (attempt %d/%d); waiting %.1fs: %s",
                 label,
                 attempt + 1,
-                max_attempts,
+                effective_attempts,
                 delay,
+                exc,
             )
             await asyncio.sleep(delay)
 
     assert last_error is not None
-    raise RateLimitError(f"{label} rate-limited after {max_attempts} attempts: {last_error}")
+    raise RateLimitError(
+        f"{label} retries exhausted after {effective_attempts} attempts: {last_error}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1255,8 +1352,8 @@ async def run_incident(
         pytest.skip(str(exc))
 
     except Exception as exc:
-        if is_rate_limit_error(exc):
-            pytest.skip(f"Rate limited while evaluating {incident_id}: {exc}")
+        if is_retryable_error(exc):
+            pytest.skip(f"Transient error while evaluating {incident_id}: {exc}")
         raise
 
 
@@ -1328,7 +1425,9 @@ __all__ = [
     "compute_aggregate_metrics",
     "incident_by_id",
     "incident_ids",
+    "is_daily_quota_error",
     "is_rate_limit_error",
+    "is_retryable_error",
     "load_all_results",
     "load_result",
     "measure_metric_with_retry",

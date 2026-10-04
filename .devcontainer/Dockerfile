@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM mcr.microsoft.com/devcontainers/java:3.0.0-25-bookworm
+FROM mcr.microsoft.com/devcontainers/java:3.0.0-25-bookworm@sha256:b4afd9d59c7941e13de69300d4666fbe9ff39106915bb989c8756a6f5728fa40
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DOCKER_BUILDKIT=1 \
     BUILDKIT_PROGRESS=plain \
     MAVEN_HOME=/opt/maven \
-    PYTHON314_HOME=/opt/python/3.14.6 \
+    PYTHON314_HOME=/opt/python/3.14.8 \
     GO127_HOME=/opt/go/1.27.1 \
     JAVA_HOME=/usr/lib/jvm/msopenjdk-current \
     NVM_DIR=/usr/local/share/nvm \
@@ -17,8 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # IMPORTANT:
 # Extend the PATH inherited from the Java base image.
 # Do NOT replace it.
-ENV PATH="/usr/local/share/nvm/current/bin:${MAVEN_HOME}/bin:${PATH}"
-
+ENV PATH="/root/.local/bin:/usr/local/share/nvm/current/bin:${MAVEN_HOME}/bin:${PATH}"
 COPY bootstrap.sh /usr/local/share/devcontainer-bootstrap.sh
 
 RUN chmod 0755 /usr/local/share/devcontainer-bootstrap.sh \

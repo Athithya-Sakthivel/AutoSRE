@@ -22,4 +22,8 @@ rm -rf node_modules package-lock.json
 
 npm install
 
+npx playwright --version
+npx playwright install --with-deps chromium
+npx playwright install --list
+
 echo "✓ Dependencies locked"
