@@ -24,7 +24,7 @@ export AUTOSRE_LLM__MODEL_COORDINATOR="${AUTOSRE_LLM__MODEL_COORDINATOR:-gemini/
 export AUTOSRE_LLM__MODEL_WORKER="${AUTOSRE_LLM__MODEL_WORKER:-gemini/gemini-3.5-flash-lite}"
 
 # API key. Accepts either LLM_API_KEY (legacy) or AUTOSRE_LLM__API_KEY.
-export AUTOSRE_LLM__API_KEY="${AUTOSRE_LLM__API_KEY:-${LLM_API_KEY:?LLM_API_KEY is required}}"
+export AUTOSRE_LLM__API_KEY="${AUTOSRE_LLM__API_KEY:?AUTOSRE_LLM__API_KEY is required}}"
 
 # Token pricing (USD / 1K tokens) — Gemini 3.x Standard tier.
 # Free tier bills $0.00, but the eval harness uses these rates to

@@ -3,7 +3,7 @@
 # autosre-agent-deploy.sh — AutoSRE Agent lifecycle manager
 #
 # Renders and applies the AutoSRE agent stack:
-#   1. ServiceAccount + RBAC — cluster-wide permissions for remediation
+#   1. ServiceAccount + RBAC — least-privilege permissions (no secrets access)
 #   2. Deployment            — Python FastAPI agent, distroless
 #   3. Service               — ClusterIP :8000 (HTTP API + webhooks)
 #
@@ -13,8 +13,8 @@
 #     latest        -> imagePullPolicy: Always
 #     anything else -> imagePullPolicy: IfNotPresent
 #
-# Secrets contract:
-#   autosre-agent-secrets   AUTOSRE_* (51 keys, LLM/Postgres/OpenObserve/Safety)
+# Secrets contract (all created by eso_local.sh):
+#   autosre-agent-secrets   AUTOSRE_* (86 keys including Valkey)
 #   postgres-agent          POSTGRES_HOST/PORT/DB/USER/PASSWORD/URI
 #   openobserve-reader      email/password/url
 #   otel-exporter-headers   otel-exporter-headers (optional)
@@ -24,6 +24,12 @@
 #   * sre-agent-ingress    — ingress :8000 (openobserve webhooks, eval, host)
 #   * allow-dns-egress     — DNS resolution
 #   * default-deny         — Cilium endpoint isolation
+#
+# Dependencies (must be deployed before this script):
+#   1. scripts/staging/eso_local.sh          — ESO + all secrets
+#   2. infra/k8s/cilium/templates/           — Cilium network policies
+#   3. scripts/staging/postgres.sh           — Postgres in rivulet namespace
+#   4. scripts/staging/valkey-deploy.sh      — Valkey in rivulet namespace
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -36,12 +42,12 @@ umask 0077
 NAMESPACE="${NAMESPACE:-sre}"
 APP_NAME="${APP_NAME:-autosre-agent}"
 IMAGE_REPO="${IMAGE_REPO:-ghcr.io/athithya-sakthivel/autosre-agent}"
-IMAGE_TAG="${IMAGE_TAG:-latest}"
+IMAGE_TAG="${IMAGE_TAG:-4fe4ee8}"
 
 DEPLOYMENT_ENVIRONMENT="${DEPLOYMENT_ENVIRONMENT:-staging}"
 OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-autosre-agent}"
 
-# Service DNS — cross-namespace references
+# Service DNS — cross-namespace references (rivulet namespace)
 PG_HOST="${PG_HOST:-postgres.rivulet.svc.cluster.local}"
 PG_PORT="${PG_PORT:-5432}"
 VALKEY_HOST="${VALKEY_HOST:-valkey.rivulet.svc.cluster.local}"
@@ -49,7 +55,7 @@ VALKEY_PORT="${VALKEY_PORT:-6379}"
 OBSERVE_URL="${OBSERVE_URL:-http://openobserve.openobserve.svc.cluster.local:5080}"
 OTEL_ENDPOINT="${OTEL_ENDPOINT:-http://otel-gateway.openobserve.svc.cluster.local:4318}"
 
-# Secret names
+# Secret names (all in sre namespace, created by eso_local.sh)
 AGENT_SECRETS="${AGENT_SECRETS:-autosre-agent-secrets}"
 PG_SECRET="${PG_SECRET:-postgres-agent}"
 OBSERVE_SECRET="${OBSERVE_SECRET:-openobserve-reader}"
@@ -141,6 +147,13 @@ collect_diagnostics() {
       printf '  %s: MISSING\n' "${s}" >&2
     fi
   done
+  log_error "--- Agent secret key count ---"
+  local key_count
+  key_count="$(kubectl -n "${NAMESPACE}" get secret "${AGENT_SECRETS}" -o jsonpath='{.data}' 2>/dev/null | jq 'keys | length' 2>/dev/null || echo "?")"
+  printf '  %s: %s keys\n' "${AGENT_SECRETS}" "${key_count}" >&2
+  log_error "--- Valkey keys in agent secret ---"
+  kubectl -n "${NAMESPACE}" get secret "${AGENT_SECRETS}" -o json 2>/dev/null | \
+    jq -r '.data | keys[] | select(startswith("AUTOSRE_VALKEY"))' 2>/dev/null | sed 's/^/  /' >&2 || true
   log_error "--- CiliumNetworkPolicies ---"
   kubectl -n "${NAMESPACE}" get cnp -o wide 2>&1 | sed 's/^/  /' || true
 
@@ -151,7 +164,7 @@ collect_diagnostics() {
     log_error "--- Pod Describe (tail 40) ---"
     kubectl -n "${NAMESPACE}" describe pod "${pod}" 2>&1 | tail -n 40 | sed 's/^/  /' || true
     log_error "--- Init container logs ---"
-    kubectl -n "${NAMESPACE}" logs "${pod}" -c wait-for-postgres --tail=40 2>&1 | sed 's/^/  /' || true
+    kubectl -n "${NAMESPACE}" logs "${pod}" -c wait-for-datastores --tail=40 2>&1 | sed 's/^/  /' || true
     log_error "--- App logs (tail 80) ---"
     kubectl -n "${NAMESPACE}" logs "${pod}" -c "${APP_NAME}" --tail=80 2>&1 | sed 's/^/  /' || true
   fi
@@ -191,6 +204,21 @@ preflight_cilium() {
   fi
 }
 
+preflight_secrets() {
+  # Verify autosre-agent-secrets has Valkey keys
+  if kubectl -n "${NAMESPACE}" get secret "${AGENT_SECRETS}" >/dev/null 2>&1; then
+    local valkey_count
+    valkey_count="$(kubectl -n "${NAMESPACE}" get secret "${AGENT_SECRETS}" -o json 2>/dev/null | \
+      jq '[.data | keys[] | select(startswith("AUTOSRE_VALKEY"))] | length' 2>/dev/null || echo "0")"
+    if [[ "${valkey_count}" -lt 4 ]]; then
+      log_warn "autosre-agent-secrets has only ${valkey_count}/4 Valkey keys."
+      log_warn "Re-run scripts/staging/eso_local.sh with the updated script."
+    else
+      log_info "autosre-agent-secrets has all 4 Valkey keys"
+    fi
+  fi
+}
+
 preflight() {
   command -v kubectl >/dev/null 2>&1 || die "kubectl not found"
   kubectl cluster-info >/dev/null 2>&1 || die "kubectl cannot reach the cluster"
@@ -212,16 +240,21 @@ preflight() {
     log_warn "Service 'postgres' not found in namespace 'rivulet'."
     log_warn "Init container will block until it appears."
   fi
+  if ! kubectl -n rivulet get svc valkey >/dev/null 2>&1; then
+    log_warn "Service 'valkey' not found in namespace 'rivulet'."
+    log_warn "Init container will block until it appears."
+  fi
 
   local s
   for s in "${AGENT_SECRETS}" "${PG_SECRET}" "${OBSERVE_SECRET}"; do
     if ! kubectl -n "${NAMESPACE}" get secret "${s}" >/dev/null 2>&1; then
       log_warn "Secret '${s}' not found in namespace '${NAMESPACE}'."
-      log_warn "Pods will fail to start until it exists."
+      log_warn "Run scripts/staging/eso_local.sh first."
     fi
   done
 
   preflight_cilium
+  preflight_secrets
 }
 
 # ------------------------------------------------------------------------------
@@ -235,7 +268,7 @@ render_manifests() {
   local image_ref="${IMAGE_REPO}:${IMAGE_TAG}"
 
   # ---------------------------------------------------------------------------
-  # ServiceAccount + RBAC
+  # ServiceAccount + RBAC (least-privilege, no secrets access)
   # ---------------------------------------------------------------------------
   cat > "${GEN_DIR}/rbac.yaml" <<EOF
 apiVersion: v1
@@ -255,7 +288,7 @@ metadata:
     app.kubernetes.io/name: ${APP_NAME}
     app.kubernetes.io/part-of: autosre
 rules:
-  # Pod operations (restart, delete, logs)
+  # Pod operations (list, logs, delete for remediation tools)
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch", "delete"]
@@ -263,25 +296,29 @@ rules:
     resources: ["pods/exec"]
     verbs: ["create"]
 
-  # Deployment operations (scale, restart, patch)
+  # Deployment operations (scale, restart, patch for remediation tools)
   - apiGroups: ["apps"]
     resources: ["deployments", "deployments/scale", "replicasets"]
     verbs: ["get", "list", "watch", "patch", "update"]
 
-  # Event inspection
+  # Event inspection (for get_pod_events tool)
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list", "watch"]
 
-  # Service discovery
+  # Service discovery (for tool target resolution)
   - apiGroups: [""]
     resources: ["services", "endpoints"]
     verbs: ["get", "list", "watch"]
 
-  # ConfigMap/Secret read (for inspection, not mutation)
-  - apiGroups: [""]
-    resources: ["configmaps", "secrets"]
-    verbs: ["get", "list", "watch"]
+  # Node metrics (for get_pod_metrics tool via metrics.k8s.io)
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+
+  # NOTE: NO secrets or configmaps access.
+  # Agent receives all credentials via environment variables injected by ESO.
+  # Cluster-wide secrets access is a CRITICAL security finding (KSV-0041).
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -333,21 +370,25 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
-        - name: wait-for-postgres
+        - name: wait-for-datastores
           image: ${INIT_IMAGE}
           command:
             - sh
             - -c
             - |
               set -eu
-              echo "waiting for postgres ${PG_HOST}:${PG_PORT} ..."
-              i=0
-              until timeout -k 2 3 nc -z -w 2 "${PG_HOST}" "${PG_PORT}" 2>/dev/null; do
-                i=\$((i + 1))
-                echo "  attempt \${i} failed, retrying in 2s..."
-                sleep 2
-              done
-              echo "postgres reachable"
+              wait_tcp() {
+                host="\$1"; port="\$2"; label="\$3"; i=0
+                echo "waiting for \${label} \${host}:\${port} ..."
+                until timeout -k 2 3 nc -z -w 2 "\${host}" "\${port}" 2>/dev/null; do
+                  i=\$((i + 1))
+                  echo "  [\${label}] attempt \${i} failed, retrying in 2s..."
+                  sleep 2
+                done
+                echo "\${label} reachable"
+              }
+              wait_tcp "${PG_HOST}" "${PG_PORT}" "postgres"
+              wait_tcp "${VALKEY_HOST}" "${VALKEY_PORT}" "valkey"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -360,17 +401,19 @@ spec:
           image: ${image_ref}
           imagePullPolicy: ${pull_policy}
           env:
-            # Service identity for telemetry
+            # ================================================================
+            # Service identity
+            # ================================================================
             - name: OTEL_SERVICE_NAME
               value: "${OTEL_SERVICE_NAME}"
             - name: DEPLOYMENT_ENVIRONMENT
               value: "${DEPLOYMENT_ENVIRONMENT}"
-
-            # HTTP port
             - name: HTTP_PORT
               value: "${HTTP_PORT}"
 
-            # Postgres — from postgres-agent secret
+            # ================================================================
+            # Postgres — from postgres-agent secret (legacy keys)
+            # ================================================================
             - name: POSTGRES_HOST
               valueFrom: { secretKeyRef: { name: ${PG_SECRET}, key: POSTGRES_HOST } }
             - name: POSTGRES_PORT
@@ -382,7 +425,9 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom: { secretKeyRef: { name: ${PG_SECRET}, key: POSTGRES_PASSWORD } }
 
-            # All AUTOSRE_* config from autosre-agent-secrets (51 keys)
+            # ================================================================
+            # AUTOSRE_LLM__* (16 keys)
+            # ================================================================
             - name: AUTOSRE_LLM__API_KEY
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__API_KEY } }
             - name: AUTOSRE_LLM__MODEL_COORDINATOR
@@ -391,6 +436,16 @@ spec:
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__MODEL_WORKER } }
             - name: AUTOSRE_LLM__FALLBACK_MODELS
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__FALLBACK_MODELS } }
+            - name: AUTOSRE_LLM__BASE_URL
+              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__BASE_URL } }
+            - name: AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR
+              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR } }
+            - name: AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR
+              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR } }
+            - name: AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER
+              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER } }
+            - name: AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER
+              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER } }
             - name: AUTOSRE_LLM__MAX_RETRIES
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__MAX_RETRIES } }
             - name: AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS
@@ -405,14 +460,10 @@ spec:
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__CIRCUIT_BREAKER_THRESHOLD } }
             - name: AUTOSRE_LLM__CIRCUIT_BREAKER_TIMEOUT_SECONDS
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__CIRCUIT_BREAKER_TIMEOUT_SECONDS } }
-            - name: AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR } }
-            - name: AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR } }
-            - name: AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER } }
-            - name: AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER } }
+
+            # ================================================================
+            # AUTOSRE_POSTGRES__* (5 keys)
+            # ================================================================
             - name: AUTOSRE_POSTGRES__HOST
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_POSTGRES__HOST } }
             - name: AUTOSRE_POSTGRES__PORT
@@ -423,16 +474,44 @@ spec:
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_POSTGRES__USER } }
             - name: AUTOSRE_POSTGRES__PASSWORD
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_POSTGRES__PASSWORD } }
+
+            # ================================================================
+            # AUTOSRE_VALKEY__* (4 keys) — cross-namespace to rivulet
+            # ================================================================
+            - name: AUTOSRE_VALKEY__HOST
+              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_VALKEY__HOST } }
+            - name: AUTOSRE_VALKEY__PORT
+              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_VALKEY__PORT } }
+            - name: AUTOSRE_VALKEY__PASSWORD
+              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_VALKEY__PASSWORD } }
+            - name: AUTOSRE_VALKEY__TLS_ENABLED
+              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_VALKEY__TLS_ENABLED } }
+
+            # ================================================================
+            # AUTOSRE_OPENOBSERVE__* (3 keys)
+            # ================================================================
             - name: AUTOSRE_OPENOBSERVE__EMAIL
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_OPENOBSERVE__EMAIL } }
             - name: AUTOSRE_OPENOBSERVE__PASSWORD
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_OPENOBSERVE__PASSWORD } }
             - name: AUTOSRE_OPENOBSERVE__URL
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_OPENOBSERVE__URL } }
+
+            # ================================================================
+            # AUTOSRE_ALERT__* (1 key)
+            # ================================================================
             - name: AUTOSRE_ALERT__WEBHOOK_SECRET
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_ALERT__WEBHOOK_SECRET } }
+
+            # ================================================================
+            # AUTOSRE_ADMIN__* (1 key, optional)
+            # ================================================================
             - name: AUTOSRE_ADMIN__SECRET
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_ADMIN__SECRET, optional: true } }
+
+            # ================================================================
+            # AUTOSRE_SAFETY__* (11 keys)
+            # ================================================================
             - name: AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS } }
             - name: AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT
@@ -455,16 +534,38 @@ spec:
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT } }
             - name: AUTOSRE_SAFETY__MAX_LLM_CALLS_PER_INCIDENT
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SAFETY__MAX_LLM_CALLS_PER_INCIDENT } }
+
+            # ================================================================
+            # AUTOSRE_OTEL__* (4 keys)
+            # ================================================================
             - name: AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT } }
             - name: AUTOSRE_OTEL__SERVICE_NAME
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_OTEL__SERVICE_NAME } }
             - name: AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT } }
+            - name: AUTOSRE_OTEL__EXPORTER_HEADERS
+              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_OTEL__EXPORTER_HEADERS } }
+
+            # ================================================================
+            # AUTOSRE_DEPLOYMENT_ENVIRONMENT (1 key)
+            # ================================================================
             - name: AUTOSRE_DEPLOYMENT_ENVIRONMENT
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_DEPLOYMENT_ENVIRONMENT } }
 
-            # Optional: Slack integration
+            # ================================================================
+            # AUTOSRE_EVAL__* (3 keys, optional — only used by eval harness)
+            # ================================================================
+            - name: AUTOSRE_EVAL__JUDGE_API_KEY
+              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_EVAL__JUDGE_API_KEY, optional: true } }
+            - name: AUTOSRE_EVAL__JUDGE_MODEL
+              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_EVAL__JUDGE_MODEL, optional: true } }
+            - name: AUTOSRE_EVAL__JUDGE_BASE_URL
+              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_EVAL__JUDGE_BASE_URL, optional: true } }
+
+            # ================================================================
+            # AUTOSRE_SLACK__* (6 keys, optional)
+            # ================================================================
             - name: AUTOSRE_SLACK__BOT_TOKEN
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SLACK__BOT_TOKEN, optional: true } }
             - name: AUTOSRE_SLACK__APP_TOKEN
@@ -478,7 +579,9 @@ spec:
             - name: AUTOSRE_SLACK__APPROVER_USER_IDS
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SLACK__APPROVER_USER_IDS, optional: true } }
 
-            # OTel exporter headers (optional)
+            # ================================================================
+            # OTel exporter headers (optional, from separate secret)
+            # ================================================================
             - name: OTEL_EXPORTER_OTLP_HEADERS
               valueFrom:
                 secretKeyRef:
@@ -618,6 +721,9 @@ cmd_status() {
   echo
   echo "=== ServiceAccount ==="
   kubectl get sa "${APP_NAME}" -n "${NAMESPACE}" 2>/dev/null || true
+  echo
+  echo "=== ClusterRole ==="
+  kubectl get clusterrole "${APP_NAME}" 2>/dev/null || true
 }
 
 cmd_logs() {
@@ -629,7 +735,7 @@ cmd_logs() {
 cmd_init_logs() {
   preflight
   kubectl logs -n "${NAMESPACE}" -l "app.kubernetes.io/name=${APP_NAME}" \
-    -c wait-for-postgres --tail=200 -f "$@"
+    -c wait-for-datastores --tail=200 -f "$@"
 }
 
 cmd_delete() {
@@ -643,6 +749,67 @@ cmd_delete() {
   log_success "AutoSRE Agent resources removed"
 }
 
+cmd_verify() {
+  preflight
+  local pod
+  pod="$(kubectl -n "${NAMESPACE}" get pods -l "app.kubernetes.io/name=${APP_NAME}" \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [[ -n "${pod}" ]] || die "No running agent pod found"
+
+  log_info "Verifying Postgres connectivity..."
+  kubectl exec -n "${NAMESPACE}" "${pod}" -c "${APP_NAME}" -- python -c "
+import os, asyncio
+from psycopg_pool import AsyncConnectionPool
+async def test():
+    dsn = f\"postgresql://{os.environ['AUTOSRE_POSTGRES__USER']}:{os.environ['AUTOSRE_POSTGRES__PASSWORD']}@{os.environ['AUTOSRE_POSTGRES__HOST']}:{os.environ['AUTOSRE_POSTGRES__PORT']}/{os.environ['AUTOSRE_POSTGRES__DB']}\"
+    pool = AsyncConnectionPool(dsn, open=False, min_size=1, max_size=2)
+    await pool.open()
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute('SELECT 1')
+            print(f'Postgres OK: {await cur.fetchone()}')
+    await pool.close()
+asyncio.run(test())
+"
+
+  log_info "Verifying Valkey connectivity..."
+  kubectl exec -n "${NAMESPACE}" "${pod}" -c "${APP_NAME}" -- python -c "
+import os, asyncio
+from redis.asyncio import Redis
+async def test():
+    r = Redis(
+        host=os.environ['AUTOSRE_VALKEY__HOST'],
+        port=int(os.environ['AUTOSRE_VALKEY__PORT']),
+        password=os.environ.get('AUTOSRE_VALKEY__PASSWORD') or None,
+        ssl=os.environ.get('AUTOSRE_VALKEY__TLS_ENABLED', 'false').lower() == 'true',
+        socket_connect_timeout=5.0,
+        decode_responses=True,
+    )
+    result = await r.ping()
+    print(f'Valkey OK: PING={result}')
+    await r.aclose()
+asyncio.run(test())
+"
+
+  log_info "Verifying health endpoint..."
+  kubectl exec -n "${NAMESPACE}" "${pod}" -c "${APP_NAME}" -- \
+    python -c "
+import urllib.request
+resp = urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)
+print(f'Health: {resp.status} {resp.read().decode().strip()}')
+"
+
+  log_info "Verifying readyz endpoint..."
+  kubectl exec -n "${NAMESPACE}" "${pod}" -c "${APP_NAME}" -- \
+    python -c "
+import urllib.request
+resp = urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5)
+print(f'Ready: {resp.status} {resp.read().decode().strip()}')
+"
+
+  log_success "All connectivity checks passed"
+}
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [--resolve-sha] <command> [args]
@@ -652,13 +819,20 @@ Commands:
   render        Render manifests to disk only (no cluster mutation)
   status        Show Deployment, Pods, Service, and ServiceAccount state
   logs          Tail agent container logs
-  init-logs     Tail the wait-for-postgres init container logs
+  init-logs     Tail the wait-for-datastores init container logs
+  verify        Test Postgres, Valkey, and health endpoint connectivity
   delete        Remove all agent resources (RBAC, Deployment, Service)
   help          Show this help
 
 Flags:
   --resolve-sha   Read IMAGE_REPO:IMAGE_TAG from local docker and re-tag as
                   sha-<12-char-sha> for an immutable deploy.
+
+Prerequisites (must be deployed before this script):
+  1. scripts/staging/eso_local.sh          — ESO + all secrets
+  2. infra/k8s/cilium/templates/           — Cilium network policies
+  3. scripts/staging/postgres.sh           — Postgres in rivulet namespace
+  4. scripts/staging/valkey-deploy.sh      — Valkey in rivulet namespace
 
 Environment Overrides:
   NAMESPACE              (default: sre)
@@ -685,6 +859,9 @@ Examples:
 
   # Deploy with an immutable image-sha tag
   ./scripts/common/autosre-agent-deploy.sh --resolve-sha deploy
+
+  # Verify all connections after deploy
+  ./scripts/common/autosre-agent-deploy.sh verify
 
   # Tail logs
   ./scripts/common/autosre-agent-deploy.sh logs
@@ -727,6 +904,7 @@ main() {
     status)          cmd_status ;;
     logs)            cmd_logs "${passthrough[@]}" ;;
     init-logs)       cmd_init_logs "${passthrough[@]}" ;;
+    verify)          cmd_verify ;;
     delete)          cmd_delete ;;
     help|--help|-h)  usage ;;
     *) usage; exit 2 ;;

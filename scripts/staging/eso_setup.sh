@@ -102,7 +102,7 @@ LLM_MODEL_SELF_CHECK="${LLM_MODEL_SELF_CHECK:-openai/gpt-oss-20b}"
 # ------------------------------------------------------------------------------
 # AutoSRE Agent values (AUTOSRE_ prefix)
 # ------------------------------------------------------------------------------
-AUTOSRE_LLM_API_KEY="${AUTOSRE_LLM_API_KEY:-$LLM_API_KEY}"
+AUTOSRE_LLM_API_KEY="${AUTOSRE_LLM__API_KEY:?AUTOSRE_LLM__API_KEY is required}}"
 AUTOSRE_LLM_MODEL_COORDINATOR="${AUTOSRE_LLM_MODEL_COORDINATOR:-gemini/gemini-2.5-flash}"
 AUTOSRE_LLM_MODEL_WORKER="${AUTOSRE_LLM_MODEL_WORKER:-gemini/gemini-2.5-flash}"
 AUTOSRE_LLM_FALLBACK_MODELS="${AUTOSRE_LLM_FALLBACK_MODELS:-[\"gemini/gemini-2.0-flash\",\"gemini/gemini-1.5-flash\"]}"
@@ -124,6 +124,11 @@ AUTOSRE_POSTGRES_PORT="${AUTOSRE_POSTGRES_PORT:-$PG_RIVULET_PORT}"
 AUTOSRE_POSTGRES_DB="${AUTOSRE_POSTGRES_DB:-$PG_RIVULET_DB}"
 AUTOSRE_POSTGRES_USER="${AUTOSRE_POSTGRES_USER:-$PG_RIVULET_USER}"
 AUTOSRE_POSTGRES_PASSWORD="${AUTOSRE_POSTGRES_PASSWORD:-$PG_RIVULET_PASS}"
+
+AUTOSRE_VALKEY_HOST="${AUTOSRE_VALKEY_HOST:-valkey.rivulet.svc.cluster.local}"
+AUTOSRE_VALKEY_PORT="${AUTOSRE_VALKEY_PORT:-6379}"
+AUTOSRE_VALKEY_PASSWORD="${AUTOSRE_VALKEY_PASSWORD:-StagingValkeyP@ss123}"
+AUTOSRE_VALKEY_TLS_ENABLED="${AUTOSRE_VALKEY_TLS_ENABLED:-false}"
 
 AUTOSRE_OPENOBSERVE_EMAIL="${AUTOSRE_OPENOBSERVE_EMAIL:-$OBS_READER_EMAIL}"
 AUTOSRE_OPENOBSERVE_PASSWORD="${AUTOSRE_OPENOBSERVE_PASSWORD:-$OBS_READER_PASSWORD}"
@@ -235,7 +240,7 @@ ensure_namespaces() {
 }
 
 # ------------------------------------------------------------------------------
-# Source Secret — writes ALL 68 keys
+# Source Secret — writes ALL 86 keys
 # ------------------------------------------------------------------------------
 ensure_source_secret() {
   if [[ "$DRY_RUN" == "true" ]]; then
@@ -336,6 +341,12 @@ ensure_source_secret() {
     _put AutosrePostgresDb               "$AUTOSRE_POSTGRES_DB"
     _put AutosrePostgresUser             "$AUTOSRE_POSTGRES_USER"
     _put AutosrePostgresPassword         "$AUTOSRE_POSTGRES_PASSWORD"
+
+    # Autosre Valkey (4 keys) — cross-namespace to rivulet
+    _put AutosreValkeyHost               "$AUTOSRE_VALKEY_HOST"
+    _put AutosreValkeyPort               "$AUTOSRE_VALKEY_PORT"
+    _put AutosreValkeyPassword           "$AUTOSRE_VALKEY_PASSWORD"
+    _put AutosreValkeyTlsEnabled         "$AUTOSRE_VALKEY_TLS_ENABLED"
 
     # Autosre OpenObserve (3 keys)
     _put AutosreOpenobserveEmail         "$AUTOSRE_OPENOBSERVE_EMAIL"
@@ -463,7 +474,7 @@ YAML
 }
 
 # ------------------------------------------------------------------------------
-# ExternalSecrets (same as before, no changes needed)
+# ExternalSecrets
 # ------------------------------------------------------------------------------
 emit_external_secrets() {
   local K="$SOURCE_SECRET"
@@ -667,6 +678,10 @@ spec:
     - { secretKey: AUTOSRE_POSTGRES__DB,       remoteRef: { key: ${K}, property: AutosrePostgresDb } }
     - { secretKey: AUTOSRE_POSTGRES__USER,     remoteRef: { key: ${K}, property: AutosrePostgresUser } }
     - { secretKey: AUTOSRE_POSTGRES__PASSWORD, remoteRef: { key: ${K}, property: AutosrePostgresPassword } }
+    - { secretKey: AUTOSRE_VALKEY__HOST,        remoteRef: { key: ${K}, property: AutosreValkeyHost } }
+    - { secretKey: AUTOSRE_VALKEY__PORT,        remoteRef: { key: ${K}, property: AutosreValkeyPort } }
+    - { secretKey: AUTOSRE_VALKEY__PASSWORD,    remoteRef: { key: ${K}, property: AutosreValkeyPassword } }
+    - { secretKey: AUTOSRE_VALKEY__TLS_ENABLED, remoteRef: { key: ${K}, property: AutosreValkeyTlsEnabled } }
     - { secretKey: AUTOSRE_OPENOBSERVE__EMAIL,    remoteRef: { key: ${K}, property: AutosreOpenobserveEmail } }
     - { secretKey: AUTOSRE_OPENOBSERVE__PASSWORD, remoteRef: { key: ${K}, property: AutosreOpenobservePassword } }
     - { secretKey: AUTOSRE_OPENOBSERVE__URL,      remoteRef: { key: ${K}, property: AutosreOpenobserveUrl } }

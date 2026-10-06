@@ -15,7 +15,7 @@ metadata:
     app.kubernetes.io/name: autosre-agent
     app.kubernetes.io/part-of: autosre
 rules:
-  # Pod operations (restart, delete, logs)
+  # Pod operations (list, logs, delete for remediation tools)
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch", "delete"]
@@ -23,25 +23,29 @@ rules:
     resources: ["pods/exec"]
     verbs: ["create"]
 
-  # Deployment operations (scale, restart, patch)
+  # Deployment operations (scale, restart, patch for remediation tools)
   - apiGroups: ["apps"]
     resources: ["deployments", "deployments/scale", "replicasets"]
     verbs: ["get", "list", "watch", "patch", "update"]
 
-  # Event inspection
+  # Event inspection (for get_pod_events tool)
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list", "watch"]
 
-  # Service discovery
+  # Service discovery (for tool target resolution)
   - apiGroups: [""]
     resources: ["services", "endpoints"]
     verbs: ["get", "list", "watch"]
 
-  # ConfigMap/Secret read (for inspection, not mutation)
-  - apiGroups: [""]
-    resources: ["configmaps", "secrets"]
-    verbs: ["get", "list", "watch"]
+  # Node metrics (for get_pod_metrics tool via metrics.k8s.io)
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+
+  # NOTE: NO secrets or configmaps access.
+  # Agent receives all credentials via environment variables injected by ESO.
+  # Cluster-wide secrets access is a CRITICAL security finding (KSV-0041).
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

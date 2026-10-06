@@ -46,10 +46,19 @@ class SlackHandler:
         self._inflight_incidents: set[str] = set()
         self._approver_user_ids = frozenset(approver_user_ids or ())
 
+        # Only create SignatureVerifier if signing_secret is provided and non-empty.
+        # In socket mode, signing_secret is not required because WebSocket connections
+        # are authenticated via app_token. The SignatureVerifier is only needed for
+        # HTTP mode where Slack sends signed webhook requests.
         if config.signing_secret is not None:
-            self._verifier = SignatureVerifier(
-                signing_secret=config.signing_secret.get_secret_value()
-            )
+            secret_value = config.signing_secret.get_secret_value()
+            if secret_value:  # Only create verifier if non-empty
+                self._verifier = SignatureVerifier(signing_secret=secret_value)
+                logger.debug("Slack SignatureVerifier initialized for HTTP mode")
+            else:
+                logger.debug(
+                    "Slack signing_secret is empty; SignatureVerifier disabled (socket mode)"
+                )
 
     def verify_request(
         self,
@@ -60,6 +69,8 @@ class SlackHandler:
         verifier = self._verifier
 
         if verifier is None:
+            # No verifier means we're in socket mode or signing_secret wasn't configured.
+            # HTTP requests should not be processed in this mode.
             return False
 
         try:

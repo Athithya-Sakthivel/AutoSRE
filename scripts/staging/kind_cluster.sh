@@ -19,6 +19,15 @@ IFS=$'\n\t'
 #     CNI, installing Cilium on top of it is unsafe and the script refuses.
 #     The user is told exactly how to proceed.
 #
+# Cilium kube-apiserver detection fix
+# ------------------------------------
+#   In Kind clusters, kube-apiserver runs inside a Docker container with an IP
+#   on the Docker bridge network (typically 172.18.0.X). Without explicit
+#   k8sServiceHost/k8sServicePort configuration, Cilium cannot properly identify
+#   the apiserver endpoint, causing `toEntities: [kube-apiserver]` in
+#   CiliumNetworkPolicy to fail. This script detects the control plane IP and
+#   passes it to Cilium during installation.
+#
 # Overrides
 # ---------
 #   CLUSTER                  default: kind
@@ -86,6 +95,26 @@ cluster_has_cilium() {
 
 cluster_has_kindnet() {
   kubectl --context "$(ctx)" get daemonset kindnet -n kube-system >/dev/null 2>&1
+}
+
+# ------------------------------------------------------------------------------
+# Detect Kind control plane IP for Cilium kube-apiserver configuration
+# ------------------------------------------------------------------------------
+detect_control_plane_ip() {
+  # Kind control plane container name follows the pattern: <cluster>-control-plane
+  local container_name="${CLUSTER}-control-plane"
+
+  # Get the container's IP address on the Docker bridge network
+  local ip
+  ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${container_name}" 2>/dev/null)
+
+  if [[ -z "${ip}" ]]; then
+    warn "Could not detect control plane IP from container '${container_name}'"
+    warn "Falling back to kubernetes service IP (10.96.0.1)"
+    ip="10.96.0.1"
+  fi
+
+  printf '%s' "${ip}"
 }
 
 # ------------------------------------------------------------------------------
@@ -160,16 +189,30 @@ recreate_cluster() {
 # ------------------------------------------------------------------------------
 install_cilium() {
   log "Installing/upgrading Cilium ${CILIUM_VERSION} (CNI + kube-proxy replacement)"
+
+  # Detect control plane IP for kube-apiserver entity detection
+  local control_plane_ip
+  control_plane_ip=$(detect_control_plane_ip)
+  log "Detected control plane IP: ${control_plane_ip}"
+
+  # Install Cilium with explicit k8sServiceHost/k8sServicePort so that
+  # CiliumNetworkPolicy's toEntities: [kube-apiserver] works correctly in Kind.
+  # Without this, Cilium cannot properly identify the apiserver endpoint,
+  # causing network policies targeting kube-apiserver to fail silently.
   helm upgrade --install cilium "${CILIUM_CHART}" \
     --namespace kube-system \
     --version "${CILIUM_VERSION}" \
     --set ipam.mode=kubernetes \
     --set kubeProxyReplacement=true \
+    --set k8sServiceHost="${control_plane_ip}" \
+    --set k8sServicePort=6443 \
     --set operator.replicas=1 \
     --wait --timeout "${WAIT_TIMEOUT}s"
 
   kubectl rollout status daemonset/cilium -n kube-system --timeout="${WAIT_TIMEOUT}s"
   kubectl rollout status deployment/cilium-operator -n kube-system --timeout="${WAIT_TIMEOUT}s"
+
+  log "Cilium configured with k8sServiceHost=${control_plane_ip}:6443"
 }
 
 wait_for_nodes_ready() {

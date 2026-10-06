@@ -1,26 +1,25 @@
-{{- if .Values.networkPolicies.enabled }}
-# =============================================================================
-# SRE Agent egress — exactly 6 destinations, explicitly enumerated
-# =============================================================================
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
   name: sre-agent-egress
-  namespace: {{ .Values.networkPolicies.sreNamespace }}
-  labels:
-    app.kubernetes.io/part-of: autosre-cilium
-    app.kubernetes.io/component: network-policy
+  namespace: sre
 spec:
   endpointSelector:
     matchLabels:
       app.kubernetes.io/name: autosre-agent
   egress:
-    # 1. Kubernetes API (for kr8s/kubectl remediation operations)
+    # kube-apiserver (with Kind CIDR fallback)
     - toEntities:
         - kube-apiserver
       toPorts:
         - ports:
-            - port: "443"
+            - port: "6443"
+              protocol: TCP
+    - toCIDR:
+        - 172.18.0.0/16  # Kind Docker network range
+      toPorts:
+        - ports:
+            - port: "6443"
               protocol: TCP
 
     # 2. Postgres (for terminate_backend and state DB)
