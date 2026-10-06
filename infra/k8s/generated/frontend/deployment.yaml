@@ -30,7 +30,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: frontend
-          image: ghcr.io/athithya-sakthivel/rivulet-frontend:183c4ea
+          image: ghcr.io/athithya-sakthivel/rivulet-frontend:d0e808b
           imagePullPolicy: IfNotPresent
           env:
             - name: BACKEND_URL

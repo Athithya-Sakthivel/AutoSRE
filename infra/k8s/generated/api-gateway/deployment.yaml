@@ -56,15 +56,15 @@ spec:
             limits:   { cpu: 100m, memory: 32Mi }
       containers:
         - name: api-gateway
-          image: ghcr.io/athithya-sakthivel/rivulet-api-gateway:latest
-          imagePullPolicy: Always
+          image: ghcr.io/athithya-sakthivel/rivulet-api-gateway:d0e808b
+          imagePullPolicy: IfNotPresent
           env:
             - name: SPRING_PROFILES_ACTIVE
               value: "production"
             - name: SPRING_FLYWAY_ENABLED
               value: "false"
             - name: GIT_VERSION
-              value: "latest"
+              value: "d0e808b"
 
             - name: PGHOST
               value: "postgres.rivulet.svc.cluster.local"

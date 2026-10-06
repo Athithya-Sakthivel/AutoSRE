@@ -52,8 +52,8 @@ spec:
             limits:   { cpu: 100m, memory: 32Mi }
       containers:
         - name: migrate
-          image: ghcr.io/athithya-sakthivel/rivulet-api-gateway:latest
-          imagePullPolicy: Always
+          image: ghcr.io/athithya-sakthivel/rivulet-api-gateway:d0e808b
+          imagePullPolicy: IfNotPresent
           env:
             - name: MIGRATE_ONLY
               value: "true"

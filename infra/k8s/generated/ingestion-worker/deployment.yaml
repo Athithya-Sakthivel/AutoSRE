@@ -59,8 +59,8 @@ spec:
             limits:   { cpu: 100m, memory: 32Mi }
       containers:
         - name: ingestion-worker
-          image: ghcr.io/athithya-sakthivel/rivulet-ingestion-worker:latest
-          imagePullPolicy: Always
+          image: ghcr.io/athithya-sakthivel/rivulet-ingestion-worker:d0e808b
+          imagePullPolicy: IfNotPresent
           env:
             # Service identity for telemetry
             - name: OTEL_SERVICE_NAME
@@ -68,7 +68,7 @@ spec:
             - name: DEPLOYMENT_ENVIRONMENT
               value: "evaluation"
             - name: GIT_VERSION
-              value: "latest"
+              value: "d0e808b"
 
             # HTTP + Chaos ports (config.Load reads these)
             - name: HTTP_PORT

@@ -27,7 +27,7 @@ umask 0077
 # ------------------------------------------------------------------------------
 NAMESPACE="${NAMESPACE:-rivulet}"
 IMAGE_REPO="${IMAGE_REPO:-ghcr.io/athithya-sakthivel/rivulet-frontend}"
-IMAGE_TAG="${IMAGE_TAG:-183c4ea}"
+IMAGE_TAG="${IMAGE_TAG:-d0e808b}"
 BACKEND_URL="${BACKEND_URL:-http://api-gateway.${NAMESPACE}.svc.cluster.local:8080}"
 REPLICAS="${REPLICAS:-2}"
 PORT="${PORT:-8080}"

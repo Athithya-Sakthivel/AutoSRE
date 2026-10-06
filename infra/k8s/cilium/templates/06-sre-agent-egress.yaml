@@ -1,14 +1,32 @@
+{{- if .Values.networkPolicies.enabled }}
+# =============================================================================
+# SRE Agent egress — exactly 6 destination categories, explicitly enumerated
+#
+# The agent needs to reach:
+#   1. kube-apiserver (for kr8s/kubectl remediation operations)
+#   2. postgres (for terminate_backend and state DB)
+#   3. valkey (for cache operations)
+#   4. openobserve (for log/metric queries)
+#   5. otel-gateway (for trace export)
+#   6. world:443 (external LLM provider)
+# =============================================================================
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
   name: sre-agent-egress
-  namespace: sre
+  namespace: {{ .Values.networkPolicies.sreNamespace }}
+  labels:
+    app.kubernetes.io/part-of: autosre-cilium
+    app.kubernetes.io/component: network-policy
 spec:
   endpointSelector:
     matchLabels:
       app.kubernetes.io/name: autosre-agent
   egress:
-    # kube-apiserver (with Kind CIDR fallback)
+    # 1. Kubernetes API (for kr8s/kubectl operations)
+    #    In Kind clusters, kube-apiserver runs in a Docker container on the
+    #    bridge network (172.18.0.0/16). The toEntities rule works in managed
+    #    K8s (AKS/GKE/EKS); the toCIDR rule is the Kind fallback.
     - toEntities:
         - kube-apiserver
       toPorts:
@@ -16,7 +34,7 @@ spec:
             - port: "6443"
               protocol: TCP
     - toCIDR:
-        - 172.18.0.0/16  # Kind Docker network range
+        - 172.18.0.0/16
       toPorts:
         - ports:
             - port: "6443"

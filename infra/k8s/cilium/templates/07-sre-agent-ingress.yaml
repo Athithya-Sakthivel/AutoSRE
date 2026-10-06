@@ -33,6 +33,15 @@ spec:
         - ports:
             - port: "5080"
               protocol: TCP
+    # OTel Gateway forwarding telemetry (traces/metrics/logs)
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+            app.kubernetes.io/name: otel-gateway
+      toPorts:
+        - ports:
+            - port: "5080"
+              protocol: TCP
     # External users (port-forward or Ingress to OpenObserve UI)
     - fromEntities:
         - host
