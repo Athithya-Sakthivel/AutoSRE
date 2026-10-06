@@ -1,17 +1,24 @@
 {{- if .Values.networkPolicies.enabled }}
+# =============================================================================
+# Eval egress — chaos injection, agent API, openobserve, external LLM judge
+# NOTE: chaos targets use `component: backend` to exclude frontend, postgres, valkey
+# =============================================================================
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
   name: eval-egress
   namespace: {{ .Values.networkPolicies.evalNamespace }}
+  labels:
+    app.kubernetes.io/part-of: autosre-cilium
+    app.kubernetes.io/component: network-policy
 spec:
   endpointSelector: {}
   egress:
-    # Chaos injection ports (8081) on Rivulet pods ONLY
+    # Chaos injection ports (:8081) on api-gateway and ingestion-worker ONLY
     - toEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
-            app.kubernetes.io/part-of: rivulet
+            app.kubernetes.io/component: backend
       toPorts:
         - ports:
             - port: "8081"
@@ -28,16 +35,17 @@ spec:
               protocol: TCP
 
     # OpenObserve for querying metrics/logs
+    # NOTE: pod uses `app.kubernetes.io/name: open-observe-minimal`
     - toEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
-            app.kubernetes.io/name: openobserve
+            app.kubernetes.io/name: open-observe-minimal
       toPorts:
         - ports:
             - port: "5080"
               protocol: TCP
 
-    # Groq API for LLM-as-a-Judge evaluation
+    # External LLM judge API (Gemini/Groq/etc)
     - toEntities:
         - world
       toPorts:

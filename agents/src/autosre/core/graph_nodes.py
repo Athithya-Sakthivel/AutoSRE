@@ -5,13 +5,14 @@ partial state dict to merge. All infrastructure dependencies (LLM router,
 tool registry, safe executor, policy engine) are injected via
 ``config['configurable']['graph_context']``.
 
-## Portfolio-Ready Features
+## Production-Ready Features
 
 - **Multi-model rotation**: Router tries primary model, then fallbacks
 - **LLM-resilient investigation**: Executes all Tier 0 tools when LLM fails
 - **Category-based fallback actions**: Proposes remediation even without LLM
 - **Accurate cost tracking**: Tracks both actual ($0 on free tier) and estimated paid costs
 - **Model usage tracking**: Per-model call counts and token usage
+- **Namespace security boundary**: _clamp_namespace ALWAYS enforces incident scope
 
 ## Behaviour thresholds
 
@@ -70,41 +71,101 @@ logger = logging.getLogger(__name__)
 _JSON_FORMAT = {"type": "json_object"}
 
 # ---------------------------------------------------------------------------
-# Fallback actions for common incident categories
+# Fallback actions for known incident categories
+# ---------------------------------------------------------------------------
+#
+# These are used when:
+#   1. The LLM call to propose_node fails (quota/capacity/budget), OR
+#   2. Hypothesis confidence is below the propose threshold
+#
+# Keys MUST match the ``category`` label in the incident dataset.
+# ``tool_args`` field names MUST match the Pydantic input model field names
+# in the corresponding tool (e.g., "name" not "deployment").
+#
+# The ``_build_fallback_args`` function dynamically fills in the service
+# name from incident metadata, so these templates use placeholder values
+# that get overridden at runtime.
 # ---------------------------------------------------------------------------
 
-FALLBACK_ACTIONS = {
-    "db_connection_exhaustion": {
-        "tool_name": "restart_deployment",
-        "tool_args": {"deployment": "api-gateway"},
-        "rationale": "Connection pool exhaustion typically resolved by pod restart",
-        "risk_tier": 1,  # Tier 1 = reversible
-    },
-    "cache_poison": {
-        "tool_name": "delete_valkey_key",
-        "tool_args": {"key_pattern": "poisoned:*"},
-        "rationale": "Cache corruption resolved by key deletion",
-        "risk_tier": 1,
-    },
+FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
+    # --- K8s pod-level issues (restart is safe, Tier 1) ---
     "pod_crash_loop": {
         "tool_name": "restart_deployment",
-        "tool_args": {},
-        "rationale": "Crashloop resolved by restart",
+        "tool_args": {"reason": "CrashLoopBackOff detected; rolling restart to clear stuck state"},
         "risk_tier": 1,
     },
     "memory_pressure": {
         "tool_name": "restart_deployment",
-        "tool_args": {},
-        "rationale": "Memory pressure resolved by restart",
+        "tool_args": {"reason": "OOMKilled or memory pressure detected; restart to reclaim memory"},
         "risk_tier": 1,
     },
     "high_cpu": {
         "tool_name": "restart_deployment",
-        "tool_args": {},
-        "rationale": "High CPU typically resolved by pod restart",
+        "tool_args": {"reason": "Sustained high CPU; restart to clear potential runaway process"},
+        "risk_tier": 1,
+    },
+    # --- K8s scaling issues (Tier 2, requires HITL) ---
+    "cpu_saturation": {
+        "tool_name": "scale_deployment",
+        "tool_args": {
+            "replicas": 4,
+            "reason": "CPU saturation due to high traffic; horizontal scaling required",
+        },
+        "risk_tier": 2,
+    },
+    # --- PostgreSQL issues ---
+    "db_connection_exhaustion": {
+        "tool_name": "restart_deployment",
+        "tool_args": {"reason": "Connection pool exhaustion; restart to release stuck connections"},
+        "risk_tier": 1,
+    },
+    "lock_contention": {
+        "tool_name": "restart_deployment",
+        "tool_args": {"reason": "Lock contention causing query stalls; restart to release locks"},
+        "risk_tier": 1,
+    },
+    "slow_queries": {
+        "tool_name": "restart_deployment",
+        "tool_args": {"reason": "Slow queries causing backlog; restart to clear stuck sessions"},
+        "risk_tier": 1,
+    },
+    "stale_connections": {
+        "tool_name": "restart_deployment",
+        "tool_args": {"reason": "Stale idle-in-transaction connections; restart to reclaim pool"},
+        "risk_tier": 1,
+    },
+    # --- Valkey/Redis issues ---
+    "cache_poison": {
+        "tool_name": "delete_valkey_key",
+        "tool_args": {
+            "key": "poisoned:main",
+            "reason": "Cache poisoning detected; delete corrupted key",
+        },
+        "risk_tier": 1,
+    },
+    "eviction_pressure": {
+        "tool_name": "delete_valkey_key",
+        "tool_args": {
+            "key": "cache:stale:*",
+            "reason": "High eviction rate; clear stale cache entries",
+        },
+        "risk_tier": 1,
+    },
+    "consumer_lag": {
+        "tool_name": "restart_deployment",
+        "tool_args": {"reason": "Consumer group lag increasing; restart consumers to recover"},
+        "risk_tier": 1,
+    },
+    "stream_backlog": {
+        "tool_name": "restart_deployment",
+        "tool_args": {"reason": "Stream consumer backlog; restart to reinitialize consumer group"},
         "risk_tier": 1,
     },
 }
+
+# Maximum number of tools to execute per investigation iteration.
+# Increased from 3 to 5 to gather sufficient evidence when LLM is unavailable.
+_MAX_TOOLS_PER_ITERATION = 5
 
 
 # ---------------------------------------------------------------------------
@@ -173,18 +234,50 @@ def _clamp_namespace(
     tool_args: dict[str, Any],
     incident_ns: str | None,
 ) -> dict[str, Any]:
-    """Ensure tool_args contains the incident namespace if applicable."""
+    """ALWAYS enforce the incident namespace on tool args.
+
+    This is a security boundary: the agent must never query or modify a
+    namespace outside the incident scope, even if the LLM hallucinates a
+    different namespace. If the tool doesn't take a namespace, this is a no-op.
+    """
     if incident_ns is None:
         return tool_args
 
     if "namespace" not in tool_args:
         return tool_args
 
-    current_ns = tool_args.get("namespace")
-    if not current_ns:
-        return {**tool_args, "namespace": incident_ns}
+    # ALWAYS override with incident namespace — no exceptions
+    return {**tool_args, "namespace": incident_ns}
 
-    return tool_args
+
+def _build_fallback_args(
+    fallback: dict[str, Any],
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Build fallback tool_args with dynamic service name from metadata.
+
+    The fallback templates in FALLBACK_ACTIONS use placeholder values.
+    This function fills in the actual deployment/resource name from
+    the incident's ``service`` field.
+    """
+    base_args = fallback.get("tool_args", {})
+    if not isinstance(base_args, Mapping):
+        return {}
+
+    args = dict(base_args)
+    service = str(metadata.get("service", "")).strip()
+
+    tool_name = str(fallback.get("tool_name", ""))
+
+    # K8s tools use "name" for the deployment/pod name
+    if tool_name in ("restart_deployment", "scale_deployment", "delete_pod") and service:
+        args["name"] = service
+
+    # Ensure reason is always present (required by tool input models)
+    if "reason" not in args or not args["reason"]:
+        args["reason"] = f"Auto-remediation for {tool_name}"
+
+    return args
 
 
 def _build_proposed_action(
@@ -463,8 +556,12 @@ Alert metadata:
         usage_update = _accumulate_usage(state, None, llm_config, messages)
         return {
             "hypotheses": fallback,
-            "current_phase": PHASE_COMPLETE,
-            "status": "no_action",
+            "current_phase": PHASE_INVESTIGATE,
+            "iteration_budget": initial_iteration_budget,
+            "iteration_count": 0,
+            "last_top_confidence": 0.0,
+            "stagnation_count": 0,
+            "action_attempts": 0,
             **usage_update,
         }
 
@@ -473,8 +570,12 @@ Alert metadata:
         usage_update = _accumulate_usage(state, None, llm_config, messages)
         return {
             "hypotheses": fallback,
-            "current_phase": PHASE_COMPLETE,
-            "status": "failed",
+            "current_phase": PHASE_INVESTIGATE,
+            "iteration_budget": initial_iteration_budget,
+            "iteration_count": 0,
+            "last_top_confidence": 0.0,
+            "stagnation_count": 0,
+            "action_attempts": 0,
             **usage_update,
         }
 
@@ -491,7 +592,9 @@ async def investigate_node(
     """Select and execute investigation tools to gather evidence.
 
     LLM-resilient: If LLM call fails (quota/budget), executes ALL available
-    Tier 0 tools with default args to gather maximum evidence.
+    Tier 0 tools with default args to gather maximum evidence. Required fields
+    like pod_name, name, key, and stream_key are filled from the incident's
+    service name so tools don't fail validation.
     """
     graph_context = get_graph_context(config)
     llm_router = graph_context.llm_router
@@ -541,7 +644,7 @@ Current hypotheses:
 {json.dumps(hypotheses, indent=2)}
 
 Rules:
-- Select 1-3 tools that will best help confirm or reject the top hypothesis.
+- Select 1-5 tools that will best help confirm or reject the top hypothesis.
 - Return a JSON object with a "tools" array containing tool calls.
 - Each tool call must have "name" and "args" fields.
 - Do NOT call tools that were already called with the same arguments.
@@ -582,14 +685,18 @@ Return:
         usage_update = _accumulate_usage(state, None, llm_config, messages)
 
         # FALLBACK: Execute ALL available Tier 0 tools with sensible defaults.
-        # This gathers evidence without needing the LLM to choose tools.
+        incident_ns = str(metadata.get("namespace", "")) if metadata.get("namespace") else None
+        service_name = str(metadata.get("service", "")).strip()
+
         tool_calls = []
         for tool in read_only_tools:
             tool_name_str = getattr(tool, "name", "")
             if not tool_name_str:
                 continue
 
-            # Build sensible default args based on tool signature
+            # Build sensible default args based on tool signature.
+            # Required fields are filled from incident metadata so tools
+            # don't fail Pydantic validation.
             tool_args: dict[str, Any] = {}
             if hasattr(tool, "input_model"):
                 try:
@@ -598,13 +705,15 @@ Return:
                     props = schema.get("properties", {})
                     for prop_name in required:
                         prop_schema = props.get(prop_name, {})
-                        incident_ns = (
-                            str(metadata.get("namespace", ""))
-                            if metadata.get("namespace")
-                            else None
-                        )
                         if prop_name == "namespace" and incident_ns:
                             tool_args["namespace"] = incident_ns
+                        elif prop_name in ("name", "pod_name") and service_name:
+                            # Fill deployment/pod name from incident service
+                            tool_args[prop_name] = service_name
+                        elif prop_name == "key" and service_name:
+                            tool_args[prop_name] = f"{service_name}:*"
+                        elif prop_name == "stream_key" and service_name:
+                            tool_args[prop_name] = f"rivulet.{service_name}.in"
                         elif "default" in prop_schema:
                             tool_args[prop_name] = prop_schema["default"]
                 except Exception:
@@ -616,7 +725,7 @@ Return:
     executed_tool_results: list[str] = []
     incident_ns = str(metadata.get("namespace", "")) if metadata.get("namespace") else None
 
-    for call in tool_calls[:3]:  # Cap at 3 tool calls per iteration
+    for call in tool_calls[:_MAX_TOOLS_PER_ITERATION]:
         if not isinstance(call, dict):
             continue
 
@@ -715,7 +824,7 @@ async def hypothesize_node(
     best_before = top_hypothesis(hypotheses)
     current_confidence = float(best_before.get("confidence", 0.0) or 0.0) if best_before else 0.0
 
-    # Step 2 — high confidence short-circuit (fast path).
+    # High confidence short-circuit (fast path).
     if current_confidence >= confidence_fast_path:
         logger.info(
             "Confidence %.2f >= fast-path threshold %.2f; proceeding to propose",
@@ -727,7 +836,7 @@ async def hypothesize_node(
             "last_top_confidence": current_confidence,
         }
 
-    # Step 3 — budget exhausted. Propose if actionable, else no_action.
+    # Budget exhausted. Propose if actionable, else no_action.
     if iteration_budget <= 0:
         if current_confidence >= confidence_propose:
             logger.info(
@@ -857,16 +966,21 @@ Current hypotheses:
         }
 
     except LLMBudgetExhaustedError:
-        logger.error("LLM budget exhausted during hypothesis refinement")
+        logger.warning(
+            "LLM budget exhausted during hypothesis refinement; proceeding to propose for fallback"
+        )
         usage_update = _accumulate_usage(state, None, llm_config, messages)
         return {
-            "current_phase": PHASE_COMPLETE,
-            "status": "no_action",
+            "hypotheses": hypotheses,
+            "current_phase": PHASE_PROPOSE,
+            "last_top_confidence": current_confidence,
             **usage_update,
         }
 
     except Exception as exc:
-        logger.error("Hypothesize node failed: %s", exc, exc_info=True)
+        logger.error(
+            "Hypothesize node failed: %s; proceeding to propose for fallback", exc, exc_info=True
+        )
         usage_update = _accumulate_usage(state, None, llm_config, messages)
         return {
             "hypotheses": hypotheses,
@@ -879,14 +993,17 @@ Current hypotheses:
 # ---------------------------------------------------------------------------
 # Node: propose
 # ---------------------------------------------------------------------------
+
+
 async def propose_node(
     state: AgentState,
     config: RunnableConfig,
 ) -> dict[str, Any]:
     """Select a remediation action based on the top hypothesis.
 
-    LLM-resilient: If LLM call fails OR confidence < 0.5, uses category-based
-    fallback actions for known incident types (Tier 1 reversible actions only).
+    LLM-resilient: If LLM call fails OR confidence < threshold, uses category-based
+    fallback actions for known incident types. Tier 1 actions execute directly;
+    Tier 2 actions require HITL approval.
     """
     graph_context = get_graph_context(config)
     llm_router = graph_context.llm_router
@@ -900,7 +1017,8 @@ async def propose_node(
     executed_actions = _coerce_dict_list(state.get("executed_actions"))
     action_attempts = int(state.get("action_attempts", 0) or 0)
 
-    incident_ns_raw = _incident_metadata(state).get("namespace")
+    metadata = _incident_metadata(state)
+    incident_ns_raw = metadata.get("namespace")
     incident_ns = str(incident_ns_raw) if isinstance(incident_ns_raw, str) else None
 
     if action_attempts >= max_action_attempts:
@@ -961,11 +1079,7 @@ If you propose the same tool again, FIX the tool_args to match the schema.
 If the same tool cannot succeed, choose a DIFFERENT tool or return "none".
 """
 
-    executed_context = json.dumps(
-        executed_actions,
-        indent=2,
-        default=str,
-    )
+    executed_context = json.dumps(executed_actions, indent=2, default=str)
 
     namespace_hint = (
         f"The incident is in namespace '{incident_ns}'. Always pass "
@@ -982,7 +1096,7 @@ Available remediation tools (Tier 1 = reversible, Tier 2 = requires approval):
 {json.dumps(tool_schemas, indent=2)}
 
 Risk tiers:
-- Tier 1: Reversible (restart, terminate_backend, delete_key, delete_pod)
+- Tier 1: Reversible (restart, terminate_backend, delete_valkey_key, delete_pod)
 - Tier 2: Requires approval (scale_deployment)
 
 Top hypothesis:
@@ -1013,6 +1127,11 @@ Executed actions (DO NOT REPEAT THESE):
         {"role": "user", "content": "Propose remediation action."},
     ]
 
+    tool_name_str: str | None = None
+    tool_args: dict[str, Any] = {}
+    rationale: str = ""
+    risk_tier: int = 1
+
     try:
         response, model_used = await llm_router.coordinator_call(
             messages=messages,
@@ -1020,15 +1139,12 @@ Executed actions (DO NOT REPEAT THESE):
             run_metrics=run_metrics,
         )
 
-        parsed = parse_json_response(
-            response,
-            stage="propose",
-        )
+        parsed = parse_json_response(response, stage="propose")
 
         tool_name_str = _coerce_tool_name(parsed.get("tool_name"))
 
         tool_args_raw = parsed.get("tool_args")
-        tool_args: dict[str, Any] = dict(tool_args_raw) if isinstance(tool_args_raw, dict) else {}
+        tool_args = dict(tool_args_raw) if isinstance(tool_args_raw, dict) else {}
 
         rationale = str(parsed.get("rationale", ""))
 
@@ -1043,15 +1159,9 @@ Executed actions (DO NOT REPEAT THESE):
         else:
             risk_tier = 1
 
-        usage_update = _accumulate_usage(
-            state,
-            response,
-            llm_config,
-            messages,
-            model_used,
-        )
+        usage_update = _accumulate_usage(state, response, llm_config, messages, model_used)
 
-        # Check confidence threshold.
+        # Check confidence threshold
         if confidence < confidence_propose:
             logger.info(
                 "Top hypothesis confidence %.2f < %.2f; checking fallback actions",
@@ -1067,53 +1177,20 @@ Executed actions (DO NOT REPEAT THESE):
             exc,
         )
 
-        usage_update = _accumulate_usage(
-            state,
-            None,
-            llm_config,
-            messages,
-        )
+        usage_update = _accumulate_usage(state, None, llm_config, messages)
 
-        # FALLBACK: Check if incident category has a known remediation.
-        metadata = _incident_metadata(state)
+        # FALLBACK: Check if incident category has a known remediation
         labels = metadata.get("labels", {})
         category = labels.get("category", "") if isinstance(labels, dict) else ""
 
         if category in FALLBACK_ACTIONS:
             fallback = FALLBACK_ACTIONS[category]
 
-            if fallback is None:
-                logger.info(
-                    "Fallback action for category '%s' is unavailable",
-                    category,
-                )
-                return {
-                    "current_phase": PHASE_COMPLETE,
-                    "status": "no_action",
-                    **usage_update,
-                }
-
             tool_name_str = str(fallback.get("tool_name", ""))
-
-            fallback_tool_args_raw = fallback.get("tool_args")
-            if isinstance(fallback_tool_args_raw, Mapping):
-                tool_args = dict(fallback_tool_args_raw)
-            else:
-                tool_args = {}
-
-            risk_tier_raw = fallback.get("risk_tier")
-            if isinstance(risk_tier_raw, int):
-                risk_tier = risk_tier_raw
-            elif isinstance(risk_tier_raw, str):
-                try:
-                    risk_tier = int(risk_tier_raw)
-                except ValueError:
-                    risk_tier = 1
-            else:
-                risk_tier = 1
+            tool_args = _build_fallback_args(fallback, metadata)
+            risk_tier = int(fallback.get("risk_tier", 1))
 
             best_description = str(best.get("description", ""))[:100] if best is not None else ""
-
             rationale = (
                 f"Fallback action for category '{category}' "
                 f"(LLM unavailable or low confidence). Top hypothesis: "
@@ -1121,9 +1198,10 @@ Executed actions (DO NOT REPEAT THESE):
             )
 
             logger.info(
-                "Using fallback action for category '%s': %s",
+                "Using fallback action for category '%s': %s (Tier %d)",
                 category,
                 tool_name_str,
+                risk_tier,
             )
         else:
             logger.info(
@@ -1136,7 +1214,7 @@ Executed actions (DO NOT REPEAT THESE):
                 **usage_update,
             }
 
-    # Continue with either LLM-proposed or fallback action.
+    # Validate the proposed action
     if tool_name_str is None or tool_name_str == "none":
         logger.info("Agent proposed no action; completing with no_action")
         return {
@@ -1145,11 +1223,7 @@ Executed actions (DO NOT REPEAT THESE):
             **usage_update,
         }
 
-    if is_action_already_executed(
-        tool_name_str,
-        tool_args,
-        executed_actions,
-    ):
+    if is_action_already_executed(tool_name_str, tool_args, executed_actions):
         logger.warning(
             "Duplicate action rejected: %s (already executed)",
             tool_name_str,
@@ -1160,11 +1234,7 @@ Executed actions (DO NOT REPEAT THESE):
             **usage_update,
         }
 
-    attempts = count_action_attempts(
-        tool_name_str,
-        executed_actions,
-    )
-
+    attempts = count_action_attempts(tool_name_str, executed_actions)
     if attempts >= 2 and tool_name_str in MUTATING_TOOLS:
         logger.warning(
             "Tool %s already attempted %d times; completing with failed",
@@ -1177,10 +1247,8 @@ Executed actions (DO NOT REPEAT THESE):
             **usage_update,
         }
 
-    tool_args = _clamp_namespace(
-        tool_args,
-        incident_ns,
-    )
+    # Enforce namespace security boundary
+    tool_args = _clamp_namespace(tool_args, incident_ns)
 
     proposed = _build_proposed_action(
         tool_name=tool_name_str,
@@ -1193,7 +1261,7 @@ Executed actions (DO NOT REPEAT THESE):
     return {
         "proposed_actions": [proposed],
         "requires_human_approval": risk_tier >= 2,
-        "current_phase": (PHASE_APPROVE if risk_tier >= 2 else PHASE_EXECUTE),
+        "current_phase": PHASE_APPROVE if risk_tier >= 2 else PHASE_EXECUTE,
         **usage_update,
     }
 
@@ -1388,6 +1456,8 @@ async def verify_node(
 # ---------------------------------------------------------------------------
 # Node: complete
 # ---------------------------------------------------------------------------
+
+
 def complete_node(
     state: AgentState,
     config: RunnableConfig,

@@ -1,6 +1,6 @@
 {{- if .Values.networkPolicies.enabled }}
 # =============================================================================
-# Ingress on api-gateway
+# Ingress on api-gateway — frontend, kubelet probes, eval chaos
 # =============================================================================
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -8,14 +8,14 @@ metadata:
   name: api-gateway-ingress
   namespace: {{ .Values.networkPolicies.rivuletNamespace }}
   labels:
-    app.kubernetes.io/part-of: rivulet
+    app.kubernetes.io/part-of: autosre-cilium
     app.kubernetes.io/component: network-policy
 spec:
   endpointSelector:
     matchLabels:
       app.kubernetes.io/name: api-gateway
   ingress:
-    # Frontend → api-gateway
+    # Frontend → api-gateway :8080
     - fromEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
@@ -24,7 +24,7 @@ spec:
         - ports:
             - port: "8080"
               protocol: TCP
-    # Eval harness → chaos plane on :8081
+    # Eval harness → chaos plane :8081
     - fromEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.evalNamespace }}
@@ -32,7 +32,7 @@ spec:
         - ports:
             - port: "8081"
               protocol: TCP
-    # kubelet probes
+    # kubelet probes from host network namespace
     - fromEntities:
         - host
         - remote-node
@@ -42,7 +42,7 @@ spec:
               protocol: TCP
 ---
 # =============================================================================
-# Ingress on frontend
+# Ingress on frontend — external users, kubelet probes, in-cluster pods
 # =============================================================================
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -50,13 +50,14 @@ metadata:
   name: frontend-ingress
   namespace: {{ .Values.networkPolicies.rivuletNamespace }}
   labels:
-    app.kubernetes.io/part-of: rivulet
+    app.kubernetes.io/part-of: autosre-cilium
     app.kubernetes.io/component: network-policy
 spec:
   endpointSelector:
     matchLabels:
       app.kubernetes.io/name: frontend
   ingress:
+    # External users (port-forward or Ingress)
     - fromEntities:
         - host
         - remote-node
@@ -65,6 +66,7 @@ spec:
         - ports:
             - port: "8080"
               protocol: TCP
+    # In-cluster pods within rivulet
     - fromEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}

@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: autosre-agent
+  namespace: sre
+  labels:
+    app.kubernetes.io/name: autosre-agent
+    app.kubernetes.io/part-of: autosre
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: autosre-agent
+  labels:
+    app.kubernetes.io/name: autosre-agent
+    app.kubernetes.io/part-of: autosre
+rules:
+  # Pod operations (restart, delete, logs)
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+
+  # Deployment operations (scale, restart, patch)
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale", "replicasets"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+
+  # Event inspection
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+
+  # Service discovery
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+
+  # ConfigMap/Secret read (for inspection, not mutation)
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: autosre-agent
+  labels:
+    app.kubernetes.io/name: autosre-agent
+    app.kubernetes.io/part-of: autosre
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: autosre-agent
+subjects:
+  - kind: ServiceAccount
+    name: autosre-agent
+    namespace: sre

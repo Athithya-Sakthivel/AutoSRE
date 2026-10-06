@@ -2,15 +2,16 @@
 
 ## Lifespan
 
-Startup opens resources in order. Shutdown unwinds in reverse via
-AsyncExitStack. Telemetry is registered first so it is torn down last.
+Startup opens resources in order with explicit timeouts. Shutdown unwinds
+in reverse via AsyncExitStack. Telemetry is registered first so it is
+torn down last.
 
     1. Telemetry (OTel TracerProvider + instrumentors)
     2. Postgres connection pool
     3. Valkey client
     4. OpenObserve client
-    5. K8s client (optional; failures are non-fatal)
-    6. LangGraph AsyncPostgresSaver
+    5. K8s client (optional; failures are non-fatal, 10s timeout)
+    6. LangGraph AsyncPostgresSaver (15s connection timeout)
     7. SREContext
     8. Tool registry
     9. Policy engine + SafeExecutor
@@ -54,6 +55,7 @@ in sync with the routers registered below.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator, Iterable
@@ -69,7 +71,7 @@ from redis.asyncio import Redis
 from autosre import __version__ as _pkg_version
 from autosre.api.routes import router, webhook_router
 from autosre.api.runner import LangGraphRunner
-from autosre.config import Settings, get_settings
+from autosre.config import Settings, get_settings, reset_settings_cache
 from autosre.core.context import ContextEviction
 from autosre.core.graph import compile_graph
 from autosre.core.graph_helpers import GraphContext
@@ -107,6 +109,11 @@ _DEFAULT_CORS_ORIGINS: tuple[str, ...] = (
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 )
+
+# Timeouts for lifespan startup steps (seconds).
+_K8S_INIT_TIMEOUT = 10.0
+_PG_SAVER_TIMEOUT = 15.0
+_RUNNER_SHUTDOWN_TIMEOUT = 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -277,79 +284,133 @@ async def _start_slack(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Open every resource at startup; close in reverse at shutdown."""
+    """Open every resource at startup; close in reverse at shutdown.
+
+    Each step logs entry/exit so hangs are immediately diagnosable.
+    Network-dependent steps have explicit timeouts to prevent infinite
+    hangs when Cilium silently drops packets.
+    """
     settings: Settings = app.state.settings
 
     async with AsyncExitStack() as stack:
         # ==============================================================
         # 1. Telemetry — registered first so it shuts down last.
         # ==============================================================
+        logger.info("[startup 1/14] Initializing telemetry...")
         shutdown_telemetry = init_telemetry(settings)
         stack.callback(shutdown_telemetry)
         instrument_fastapi(app)
-        logger.info("OpenTelemetry initialized and FastAPI instrumented")
+        logger.info("[startup 1/14] OpenTelemetry initialized and FastAPI instrumented")
 
         # ==============================================================
         # 2. Postgres diagnostic pool.
         # ==============================================================
+        logger.info("[startup 2/14] Opening Postgres diagnostic pool...")
         raw_dsn = settings.postgres.raw_dsn
         pg_pool = AsyncConnectionPool(
             conninfo=raw_dsn,
             min_size=2,
             max_size=10,
             open=False,
+            timeout=10.0,
         )
         stack.push_async_callback(pg_pool.close)
-        await pg_pool.open()
-        logger.info("Postgres diagnostic pool opened (min=2 max=10)")
+        await asyncio.wait_for(pg_pool.open(), timeout=15.0)
+        logger.info("[startup 2/14] Postgres diagnostic pool opened (min=2 max=10)")
 
         # ==============================================================
         # 3. Valkey client.
         # ==============================================================
+        logger.info("[startup 3/14] Creating Valkey client...")
+        valkey_host = os.getenv("AUTOSRE_VALKEY__HOST", "valkey.rivulet.svc.cluster.local")
+        valkey_port = int(os.getenv("AUTOSRE_VALKEY__PORT", "6379"))
+        valkey_password = os.getenv("AUTOSRE_VALKEY__PASSWORD") or None
+        valkey_tls = os.getenv("AUTOSRE_VALKEY__TLS", "false").lower() == "true"
+
         valkey_client = Redis(
-            host=os.getenv("AUTOSRE_VALKEY__HOST", "localhost"),
-            port=int(os.getenv("AUTOSRE_VALKEY__PORT", "6379")),
-            password=os.getenv("AUTOSRE_VALKEY__PASSWORD") or None,
-            ssl=os.getenv("AUTOSRE_VALKEY__TLS", "false").lower() == "true",
+            host=valkey_host,
+            port=valkey_port,
+            password=valkey_password,
+            ssl=valkey_tls,
             decode_responses=True,
+            socket_connect_timeout=5.0,
+            socket_timeout=5.0,
+            retry_on_timeout=True,
         )
         stack.push_async_callback(valkey_client.aclose)
-        logger.info("Valkey client created")
+        logger.info(
+            "[startup 3/14] Valkey client created (host=%s port=%d tls=%s)",
+            valkey_host,
+            valkey_port,
+            valkey_tls,
+        )
 
         # ==============================================================
         # 4. OpenObserve client.
         # ==============================================================
+        logger.info("[startup 4/14] Creating OpenObserve client...")
         o11y_client = OpenObserveClient(settings)
         stack.push_async_callback(o11y_client.close)
-        logger.info("OpenObserve client created")
+        logger.info("[startup 4/14] OpenObserve client created")
 
         # ==============================================================
-        # 5. K8s client (optional; failure is non-fatal).
+        # 5. K8s client (optional; failure is non-fatal, 10s timeout).
         # ==============================================================
+        logger.info("[startup 5/14] Initializing K8s client (timeout=%ss)...", _K8S_INIT_TIMEOUT)
         k8s_client_instance = None
         try:
             import kr8s.asyncio
 
-            k8s_client_instance = await kr8s.asyncio.api()
-            await k8s_client_instance.version()
-            logger.info("kr8s client initialized")
+            async def _init_k8s() -> object:
+                client = await kr8s.asyncio.api()
+                await client.version()
+                return client
+
+            k8s_client_instance = await asyncio.wait_for(_init_k8s(), timeout=_K8S_INIT_TIMEOUT)
+            logger.info("[startup 5/14] kr8s client initialized")
+        except TimeoutError:
+            logger.warning(
+                "[startup 5/14] kr8s initialization timed out after %ss; "
+                "K8s-backed tools will raise on use. "
+                "Check Cilium sre-agent-egress allows kube-apiserver:443.",
+                _K8S_INIT_TIMEOUT,
+            )
         except Exception as exc:
             logger.warning(
-                "kr8s unavailable; K8s-backed tools will raise on use: %s",
+                "[startup 5/14] kr8s unavailable; K8s-backed tools will raise on use: %s",
                 exc,
             )
 
         # ==============================================================
         # 6. LangGraph AsyncPostgresSaver.
         # ==============================================================
+        logger.info(
+            "[startup 6/14] Initializing LangGraph AsyncPostgresSaver (timeout=%ss)...",
+            _PG_SAVER_TIMEOUT,
+        )
         os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
-        checkpointer = await stack.enter_async_context(AsyncPostgresSaver.from_conn_string(raw_dsn))
-        await checkpointer.setup()
-        logger.info("LangGraph AsyncPostgresSaver initialized and setup")
+        try:
+            checkpointer = await asyncio.wait_for(
+                stack.enter_async_context(AsyncPostgresSaver.from_conn_string(raw_dsn)),
+                timeout=_PG_SAVER_TIMEOUT,
+            )
+            await asyncio.wait_for(checkpointer.setup(), timeout=10.0)
+            logger.info("[startup 6/14] LangGraph AsyncPostgresSaver initialized and setup")
+        except TimeoutError:
+            logger.error(
+                "[startup 6/14] AsyncPostgresSaver connection timed out after %ss. "
+                "Check Cilium sre-agent-egress allows postgres.rivulet.svc:5432.",
+                _PG_SAVER_TIMEOUT,
+            )
+            raise
+        except Exception:
+            logger.exception("[startup 6/14] AsyncPostgresSaver failed")
+            raise
 
         # ==============================================================
         # 7. SREContext.
         # ==============================================================
+        logger.info("[startup 7/14] Assembling SREContext...")
         llm_router = TokenVelocityRouter(
             settings.llm,
             threshold_tokens=6000,
@@ -365,31 +426,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             pg_pool=pg_pool,
             valkey_client=valkey_client,
         )
-        logger.info("SREContext assembled")
+        logger.info("[startup 7/14] SREContext assembled")
 
         # ==============================================================
         # 8. Tool registry.
         # ==============================================================
+        logger.info("[startup 8/14] Building tool registry...")
         registry = build_default_registry(settings, sre_context)
-        logger.info("Tool registry built with %d tools", len(registry.list_tools()))
+        logger.info("[startup 8/14] Tool registry built with %d tools", len(registry.list_tools()))
 
         # ==============================================================
         # 9. Policy engine + SafeExecutor.
         # ==============================================================
+        logger.info("[startup 9/14] Initializing policy engine and SafeExecutor...")
         policy_engine = PolicyEngine(
             max_autonomous_tier=RiskTier.REVERSIBLE_LOW,
         )
         executor = SafeExecutor(registry, policy_engine)
-        logger.info("Policy engine and SafeExecutor initialized")
+        logger.info("[startup 9/14] Policy engine and SafeExecutor initialized")
 
         # ==============================================================
         # 10. Context eviction.
         # ==============================================================
+        logger.info("[startup 10/14] Creating context eviction manager...")
         context_eviction = ContextEviction()
+        logger.info("[startup 10/14] Context eviction manager created")
 
         # ==============================================================
         # 11. GraphContext.
         # ==============================================================
+        logger.info("[startup 11/14] Assembling GraphContext...")
         graph_context = GraphContext(
             llm_router=llm_router,
             registry=registry,
@@ -400,18 +466,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             confidence_fast_path=settings.safety.confidence_fast_path,
             confidence_give_up=settings.safety.confidence_give_up,
         )
-
-        logger.info("GraphContext assembled")
+        logger.info("[startup 11/14] GraphContext assembled")
 
         # ==============================================================
         # 12. Compiled graph.
         # ==============================================================
+        logger.info("[startup 12/14] Compiling LangGraph...")
         graph = compile_graph(checkpointer=checkpointer)
-        logger.info("LangGraph compiled")
+        logger.info("[startup 12/14] LangGraph compiled")
 
         # ==============================================================
         # 13. Runner.
         # ==============================================================
+        logger.info("[startup 13/14] Initializing LangGraphRunner...")
         runner = LangGraphRunner(
             graph=graph,
             checkpointer=checkpointer,
@@ -419,16 +486,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             graph_context=graph_context,
             max_wall_clock_seconds=settings.safety.max_wall_clock_seconds,
         )
-        stack.push_async_callback(runner.shutdown, 30.0)
+        stack.push_async_callback(runner.shutdown, _RUNNER_SHUTDOWN_TIMEOUT)
         logger.info(
-            "LangGraphRunner initialized (max_wall_clock_seconds=%d)",
+            "[startup 13/14] LangGraphRunner initialized (max_wall_clock_seconds=%d)",
             settings.safety.max_wall_clock_seconds,
         )
 
         # ==============================================================
         # 14. Slack (optional).
         # ==============================================================
+        logger.info("[startup 14/14] Starting Slack integration (if enabled)...")
         await _start_slack(app, stack, settings, runner)
+        logger.info("[startup 14/14] Slack integration step complete")
 
         # ==============================================================
         # Expose on app.state.
@@ -471,7 +540,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Create and configure the FastAPI application."""
     if settings is None:
-        settings = get_settings()
+        try:
+            settings = get_settings()
+        except Exception as exc:
+            logger.error(
+                "Settings validation failed: %s. "
+                "Re-raising — the agent cannot start with invalid configuration.",
+                exc,
+            )
+            reset_settings_cache()
+            raise
 
     app = FastAPI(
         title="AutoSRE Agent",
@@ -506,9 +584,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(router)
     app.include_router(webhook_router)
 
-    # Slack HTTP interactivity routes are only mounted when the configured
-    # transport is HTTP. Socket Mode delivers interactions over the
-    # WebSocket, so exposing HTTP routes would be dead surface.
     # Slack HTTP interactivity routes are only mounted when the configured
     # transport is HTTP. Socket Mode delivers interactions over the
     # WebSocket, so exposing HTTP routes would be dead surface.
@@ -559,9 +634,20 @@ def _is_reserved_path(full_path: str) -> bool:
 
 
 def _mount_spa_if_available(app: FastAPI) -> None:
-    """Mount the built SPA when ui/dist exists; otherwise log and skip."""
-    project_root = Path(__file__).resolve().parent.parent.parent.parent
-    ui_dist = project_root / "ui" / "dist"
+    """Mount the built SPA when ui/dist exists; otherwise log and skip.
+
+    Checks the container path first (/app/ui/dist, set by the Dockerfile),
+    then falls back to resolving relative to this source file for
+    development mode.
+    """
+    # In production containers, the Dockerfile copies UI to /app/ui/dist.
+    container_ui_dist = Path("/app/ui/dist")
+    if container_ui_dist.is_dir() and (container_ui_dist / "index.html").is_file():
+        ui_dist = container_ui_dist
+    else:
+        # Development mode: resolve relative to this source file.
+        project_root = Path(__file__).resolve().parent.parent.parent.parent
+        ui_dist = project_root / "ui" / "dist"
 
     if not (ui_dist.exists() and ui_dist.is_dir()):
         logger.warning("UI dist not found at %s; running in API-only mode", ui_dist)

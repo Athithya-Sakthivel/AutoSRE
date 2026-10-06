@@ -1,0 +1,219 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: autosre-agent
+  namespace: sre
+  labels:
+    app.kubernetes.io/name: autosre-agent
+    app.kubernetes.io/part-of: autosre
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: autosre-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: autosre-agent
+        app.kubernetes.io/part-of: autosre
+    spec:
+      serviceAccountName: autosre-agent
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-postgres
+          image: docker.io/library/busybox:1.37-musl
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              echo "waiting for postgres postgres.rivulet.svc.cluster.local:5432 ..."
+              i=0
+              until timeout -k 2 3 nc -z -w 2 "postgres.rivulet.svc.cluster.local" "5432" 2>/dev/null; do
+                i=$((i + 1))
+                echo "  attempt ${i} failed, retrying in 2s..."
+                sleep 2
+              done
+              echo "postgres reachable"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 100m, memory: 32Mi }
+      containers:
+        - name: autosre-agent
+          image: ghcr.io/athithya-sakthivel/autosre-agent:latest
+          imagePullPolicy: Always
+          env:
+            # Service identity for telemetry
+            - name: OTEL_SERVICE_NAME
+              value: "autosre-agent"
+            - name: DEPLOYMENT_ENVIRONMENT
+              value: "staging"
+
+            # HTTP port
+            - name: HTTP_PORT
+              value: "8000"
+
+            # Postgres — from postgres-agent secret
+            - name: POSTGRES_HOST
+              valueFrom: { secretKeyRef: { name: postgres-agent, key: POSTGRES_HOST } }
+            - name: POSTGRES_PORT
+              valueFrom: { secretKeyRef: { name: postgres-agent, key: POSTGRES_PORT } }
+            - name: POSTGRES_DB
+              valueFrom: { secretKeyRef: { name: postgres-agent, key: POSTGRES_DB } }
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: postgres-agent, key: POSTGRES_USER } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-agent, key: POSTGRES_PASSWORD } }
+
+            # All AUTOSRE_* config from autosre-agent-secrets (51 keys)
+            - name: AUTOSRE_LLM__API_KEY
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__API_KEY } }
+            - name: AUTOSRE_LLM__MODEL_COORDINATOR
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__MODEL_COORDINATOR } }
+            - name: AUTOSRE_LLM__MODEL_WORKER
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__MODEL_WORKER } }
+            - name: AUTOSRE_LLM__FALLBACK_MODELS
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__FALLBACK_MODELS } }
+            - name: AUTOSRE_LLM__MAX_RETRIES
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__MAX_RETRIES } }
+            - name: AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS } }
+            - name: AUTOSRE_LLM__MAX_BACKOFF_SECONDS
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__MAX_BACKOFF_SECONDS } }
+            - name: AUTOSRE_LLM__ABSOLUTE_BACKOFF_CAP_SECONDS
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__ABSOLUTE_BACKOFF_CAP_SECONDS } }
+            - name: AUTOSRE_LLM__CIRCUIT_BREAKER_ENABLED
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__CIRCUIT_BREAKER_ENABLED } }
+            - name: AUTOSRE_LLM__CIRCUIT_BREAKER_THRESHOLD
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__CIRCUIT_BREAKER_THRESHOLD } }
+            - name: AUTOSRE_LLM__CIRCUIT_BREAKER_TIMEOUT_SECONDS
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__CIRCUIT_BREAKER_TIMEOUT_SECONDS } }
+            - name: AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR } }
+            - name: AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR } }
+            - name: AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER } }
+            - name: AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER } }
+            - name: AUTOSRE_POSTGRES__HOST
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_POSTGRES__HOST } }
+            - name: AUTOSRE_POSTGRES__PORT
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_POSTGRES__PORT } }
+            - name: AUTOSRE_POSTGRES__DB
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_POSTGRES__DB } }
+            - name: AUTOSRE_POSTGRES__USER
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_POSTGRES__USER } }
+            - name: AUTOSRE_POSTGRES__PASSWORD
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_POSTGRES__PASSWORD } }
+            - name: AUTOSRE_OPENOBSERVE__EMAIL
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_OPENOBSERVE__EMAIL } }
+            - name: AUTOSRE_OPENOBSERVE__PASSWORD
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_OPENOBSERVE__PASSWORD } }
+            - name: AUTOSRE_OPENOBSERVE__URL
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_OPENOBSERVE__URL } }
+            - name: AUTOSRE_ALERT__WEBHOOK_SECRET
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_ALERT__WEBHOOK_SECRET } }
+            - name: AUTOSRE_ADMIN__SECRET
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_ADMIN__SECRET, optional: true } }
+            - name: AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS } }
+            - name: AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT } }
+            - name: AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS } }
+            - name: AUTOSRE_SAFETY__INITIAL_ITERATION_BUDGET
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__INITIAL_ITERATION_BUDGET } }
+            - name: AUTOSRE_SAFETY__STAGNATION_LIMIT
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__STAGNATION_LIMIT } }
+            - name: AUTOSRE_SAFETY__MAX_ACTION_ATTEMPTS
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__MAX_ACTION_ATTEMPTS } }
+            - name: AUTOSRE_SAFETY__CONFIDENCE_PROPOSE
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__CONFIDENCE_PROPOSE } }
+            - name: AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH } }
+            - name: AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP } }
+            - name: AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT } }
+            - name: AUTOSRE_SAFETY__MAX_LLM_CALLS_PER_INCIDENT
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__MAX_LLM_CALLS_PER_INCIDENT } }
+            - name: AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT } }
+            - name: AUTOSRE_OTEL__SERVICE_NAME
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_OTEL__SERVICE_NAME } }
+            - name: AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT } }
+            - name: AUTOSRE_DEPLOYMENT_ENVIRONMENT
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_DEPLOYMENT_ENVIRONMENT } }
+
+            # Optional: Slack integration
+            - name: AUTOSRE_SLACK__BOT_TOKEN
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SLACK__BOT_TOKEN, optional: true } }
+            - name: AUTOSRE_SLACK__APP_TOKEN
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SLACK__APP_TOKEN, optional: true } }
+            - name: AUTOSRE_SLACK__SIGNING_SECRET
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SLACK__SIGNING_SECRET, optional: true } }
+            - name: AUTOSRE_SLACK__MODE
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SLACK__MODE, optional: true } }
+            - name: AUTOSRE_SLACK__APPROVAL_CHANNEL
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SLACK__APPROVAL_CHANNEL, optional: true } }
+            - name: AUTOSRE_SLACK__APPROVER_USER_IDS
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SLACK__APPROVER_USER_IDS, optional: true } }
+
+            # OTel exporter headers (optional)
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: otel-exporter-headers
+                  key: otel-exporter-headers
+                  optional: true
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 20
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# build_rivulet_images.sh — Build all 3 Rivulet images and push to GHCR
+# scripts/staging/docker_images.sh — Build all images (Rivulet + AutoSRE Agent) and push to GHCR
 # =============================================================================
 #
 # PREREQUISITES:
@@ -9,14 +9,15 @@
 #   - kind cluster running (for optional local loading)
 #
 # USAGE:
-#   bash scripts/build_rivulet_images.sh              # Build + Push to GHCR
-#   bash scripts/build_rivulet_images.sh --load-kind   # Build + Push + Load into Kind
-#   bash scripts/build_rivulet_images.sh --local-only  # Build + Load into Kind (no push)
+#   bash scripts/staging/docker_images.sh             # Build + Push to GHCR
+#   bash scripts/staging/docker_images.sh --load-kind   # Build + Push + Load into Kind
+#   bash scripts/staging/docker_images.sh --local-only  # Build + Load into Kind (no push)
 #
 # IMAGES PRODUCED:
 #   ghcr.io/athithya-sakthivel/rivulet-api-gateway:<git-sha>
 #   ghcr.io/athithya-sakthivel/rivulet-ingestion-worker:<git-sha>
 #   ghcr.io/athithya-sakthivel/rivulet-frontend:<git-sha>
+#   ghcr.io/athithya-sakthivel/autosre-agent:<git-sha>
 # =============================================================================
 
 set -Eeuo pipefail
@@ -24,12 +25,12 @@ IFS=$'\n\t'
 
 # --- Locate Repository Root --------------------------------------------------
 # We assume this script lives in <repo_root>/scripts/ or similar.
-# We traverse up until we find the 'rivulet' directory.
+# We traverse up until we find both 'rivulet' and 'agents' directories.
 CURRENT_DIR="$(pwd)"
 SEARCH_DIR="$CURRENT_DIR"
 
 while [[ "$SEARCH_DIR" != "/" ]]; do
-    if [[ -d "$SEARCH_DIR/rivulet" ]]; then
+    if [[ -d "$SEARCH_DIR/rivulet" ]] && [[ -d "$SEARCH_DIR/agents" ]]; then
         REPO_ROOT="$SEARCH_DIR"
         break
     fi
@@ -37,19 +38,22 @@ while [[ "$SEARCH_DIR" != "/" ]]; do
 done
 
 if [[ -z "${REPO_ROOT:-}" ]]; then
-    echo "ERROR: Could not locate 'rivulet' directory by traversing up from $CURRENT_DIR" >&2
+    echo "ERROR: Could not locate both 'rivulet' and 'agents' directories by traversing up from $CURRENT_DIR" >&2
     exit 1
 fi
 
 RIVULET_ROOT="${REPO_ROOT}/rivulet"
+AGENTS_ROOT="${REPO_ROOT}/agents"
 
 # Verify structure exists
 [[ -d "$RIVULET_ROOT/api-gateway" ]] || { echo "ERROR: api-gateway not found in $RIVULET_ROOT"; exit 1; }
 [[ -d "$RIVULET_ROOT/ingestion-worker" ]] || { echo "ERROR: ingestion-worker not found in $RIVULET_ROOT"; exit 1; }
 [[ -d "$RIVULET_ROOT/frontend" ]] || { echo "ERROR: frontend not found in $RIVULET_ROOT"; exit 1; }
+[[ -d "$AGENTS_ROOT" ]] || { echo "ERROR: agents directory not found in $REPO_ROOT"; exit 1; }
 
 echo "Repository Root: $REPO_ROOT"
 echo "Rivulet Source:  $RIVULET_ROOT"
+echo "Agents Source:   $AGENTS_ROOT"
 
 # --- Configuration -----------------------------------------------------------
 GHCR_USER="athithya-sakthivel"
@@ -99,27 +103,26 @@ else
 fi
 
 # --- Image Definitions -------------------------------------------------------
-# Format: "directory|image-name|extra-build-args"
+# Format: "context-path|image-name|extra-build-args"
+# Context path is relative to REPO_ROOT
 IMAGES=(
-    "api-gateway|rivulet-api-gateway|"
-    "ingestion-worker|rivulet-ingestion-worker|"
-    "frontend|rivulet-frontend|VITE_GIT_VERSION=${GIT_SHA},VITE_ENVIRONMENT=evaluation,VITE_OTEL_ENDPOINT=http://otel-gateway.openobserve.svc:4318/v1/traces"
+       "agents|autosre-agent|GIT_VERSION=${GIT_SHA},BUILD_ENV=production"
 )
 
 # --- Build & Push Loop -------------------------------------------------------
 BUILT_IMAGES=()
 
 for entry in "${IMAGES[@]}"; do
-    IFS='|' read -r dir name extra_args <<< "$entry"
+    IFS='|' read -r context_path name extra_args <<< "$entry"
 
     full_image="${GHCR_REGISTRY}/${name}:${TAG}"
     latest_image="${GHCR_REGISTRY}/${name}:latest"
-    context_dir="${RIVULET_ROOT}/${dir}"
+    context_dir="${REPO_ROOT}/${context_path}"
 
     [[ -d "$context_dir" ]] || fail "Directory not found: $context_dir"
     [[ -f "${context_dir}/Dockerfile" ]] || fail "Dockerfile not found: ${context_dir}/Dockerfile"
 
-    log "Building ${name}:${TAG} from ${dir}/..."
+    log "Building ${name}:${TAG} from ${context_path}/..."
 
     # Build base args
     build_args=(
@@ -182,6 +185,7 @@ echo "========================================="
 echo ""
 echo "Next steps:"
 echo "  1. Update K8s manifests to use tag: ${TAG}"
-echo "  2. Deploy: kubectl apply -f infra/k8s/rivulet/"
-echo "  3. Verify: kubectl get pods -n rivulet"
+echo "  2. Deploy Rivulet: kubectl apply -f infra/k8s/rivulet/"
+echo "  3. Deploy Agent:   kubectl apply -f infra/k8s/agent/"
+echo "  4. Verify:         kubectl get pods -A"
 echo ""

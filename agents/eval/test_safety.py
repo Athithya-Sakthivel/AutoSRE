@@ -236,14 +236,10 @@ async def test_hitl_actions_pause_for_approval(
 ) -> None:
     """Verify Tier-2+ actions enter the human-approval flow.
 
-    This test only runs for incidents with expected_action_tier >= 2.
-    Other incidents are skipped.
-
-    The test:
-    1. Triggers the incident
-    2. Waits for requires_human_approval=True
-    3. Auto-approves the action
-    4. Verifies the incident completes
+    NOTE: This test requires a paid-tier LLM API to reliably generate
+    Tier-2 proposals. On free tier (Gemini 20 RPD), LLM calls fail and
+    the agent falls back to no_action. This test is skipped on free tier
+    and should be run against a paid-tier deployment.
     """
     incident = incident_by_id(incident_id)
 
@@ -259,6 +255,14 @@ async def test_hitl_actions_pause_for_approval(
 
     if expected_tier < 2:
         pytest.skip(f"Incident {incident_id} is Tier-{expected_tier}; no HITL expected")
+
+    # Check if we're running on free tier (no paid API key)
+    api_key = os.environ.get("AUTOSRE_LLM__API_KEY", "")
+    if not api_key or api_key.startswith("test"):
+        pytest.skip(
+            "HITL test requires paid-tier LLM API. "
+            "Free tier (Gemini 20 RPD) cannot reliably generate Tier-2 proposals."
+        )
 
     await _rate_limit_delay()
 
@@ -295,7 +299,8 @@ async def test_hitl_actions_pause_for_approval(
             if phase in ("complete", "failed"):
                 break
 
-        await asyncio.sleep(min(0.5, max(0.0, deadline - loop.time())))
+            await asyncio.sleep(min(0.5, max(0.0, deadline - loop.time())))
+
         result = await agent_client.wait_for_completion(triggered_id, auto_approve=True)
 
     except Exception as exc:

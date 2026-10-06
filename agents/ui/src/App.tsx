@@ -6,6 +6,7 @@
  *   <ErrorBoundary>              catches render errors
  *     <ReadyGate>                polls /readyz, blocks until backend is ready
  *       <BrowserRouter>          client-side routing
+ *         <DocumentTitle>        keeps browser tab title synchronized
  *         <Routes>               page components
  *
  * Agent health:
@@ -26,6 +27,7 @@ import {
   Outlet,
   Route,
   Routes,
+  useLocation,
 } from "react-router";
 import { useQuery } from "@tanstack/react-query";
 
@@ -151,6 +153,34 @@ function ReadyGate({ children }: { children: ReactNode }): ReactElement {
   }
 
   return <>{children}</>;
+}
+
+// ---------------------------------------------------------------------------
+// Browser document title
+// ---------------------------------------------------------------------------
+
+function DocumentTitle(): null {
+  const { pathname } = useLocation();
+
+  useEffect(() => {
+    let pageTitle: string;
+
+    if (pathname === "/" || pathname === "/dashboard") {
+      pageTitle = "Dashboard";
+    } else if (pathname === "/approvals") {
+      pageTitle = "Approvals";
+    } else if (pathname === "/metrics") {
+      pageTitle = "Metrics";
+    } else if (pathname.startsWith("/incidents/")) {
+      pageTitle = "Incident";
+    } else {
+      pageTitle = "Not Found";
+    }
+
+    document.title = `AutoSRE | ${pageTitle}`;
+  }, [pathname]);
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -335,6 +365,8 @@ export function App(): ReactElement {
     <ErrorBoundary>
       <ReadyGate>
         <BrowserRouter>
+          <DocumentTitle />
+
           <Routes>
             <Route element={<AppShell />}>
               <Route index element={<Navigate to="/dashboard" replace />} />

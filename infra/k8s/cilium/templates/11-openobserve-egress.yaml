@@ -1,0 +1,39 @@
+{{- if .Values.networkPolicies.enabled }}
+# =============================================================================
+# openobserve pod egress — webhook delivery, external integrations
+# NOTE: pod uses `app.kubernetes.io/name: open-observe-minimal`
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: openobserve-egress
+  namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+  labels:
+    app.kubernetes.io/part-of: autosre-cilium
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: open-observe-minimal
+  egress:
+    # OpenObserve alert destinations POST to the SRE agent webhook
+    # Destination: http://autosre-agent.sre.svc.cluster.local:8000/alerts
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.sreNamespace }}
+            app.kubernetes.io/name: autosre-agent
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+
+    # External integrations (Slack, PagerDuty, SMTP, etc.)
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "587"
+              protocol: TCP
+{{- end }}

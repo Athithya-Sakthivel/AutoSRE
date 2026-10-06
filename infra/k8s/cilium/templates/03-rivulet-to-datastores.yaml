@@ -1,9 +1,6 @@
 {{- if .Values.networkPolicies.enabled }}
 # =============================================================================
-# Egress: clients → datastores
-#
-# Rules here are enforced at the CLIENT's egress hook. They permit the client
-# to send. They do NOT create an ingress rule on the destination.
+# Egress: api-gateway, ingestion-worker → postgres, valkey
 # =============================================================================
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -11,7 +8,7 @@ metadata:
   name: clients-to-datastores-egress
   namespace: {{ .Values.networkPolicies.rivuletNamespace }}
   labels:
-    app.kubernetes.io/part-of: rivulet
+    app.kubernetes.io/part-of: autosre-cilium
     app.kubernetes.io/component: network-policy
 spec:
   endpointSelector:
@@ -22,6 +19,7 @@ spec:
           - api-gateway
           - ingestion-worker
   egress:
+    # → postgres :5432
     - toEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
@@ -30,6 +28,7 @@ spec:
         - ports:
             - port: "5432"
               protocol: TCP
+    # → valkey :6379 (NOTE: valkey pod uses `app: valkey`, NOT app.kubernetes.io/name)
     - toEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
@@ -40,10 +39,7 @@ spec:
               protocol: TCP
 ---
 # =============================================================================
-# Ingress on postgres — WHO is allowed to talk TO postgres.
-#
-# This is the missing half. Without it, default-deny isolates postgres and
-# every SYN is dropped at postgres's ingress hook (bpf_lxc.c).
+# Ingress on postgres — who may talk TO postgres
 # =============================================================================
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -51,12 +47,53 @@ metadata:
   name: postgres-ingress
   namespace: {{ .Values.networkPolicies.rivuletNamespace }}
   labels:
-    app.kubernetes.io/part-of: rivulet
+    app.kubernetes.io/part-of: autosre-cilium
     app.kubernetes.io/component: network-policy
 spec:
   endpointSelector:
     matchLabels:
       app.kubernetes.io/name: postgres
+  ingress:
+    # Application clients: api-gateway, ingestion-worker
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+            app.kubernetes.io/name: api-gateway
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+            app.kubernetes.io/name: ingestion-worker
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.sreNamespace }}
+            app.kubernetes.io/name: autosre-agent
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # kubelet probes (pg_isready via exec, kept for safety)
+    - fromEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+---
+# =============================================================================
+# Ingress on valkey — who may talk TO valkey
+# NOTE: valkey pod uses `app: valkey`, NOT app.kubernetes.io/name
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: valkey-ingress
+  namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+  labels:
+    app.kubernetes.io/part-of: autosre-cilium
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app: valkey
   ingress:
     # Application clients
     - fromEndpoints:
@@ -71,47 +108,9 @@ spec:
             app.kubernetes.io/name: autosre-agent
       toPorts:
         - ports:
-            - port: "5432"
-              protocol: TCP
-    # kubelet probes (postgres uses pg_isready via exec, but keep for safety)
-    - fromEntities:
-        - host
-        - remote-node
-      toPorts:
-        - ports:
-            - port: "5432"
-              protocol: TCP
----
-# =============================================================================
-# Ingress on valkey — WHO is allowed to talk TO valkey.
-# =============================================================================
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: valkey-ingress
-  namespace: {{ .Values.networkPolicies.rivuletNamespace }}
-  labels:
-    app.kubernetes.io/part-of: rivulet
-    app.kubernetes.io/component: network-policy
-spec:
-  endpointSelector:
-    matchLabels:
-      app: valkey
-  ingress:
-    - fromEndpoints:
-        - matchLabels:
-            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
-            app.kubernetes.io/name: api-gateway
-        - matchLabels:
-            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
-            app.kubernetes.io/name: ingestion-worker
-        - matchLabels:
-            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.sreNamespace }}
-            app.kubernetes.io/name: autosre-agent
-      toPorts:
-        - ports:
             - port: "6379"
               protocol: TCP
+    # kubelet probes
     - fromEntities:
         - host
         - remote-node

@@ -65,57 +65,33 @@ import httpx
 import litellm
 import pytest
 
-_warnings.filterwarnings(
-    "ignore",
-    message=r".*ReadOnly.*qualifier.*",
-    category=UserWarning,
-    module=r"pydantic.*",
-)
-
-# Suppress Pydantic warnings from DeepEval's internal LiteLLM schema generation.
-# These come from ChatCompletionReasoningItem using ReadOnly qualifiers, which
-# Pydantic warns about but doesn't affect functionality.
-_warnings.filterwarnings(
-    "ignore",
-    message=r".*ReadOnly.*qualifier.*",
-    category=UserWarning,
-    module=r"pydantic.*",
-)
-
-_warnings.filterwarnings(
-    "ignore",
-    message=r".*ChatCompletionReasoningItem.*",
-    category=UserWarning,
-)
-
 # ---------------------------------------------------------------------------
-# LiteLLM global configuration
+# Warning suppression — MUST come before any deepeval/litellm/pydantic imports
 # ---------------------------------------------------------------------------
-# Drop unsupported parameters globally to prevent hard 400 errors for
-# parameters like temperature, top_p, top_k which Gemini 3+ has deprecated.
-# NOTE: This does NOT fix G-Eval logprobs — G-Eval uses a separate code path
-# (a_generate_raw_response) that bypasses drop_params. G-Eval is permanently
-# incompatible with Gemini Flash Lite on Google AI Studio.
-
-litellm.drop_params = True
-litellm.suppress_debug_info = True
-
-# Suppress the Gemini 3+ deprecation warnings from LiteLLM.
+# Pydantic ReadOnly TypedDict warning from DeepEval/LiteLLM internals.
+# PEP 705 ReadOnly is typing-only; no runtime enforcement exists.
+_warnings.filterwarnings(
+    "ignore",
+    message=r".*ReadOnly.*",
+    category=UserWarning,
+)
+_warnings.filterwarnings(
+    "ignore",
+    message=r".*will not protect items from any mutation.*",
+    category=UserWarning,
+)
+# Gemini 3+ deprecation warnings from LiteLLM
 _warnings.filterwarnings(
     "ignore",
     message=r".*temperature.*top_p.*top_k.*",
     category=DeprecationWarning,
 )
-
-# Suppress Pydantic ReadOnly TypedDict warning from DeepEval/LiteLLM internals.
-# This is a typing-only feature (PEP 705) with no runtime enforcement.
-# Pydantic 2.13+ has moved away from this warning path.
-_warnings.filterwarnings(
-    "ignore",
-    message=r".*ReadOnly.*qualifier.*",
-    category=UserWarning,
-    module=r"pydantic.*",
-)
+# Drop unsupported parameters globally to prevent hard 400 errors for
+# parameters like temperature, top_p, top_k which Gemini 3+ has deprecated.
+# NOTE: This does NOT fix G-Eval logprobs — G-Eval uses a separate code path
+# (a_generate_raw_response) that bypasses drop_params.
+litellm.drop_params = True
+litellm.suppress_debug_info = True
 
 logger = logging.getLogger(__name__)
 
@@ -1126,7 +1102,7 @@ class AgentClient:
                 "started_at",
                 time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             ),
-            "fingerprint": f"eval-{incident_id}-{time.time_ns()}",
+            "fingerprint": f"eval-{incident_id}",
             "description": description,
             "labels": labels,
             "annotations": annotations,

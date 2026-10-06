@@ -1,15 +1,21 @@
 {{- if .Values.networkPolicies.enabled }}
+# =============================================================================
+# SRE Agent egress — exactly 6 destinations, explicitly enumerated
+# =============================================================================
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
   name: sre-agent-egress
   namespace: {{ .Values.networkPolicies.sreNamespace }}
+  labels:
+    app.kubernetes.io/part-of: autosre-cilium
+    app.kubernetes.io/component: network-policy
 spec:
   endpointSelector:
     matchLabels:
       app.kubernetes.io/name: autosre-agent
   egress:
-    # Kubernetes API (for kr8s/kubectl operations)
+    # 1. Kubernetes API (for kr8s/kubectl remediation operations)
     - toEntities:
         - kube-apiserver
       toPorts:
@@ -17,7 +23,7 @@ spec:
             - port: "443"
               protocol: TCP
 
-    # Postgres (for terminate_backend and state DB)
+    # 2. Postgres (for terminate_backend and state DB)
     - toEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
@@ -27,27 +33,29 @@ spec:
             - port: "5432"
               protocol: TCP
 
-    # Valkey (for cache operations)
+    # 3. Valkey (for cache operations)
+    #    CRITICAL: valkey pod uses `app: valkey`, NOT app.kubernetes.io/name
     - toEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
-            app.kubernetes.io/name: valkey
+            app: valkey
       toPorts:
         - ports:
             - port: "6379"
               protocol: TCP
 
-    # OpenObserve (for log/metric queries)
+    # 4. OpenObserve HTTP API (for log/metric queries)
+    #    CRITICAL: pod uses `app.kubernetes.io/name: open-observe-minimal`
     - toEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
-            app.kubernetes.io/name: openobserve
+            app.kubernetes.io/name: open-observe-minimal
       toPorts:
         - ports:
             - port: "5080"
               protocol: TCP
 
-    # OTel Gateway (for trace export)
+    # 5. OTel Gateway (for trace export)
     - toEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
@@ -57,7 +65,7 @@ spec:
             - port: "4318"
               protocol: TCP
 
-    # Groq API (external LLM provider)
+    # 6. External LLM provider (Gemini/Groq/etc)
     - toEntities:
         - world
       toPorts:
@@ -65,23 +73,3 @@ spec:
             - port: "443"
               protocol: TCP
 {{- end }}
-
----
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: openobserve-ingress
-  namespace: {{ .Values.networkPolicies.openobserveNamespace }}
-spec:
-  endpointSelector:
-    matchLabels:
-      app.kubernetes.io/name: openobserve
-  ingress:
-    - fromEndpoints:
-        - matchLabels:
-            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.sreNamespace }}
-            app.kubernetes.io/name: autosre-agent
-        - matchLabels:
-            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.evalNamespace }}
-      toPorts:
-        - ports: [{port: "5080"}]

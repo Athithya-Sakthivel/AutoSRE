@@ -229,15 +229,19 @@ If you rename a file, either keep the CNP names or update every reference.
 
 | File | CNP name(s) | Direction | Purpose |
 |------|-------------|-----------|---------|
-| `00-default-deny.yaml` | `default-deny` | both | Zero-trust baseline in `rivulet`, `sre`, `eval`. |
-| `01-allow-dns-egress.yaml` | `allow-dns-egress` | egress | DNS resolution via `kube-dns` with L7 interception. |
+| `00-default-deny.yaml` | `default-deny` | both | Zero-trust baseline in `rivulet`, `sre`, `eval`, `openobserve`. |
+| `01-allow-dns-egress.yaml` | `allow-dns-egress` | egress | DNS resolution via `kube-dns` with L7 interception. Applied to all four namespaces. |
 | `02-rivulet-internal.yaml` | `api-gateway-ingress`, `frontend-ingress` | ingress | Frontend → api-gateway :8080; external → frontend :8080; kubelet probes. |
-| `03-rivulet-to-datastores.yaml` | `clients-to-datastores-egress`, `postgres-ingress`, `valkey-ingress` | egress + ingress | api-gateway and ingestion-worker → postgres :5432 and valkey :6379. Both sides of the flow. |
+| `03-rivulet-to-datastores.yaml` | `clients-to-datastores-egress`, `postgres-ingress`, `valkey-ingress` | egress + ingress | api-gateway and ingestion-worker → postgres :5432 and valkey :6379. Both sides of the flow. Valkey selected by `app: valkey`. |
 | `04-rivulet-to-otel.yaml` | `rivulet-to-otel` | egress | All pods in `rivulet` → otel-gateway :4318. |
-| `05-eval-to-chaos-ports.yaml` | `eval-egress` | egress | eval → rivulet :8081 (chaos), sre :8000, openobserve :5080, world :443. |
-| `06-sre-agent-egress.yaml` | `sre-agent-egress` | egress | Agent → kube-apiserver :443, postgres :5432, valkey :6379, openobserve :5080, otel-gw :4318, world :443. |
-| `07-sre-agent-ingress.yaml` | `openobserve-ingress`, `sre-agent-ingress` | ingress | openobserve ← sre-agent, eval; agent ← openobserve webhooks, eval. |
+| `05-eval-to-chaos-ports.yaml` | `eval-egress` | egress | eval → rivulet backend :8081 (chaos), sre :8000, openobserve :5080, world :443. Chaos scoped to `component: backend` only. |
+| `06-sre-agent-egress.yaml` | `sre-agent-egress` | egress | Agent → kube-apiserver :443, postgres :5432, valkey :6379 (`app: valkey`), openobserve :5080 (`open-observe-minimal`), otel-gw :4318, world :443. |
+| `07-sre-agent-ingress.yaml` | `openobserve-ingress`, `sre-agent-ingress` | ingress | openobserve (`open-observe-minimal`) ← sre-agent, eval, external; agent ← openobserve webhooks, eval, host. |
 | `08-ingestion-worker-ingress.yaml` | `ingestion-worker-ingress` | ingress | Kubelet probes on :8080, eval chaos on :8081. |
+| `09-eval-internal.yaml` | `eval-to-internal-postgres`, `eval-postgres-ingress` | egress + ingress | Eval pods → ground-truth postgres :5432 within eval namespace. Both sides of the flow. |
+| `10-openobserve-internal.yaml` | `otel-daemonset-to-gateway`, `otel-gateway-to-openobserve`, `otel-gateway-ingress`, `otel-daemonset-ingress` | egress + ingress | otel-daemonset → otel-gateway :4317/:4318; otel-gateway → openobserve :5080; ingress for telemetry sources and host probes. |
+| `11-openobserve-egress.yaml` | `openobserve-egress` | egress | openobserve → sre-agent :8000 (alert webhook delivery), world :443/:587 (external integrations). |
+| `12-frontend-egress.yaml` | `frontend-egress` | egress | Frontend → api-gateway :8080. Required because default-deny blocks all egress not explicitly permitted. |
 
 Every file is guarded by `{{- if .Values.networkPolicies.enabled }}` at the
 top and `{{- end }}` at the bottom. Files with multiple CNPs use a single
@@ -720,26 +724,3 @@ documented CRD schema did not match the enforced one.
 - [Cilium Layer 7 Policies](https://docs.cilium.io/en/stable/security/policy/layer7/)
 - [Cilium Kubernetes Constructs in Policy](https://docs.cilium.io/en/stable/security/policy/kubernetes/)
 - [Cilium Policy Enforcement Modes](https://docs.cilium.io/en/stable/security/policy/intro/)
-```
-
----
-
-## What changed vs. the original README
-
-| Section | Change | Why |
-|---|---|---|
-| **The Four Rules** | New top-level section | Encodes the four invariants that caused every outage. Read first, before modifying anything. |
-| **Architecture diagram** | Redrawn with explicit port numbers and directional arrows per flow | Original was a mix of topology and intent; new one maps 1:1 to the policy files. |
-| **Policy files table** | Now lists **file name AND CNP name** with direction per rule | Original conflated the two; the deploy script checks by CNP name and would silently pass when they diverged. |
-| **`enableDefaultDeny` references** | Removed | Not a CNP field. Original claimed it existed; the correct idiom is the never-matching rule. |
-| **`ingressDeny` / `egressDeny` guidance** | Explicitly warns against it | Every use in this project has broken something. |
-| **Default-deny pattern** | Documented as never-matching rule, not empty arrays | Empty arrays do not isolate. Every CNP in the chart now uses the sentinel label. |
-| **k8s: prefix** | Promoted to Rule 1 | The single most common cause of silent drops. |
-| **Adding a New Service** | New checklist | Guides future agents/services through the required steps in order. |
-| **Adding a New Flow** | New checklist | Enforces the "both sides" pattern that prevents egress-only bugs. |
-| **Bugs Already Hit** | New section | Postmortem catalog of the six outages this chart caused, with symptom/root cause/fix/detection. |
-| **Version Compatibility** | Corrected to 1.19.6 (actual) | Original claimed 1.20.2, which caused confusion because CRD schemas differ. |
-| **kubelet probe rules** | Promoted to Rule 4 | Second-most-common cause of pod failures. |
-| **Troubleshooting** | Expanded | Added drop-monitor-on-destination guidance, `VALID=False` diagnosis, `enableServiceLinks` interaction. |
-| **`08-ingestion-worker-ingress.yaml`** | Added to table | The ingestion-worker needs its own ingress policy for kubelet probes and eval chaos calls. |
-| **CI detection hints** | Added throughout | Suggests a grep-based pre-commit check for the `k8s:` prefix. |

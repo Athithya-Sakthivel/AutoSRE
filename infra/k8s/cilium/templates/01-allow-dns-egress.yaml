@@ -1,10 +1,13 @@
 {{- if .Values.networkPolicies.enabled }}
-{{- range $ns := list .Values.networkPolicies.rivuletNamespace .Values.networkPolicies.sreNamespace .Values.networkPolicies.evalNamespace }}
+{{- range $ns := list .Values.networkPolicies.rivuletNamespace .Values.networkPolicies.sreNamespace .Values.networkPolicies.evalNamespace .Values.networkPolicies.openobserveNamespace }}
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
   name: allow-dns-egress
   namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/part-of: autosre-cilium
+    app.kubernetes.io/component: network-policy
 spec:
   endpointSelector: {}
   egress:

@@ -44,6 +44,8 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
+    "pytest-timeout>=2.3.0",
     "testcontainers[postgres,redis]>=4.15.0",
     "deepeval>=4.2.6",
 ]
@@ -58,6 +60,9 @@ packages = ["src/autosre"]
 [tool.hatch.build.targets.wheel.force-include]
 "src/autosre/py.typed" = "autosre/py.typed"
 
+# ---------------------------------------------------------------------------
+# Ruff — linter and formatter
+# ---------------------------------------------------------------------------
 [tool.ruff]
 target-version = "py314"
 line-length = 100
@@ -70,12 +75,58 @@ ignore = ["E501"]
 [tool.ruff.lint.isort]
 known-first-party = ["autosre"]
 
+# ---------------------------------------------------------------------------
+# Pytest — test runner configuration
+# ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests", "eval"]
 pythonpath = ["src"]
-addopts = "-v --strict-markers"
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+    "-rxXs",                # Show reasons for xfail, xpass, skip
+]
+timeout = 120               # 2-minute hard cap per test (prevents hangs)
+timeout_method = "thread"
 
+# ---- WARNING SUPPRESSION ----------------------------------------------------
+# Applied BEFORE any imports run. This is the only reliable way to suppress
+# warnings that fire during import-time Pydantic schema generation (e.g.,
+# DeepEval/LiteLLM's ChatCompletionReasoningItem ReadOnly warning).
+#
+# Format: "action:message_regex:category:module:line"
+# See: https://docs.python.org/3/library/warnings.html#warnings.filterwarnings
+filterwarnings = [
+    # Pydantic ReadOnly TypedDict warning from DeepEval/LiteLLM internals.
+    # PEP 705 ReadOnly is a typing-only feature; no runtime enforcement exists.
+    "ignore::UserWarning:pydantic.*",
+    "ignore:.*ReadOnly.*:UserWarning",
+    "ignore:.*will not protect items from any mutation.*:UserWarning",
+    "ignore:.*ChatCompletionReasoningItem.*:UserWarning",
+
+    # Gemini 3+ deprecation warnings from LiteLLM (temperature/top_p/top_k).
+    "ignore:.*temperature.*top_p.*top_k.*:DeprecationWarning",
+
+    # Kr8s Kubernetes version mismatch (kind cluster is often ahead of kr8s).
+    "ignore:.*Kubernetes version.*is not supported.*:UserWarning",
+
+    # Catch-all for pydantic schema-generation noise from third-party libs.
+    "ignore::UserWarning:pydantic._internal.*",
+]
+
+# Custom markers (use with @pytest.mark.<name>)
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks integration tests requiring external services",
+    "e2e: marks end-to-end tests requiring a running agent",
+]
+
+# ---------------------------------------------------------------------------
+# Mypy — static type checker
+# ---------------------------------------------------------------------------
 [tool.mypy]
 python_version = "3.14"
 strict = true
@@ -99,3 +150,23 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["autosre.slack.socket_mode"]
 allow_untyped_calls = true
+
+# ---------------------------------------------------------------------------
+# Coverage
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["src/autosre"]
+branch = true
+omit = [
+    "src/autosre/slack/*",       # Slack integration (optional)
+    "src/autosre/tools/k8s.py",  # Kubernetes tools (require cluster)
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

@@ -1,0 +1,70 @@
+{{- if .Values.networkPolicies.enabled }}
+# =============================================================================
+# Eval namespace internal flows — eval pods → ground-truth postgres
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: eval-to-internal-postgres
+  namespace: {{ .Values.networkPolicies.evalNamespace }}
+  labels:
+    app.kubernetes.io/part-of: autosre-cilium
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector: {}
+  egress:
+    # Eval pods → ground-truth postgres (same namespace)
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.evalNamespace }}
+            app: postgres
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # Fallback selector if eval postgres uses app.kubernetes.io/name
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.evalNamespace }}
+            app.kubernetes.io/name: postgres
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+---
+# =============================================================================
+# Ingress on eval postgres — who may connect
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: eval-postgres-ingress
+  namespace: {{ .Values.networkPolicies.evalNamespace }}
+  labels:
+    app.kubernetes.io/part-of: autosre-cilium
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - postgres
+  ingress:
+    # Any pod in eval namespace (eval harness jobs)
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.evalNamespace }}
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # kubelet probes
+    - fromEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+{{- end }}

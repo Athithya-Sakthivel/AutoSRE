@@ -1,7 +1,6 @@
 networkPolicies:
   enabled: true
 
-  # Namespace configuration
   rivuletNamespace: rivulet
   sreNamespace: sre
   evalNamespace: eval

@@ -1,24 +1,27 @@
 {{- if .Values.networkPolicies.enabled }}
 # =============================================================================
-# All rivulet pods → otel-gateway :4318 (OTLP/HTTP)
+# Frontend egress — allow frontend to reach api-gateway
 # =============================================================================
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: rivulet-to-otel
+  name: frontend-egress
   namespace: {{ .Values.networkPolicies.rivuletNamespace }}
   labels:
     app.kubernetes.io/part-of: autosre-cilium
     app.kubernetes.io/component: network-policy
 spec:
-  endpointSelector: {}
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: frontend
   egress:
+    # Frontend → api-gateway :8080
     - toEndpoints:
         - matchLabels:
-            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
-            app.kubernetes.io/name: otel-gateway
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+            app.kubernetes.io/name: api-gateway
       toPorts:
         - ports:
-            - port: "4318"
+            - port: "8080"
               protocol: TCP
 {{- end }}

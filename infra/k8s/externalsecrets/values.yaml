@@ -1,35 +1,26 @@
 # ==============================================================================
-# External Secrets configuration
+# External Secrets configuration — In-Cluster Kubernetes SecretStore
 #
 # This chart DOES NOT install:
 #   - External Secrets Operator
 #   - ESO CRDs
-#   - Azure identities
-#   - Azure federated identity credentials
-#   - Azure Service Principals
 #
-# Those are infrastructure/bootstrap concerns.
+# Those are infrastructure/bootstrap concerns handled by
+# scripts/create_all_secrets_kind.sh.
 #
-# Supported authentication modes:
+# Authentication mode:
 #
-#   ServicePrincipal
-#     Intended for local/staging kind clusters.
-#     Credentials are supplied through an EXISTING Kubernetes Secret.
+#   Kubernetes (in-cluster)
+#     All environments (kind staging + AKS production).
+#     Reads from a single source Secret: eso-source/eso-source.
+#     No cloud provider dependency. No Azure/GCP/AWS credentials needed.
 #
-#   WorkloadIdentity
-#     Intended for AKS production.
-#     Authentication uses an AKS Workload Identity ServiceAccount.
-#
+# Source secret keys are defined in create_all_secrets_kind.sh.
+# This file maps those keys to target Secrets in each namespace.
 # ==============================================================================
 
-enabled: false
+enabled: true
 
-# Namespace used for:
-#   - ClusterSecretStore references
-#   - Workload Identity ServiceAccount
-#
-# ExternalSecret resources continue to be created in their individual
-# targetNamespace values.
 namespace: external-secrets
 
 nameOverride: ""
@@ -39,98 +30,31 @@ nameOverride: ""
 # ------------------------------------------------------------------------------
 
 store:
-  name: azure-keyvault
+  name: eso-k8s-store
 
-  # Keep true because the same Azure Key Vault store is consumed by resources
-  # across multiple namespaces.
+  # Cluster-scoped because targets span multiple namespaces.
   clusterScope: true
 
-# ------------------------------------------------------------------------------
-# Azure Key Vault
-# ------------------------------------------------------------------------------
-
-keyVault:
-  url: ""
-  tenantId: ""
-
-# ------------------------------------------------------------------------------
-# Authentication
-# ------------------------------------------------------------------------------
-
-auth:
-
-  # Valid values:
-  #
-  #   ServicePrincipal
-  #   WorkloadIdentity
-  #
-  mode: WorkloadIdentity
-
-  # --------------------------------------------------------------------------
-  # Service Principal authentication
-  #
-  # Used by kind/staging.
-  #
-  # The Kubernetes Secret MUST already exist.
-  #
-  # Expected keys:
-  #
-  #   clientId
-  #   clientSecret
-  #
-  # Do not put the actual credentials in this values.yaml.
-  # --------------------------------------------------------------------------
-
-  servicePrincipal:
-    existingSecret:
-      name: azure-sp-creds
-
-      # Namespace containing the credentials Secret.
-      #
-      # Required for ClusterSecretStore.
-      namespace: external-secrets
-
-      clientIdKey: clientId
-      clientSecretKey: clientSecret
-
-  # --------------------------------------------------------------------------
-  # AKS Workload Identity authentication
-  #
-  # The ServiceAccount should normally be created/annotated here by this chart
-  # when createServiceAccount=true.
-  #
-  # The corresponding Azure Federated Identity Credential is created externally
-  # by the bootstrap/infrastructure layer.
-  # --------------------------------------------------------------------------
-
-  workloadIdentity:
-    serviceAccountName: eso-azure-kv
-    serviceAccountNamespace: external-secrets
-
-    createServiceAccount: true
-
-    # Microsoft Entra tenant.
-    #
-    # Normally use keyVault.tenantId rather than duplicating this.
-    tenantId: ""
-
-    annotations:
-      azure.workload.identity/client-id: ""
-
-      # Optional. Azure Workload Identity can derive the tenant from the
-      # workload identity environment, but explicitly setting it makes the
-      # ServiceAccount self-contained and easier to inspect.
-      azure.workload.identity/tenant-id: ""
+  # Provider: in-cluster Kubernetes SecretStore.
+  # Reads from eso-source/eso-source via ServiceAccount RBAC.
+  provider: kubernetes
+  remoteNamespace: eso-source
+  serviceAccountName: eso-k8s-reader
+  serviceAccountNamespace: external-secrets
 
 # ------------------------------------------------------------------------------
 # ExternalSecrets
+#
+# Each entry produces one ExternalSecret resource in the target namespace.
+# remoteRef values MUST match keys in the eso-source Secret created by
+# create_all_secrets_kind.sh.
 # ------------------------------------------------------------------------------
 
 secrets:
 
-  # ----------------------------------------------------------------------------
-  # OpenObserve: backend credentials
-  # ----------------------------------------------------------------------------
+  # ==========================================================================
+  # openobserve namespace
+  # ==========================================================================
 
   - name: openobserve-auth
     targetNamespace: openobserve
@@ -138,16 +62,10 @@ secrets:
     data:
       - secretKey: ZO_ROOT_USER_EMAIL
         remoteRef: OpenObserveRootEmail
-
       - secretKey: ZO_ROOT_USER_PASSWORD
         remoteRef: OpenObserveRootPassword
-
       - secretKey: OPENOBSERVE_AUTH
         remoteRef: OpenObserveBasicAuth
-
-  # ----------------------------------------------------------------------------
-  # OpenObserve: Azure Blob storage
-  # ----------------------------------------------------------------------------
 
   - name: openobserve-storage
     targetNamespace: openobserve
@@ -155,13 +73,8 @@ secrets:
     data:
       - secretKey: account-name
         remoteRef: OpenObserveStorageAccountName
-
       - secretKey: account-key
         remoteRef: OpenObserveStorageAccountKey
-
-  # ----------------------------------------------------------------------------
-  # OTLP gateway token
-  # ----------------------------------------------------------------------------
 
   - name: otel-gateway-token
     targetNamespace: openobserve
@@ -169,112 +82,79 @@ secrets:
     data:
       - secretKey: token
         remoteRef: OtelGatewayToken
-
       - secretKey: otel-exporter-headers
         remoteRef: OtelGatewayExporterHeaders
 
-  - name: otel-gateway-token
-    targetNamespace: apps
+  # ==========================================================================
+  # rivulet namespace
+  # ==========================================================================
+
+  - name: postgres-rivulet-env
+    targetNamespace: rivulet
     refreshInterval: 1h
     data:
-      - secretKey: otel-exporter-headers
-        remoteRef: OtelGatewayExporterHeaders
-
-  - name: otel-gateway-token
-    targetNamespace: sre
-    refreshInterval: 1h
-    data:
-      - secretKey: otel-exporter-headers
-        remoteRef: OtelGatewayExporterHeaders
-
-  # ----------------------------------------------------------------------------
-  # GHCR pull secret
-  # ----------------------------------------------------------------------------
-
-  - name: ghcr-pull-secret
-    targetNamespace: openobserve
-    refreshInterval: 24h
-    type: kubernetes.io/dockerconfigjson
-    data:
-      - secretKey: .dockerconfigjson
-        remoteRef: GhcrDockerConfig
-
-  - name: ghcr-pull-secret
-    targetNamespace: apps
-    refreshInterval: 24h
-    type: kubernetes.io/dockerconfigjson
-    data:
-      - secretKey: .dockerconfigjson
-        remoteRef: GhcrDockerConfig
-
-  - name: ghcr-pull-secret
-    targetNamespace: sre
-    refreshInterval: 24h
-    type: kubernetes.io/dockerconfigjson
-    data:
-      - secretKey: .dockerconfigjson
-        remoteRef: GhcrDockerConfig
-
-  # ----------------------------------------------------------------------------
-  # PostgreSQL
-  # ----------------------------------------------------------------------------
-
-  - name: postgres-app
-    targetNamespace: apps
-    refreshInterval: 1h
-    data:
-      - secretKey: username
+      - secretKey: PGDATABASE
+        remoteRef: PostgresAppDbName
+      - secretKey: PGUSER
         remoteRef: PostgresAppUsername
-
-      - secretKey: password
+      - secretKey: PGPASSWORD
         remoteRef: PostgresAppPassword
 
+  - name: postgres-app
+    targetNamespace: rivulet
+    refreshInterval: 1h
+    data:
       - secretKey: host
         remoteRef: PostgresAppHost
-
       - secretKey: port
         remoteRef: PostgresAppPort
-
       - secretKey: dbname
         remoteRef: PostgresAppDbName
-
+      - secretKey: username
+        remoteRef: PostgresAppUsername
+      - secretKey: password
+        remoteRef: PostgresAppPassword
       - secretKey: uri
         remoteRef: PostgresAppUri
-
       - secretKey: jdbc-uri
         remoteRef: PostgresAppJdbcUri
-
       - secretKey: pgpass
         remoteRef: PostgresAppPgpass
 
-  - name: postgres-app
+  - name: valkey-auth
+    targetNamespace: rivulet
+    refreshInterval: 1h
+    data:
+      - secretKey: password
+        remoteRef: ValkeyPassword
+
+  - name: otel-exporter-headers
+    targetNamespace: rivulet
+    refreshInterval: 1h
+    data:
+      - secretKey: otel-exporter-headers
+        remoteRef: OtelGatewayExporterHeaders
+
+  # ==========================================================================
+  # sre namespace (AutoSRE Agent)
+  # ==========================================================================
+
+  - name: postgres-agent
     targetNamespace: sre
     refreshInterval: 1h
     data:
-      - secretKey: uri
+      - secretKey: POSTGRES_HOST
+        remoteRef: PostgresAppHost
+      - secretKey: POSTGRES_PORT
+        remoteRef: PostgresAppPort
+      - secretKey: POSTGRES_DB
+        remoteRef: PostgresAppDbName
+      - secretKey: POSTGRES_USER
+        remoteRef: PostgresAppUsername
+      - secretKey: POSTGRES_PASSWORD
+        remoteRef: PostgresAppPassword
+      - secretKey: POSTGRES_URI
         remoteRef: PostgresAppUri
-
-  # ----------------------------------------------------------------------------
-  # Valkey
-  # ----------------------------------------------------------------------------
-
-  - name: valkey-auth
-    targetNamespace: data
-    refreshInterval: 1h
-    data:
-      - secretKey: password
-        remoteRef: ValkeyPassword
-
-  - name: valkey-auth
-    targetNamespace: apps
-    refreshInterval: 1h
-    data:
-      - secretKey: password
-        remoteRef: ValkeyPassword
-
-  # ----------------------------------------------------------------------------
-  # OpenObserve reader
-  # ----------------------------------------------------------------------------
 
   - name: openobserve-reader
     targetNamespace: sre
@@ -282,9 +162,164 @@ secrets:
     data:
       - secretKey: email
         remoteRef: OpenObserveReaderEmail
-
       - secretKey: password
         remoteRef: OpenObserveReaderPassword
+      - secretKey: url
+        remoteRef: OpenObserveUrl
+
+  - name: llm-credentials
+    targetNamespace: sre
+    refreshInterval: 1h
+    data:
+      - secretKey: LLM_API_KEY
+        remoteRef: LlmApiKey
+      - secretKey: LLM_BASE_URL
+        remoteRef: LlmBaseUrl
+      - secretKey: LLM_PROVIDER
+        remoteRef: LlmProvider
+      - secretKey: LLM_MODEL_COORDINATOR
+        remoteRef: LlmModelCoordinator
+      - secretKey: LLM_MODEL_WORKER
+        remoteRef: LlmModelWorker
+      - secretKey: LLM_MODEL_SYNTHESIZER
+        remoteRef: LlmModelSynthesizer
+      - secretKey: LLM_MODEL_SELF_CHECK
+        remoteRef: LlmModelSelfCheck
+
+  - name: autosre-agent-secrets
+    targetNamespace: sre
+    refreshInterval: 1h
+    data:
+      # LLM config (AUTOSRE_ prefixed for pydantic-settings)
+      - secretKey: AUTOSRE_LLM__API_KEY
+        remoteRef: AutosreLlmApiKey
+      - secretKey: AUTOSRE_LLM__MODEL_COORDINATOR
+        remoteRef: AutosreLlmModelCoordinator
+      - secretKey: AUTOSRE_LLM__MODEL_WORKER
+        remoteRef: AutosreLlmModelWorker
+      - secretKey: AUTOSRE_LLM__FALLBACK_MODELS
+        remoteRef: AutosreLlmFallbackModels
+      - secretKey: AUTOSRE_LLM__BASE_URL
+        remoteRef: AutosreLlmBaseUrl
+      - secretKey: AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR
+        remoteRef: AutosreLlmInputCostPer1kCoordinator
+      - secretKey: AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR
+        remoteRef: AutosreLlmOutputCostPer1kCoordinator
+      - secretKey: AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER
+        remoteRef: AutosreLlmInputCostPer1kWorker
+      - secretKey: AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER
+        remoteRef: AutosreLlmOutputCostPer1kWorker
+      - secretKey: AUTOSRE_LLM__MAX_RETRIES
+        remoteRef: AutosreLlmMaxRetries
+      - secretKey: AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS
+        remoteRef: AutosreLlmInitialBackoffSeconds
+      - secretKey: AUTOSRE_LLM__MAX_BACKOFF_SECONDS
+        remoteRef: AutosreLlmMaxBackoffSeconds
+      - secretKey: AUTOSRE_LLM__ABSOLUTE_BACKOFF_CAP_SECONDS
+        remoteRef: AutosreLlmAbsoluteBackoffCapSeconds
+      - secretKey: AUTOSRE_LLM__CIRCUIT_BREAKER_ENABLED
+        remoteRef: AutosreLlmCircuitBreakerEnabled
+      - secretKey: AUTOSRE_LLM__CIRCUIT_BREAKER_THRESHOLD
+        remoteRef: AutosreLlmCircuitBreakerThreshold
+      - secretKey: AUTOSRE_LLM__CIRCUIT_BREAKER_TIMEOUT_SECONDS
+        remoteRef: AutosreLlmCircuitBreakerTimeoutSeconds
+      # Postgres
+      - secretKey: AUTOSRE_POSTGRES__HOST
+        remoteRef: AutosrePostgresHost
+      - secretKey: AUTOSRE_POSTGRES__PORT
+        remoteRef: AutosrePostgresPort
+      - secretKey: AUTOSRE_POSTGRES__DB
+        remoteRef: AutosrePostgresDb
+      - secretKey: AUTOSRE_POSTGRES__USER
+        remoteRef: AutosrePostgresUser
+      - secretKey: AUTOSRE_POSTGRES__PASSWORD
+        remoteRef: AutosrePostgresPassword
+      # OpenObserve
+      - secretKey: AUTOSRE_OPENOBSERVE__EMAIL
+        remoteRef: AutosreOpenobserveEmail
+      - secretKey: AUTOSRE_OPENOBSERVE__PASSWORD
+        remoteRef: AutosreOpenobservePassword
+      - secretKey: AUTOSRE_OPENOBSERVE__URL
+        remoteRef: AutosreOpenobserveUrl
+      # Alert webhook
+      - secretKey: AUTOSRE_ALERT__WEBHOOK_SECRET
+        remoteRef: AutosreAlertWebhookSecret
+      # Admin
+      - secretKey: AUTOSRE_ADMIN__SECRET
+        remoteRef: AutosreAdminSecret
+      # Slack (optional)
+      - secretKey: AUTOSRE_SLACK__BOT_TOKEN
+        remoteRef: AutosreSlackBotToken
+      - secretKey: AUTOSRE_SLACK__APP_TOKEN
+        remoteRef: AutosreSlackAppToken
+      - secretKey: AUTOSRE_SLACK__SIGNING_SECRET
+        remoteRef: AutosreSlackSigningSecret
+      - secretKey: AUTOSRE_SLACK__MODE
+        remoteRef: AutosreSlackMode
+      - secretKey: AUTOSRE_SLACK__APPROVAL_CHANNEL
+        remoteRef: AutosreSlackApprovalChannel
+      - secretKey: AUTOSRE_SLACK__APPROVER_USER_IDS
+        remoteRef: AutosreSlackApproverUserIds
+      # Eval judge
+      - secretKey: AUTOSRE_EVAL__JUDGE_API_KEY
+        remoteRef: AutosreEvalJudgeApiKey
+      - secretKey: AUTOSRE_EVAL__JUDGE_MODEL
+        remoteRef: AutosreEvalJudgeModel
+      - secretKey: AUTOSRE_EVAL__JUDGE_BASE_URL
+        remoteRef: AutosreEvalJudgeBaseUrl
+      # Safety / graph budgets
+      - secretKey: AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS
+        remoteRef: AutosreSafetyMaxRiskTierAutonomous
+      - secretKey: AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT
+        remoteRef: AutosreSafetyMaxActionsPerIncident
+      - secretKey: AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS
+        remoteRef: AutosreSafetyMaxWallClockSeconds
+      - secretKey: AUTOSRE_SAFETY__INITIAL_ITERATION_BUDGET
+        remoteRef: AutosreSafetyInitialIterationBudget
+      - secretKey: AUTOSRE_SAFETY__STAGNATION_LIMIT
+        remoteRef: AutosreSafetyStagnationLimit
+      - secretKey: AUTOSRE_SAFETY__MAX_ACTION_ATTEMPTS
+        remoteRef: AutosreSafetyMaxActionAttempts
+      - secretKey: AUTOSRE_SAFETY__CONFIDENCE_PROPOSE
+        remoteRef: AutosreSafetyConfidencePropose
+      - secretKey: AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH
+        remoteRef: AutosreSafetyConfidenceFastPath
+      - secretKey: AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP
+        remoteRef: AutosreSafetyConfidenceGiveUp
+      - secretKey: AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT
+        remoteRef: AutosreSafetyMinConfidenceImprovement
+      - secretKey: AUTOSRE_SAFETY__MAX_LLM_CALLS_PER_INCIDENT
+        remoteRef: AutosreSafetyMaxLlmCallsPerIncident
+      # OTel
+      - secretKey: AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT
+        remoteRef: AutosreOtelExporterOtlpEndpoint
+      - secretKey: AUTOSRE_OTEL__SERVICE_NAME
+        remoteRef: AutosreOtelServiceName
+      - secretKey: AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT
+        remoteRef: AutosreOtelDeploymentEnvironment
+      - secretKey: AUTOSRE_OTEL__EXPORTER_HEADERS
+        remoteRef: AutosreOtelExporterHeaders
+      # Top-level
+      - secretKey: AUTOSRE_DEPLOYMENT_ENVIRONMENT
+        remoteRef: AutosreDeploymentEnvironment
+
+  - name: otel-exporter-headers
+    targetNamespace: sre
+    refreshInterval: 1h
+    data:
+      - secretKey: otel-exporter-headers
+        remoteRef: OtelGatewayExporterHeaders
+
+  - name: alert-webhook
+    targetNamespace: sre
+    refreshInterval: 1h
+    data:
+      - secretKey: webhook-secret
+        remoteRef: AlertWebhookSecret
+
+  # ==========================================================================
+  # eval namespace
+  # ==========================================================================
 
   - name: openobserve-reader
     targetNamespace: eval
@@ -292,27 +327,8 @@ secrets:
     data:
       - secretKey: email
         remoteRef: OpenObserveReaderEmail
-
       - secretKey: password
         remoteRef: OpenObserveReaderPassword
-
-  # ----------------------------------------------------------------------------
-  # Agent LLM credentials
-  # ----------------------------------------------------------------------------
-
-  - name: llm-credentials
-    targetNamespace: sre
-    refreshInterval: 1h
-    data:
-      - secretKey: AZURE_AI_PROJECT_ENDPOINT
-        remoteRef: AzureAiProjectEndpoint
-
-      - secretKey: AZURE_CLIENT_ID
-        remoteRef: AzureAiClientId
-
-  # ----------------------------------------------------------------------------
-  # Ground truth DB
-  # ----------------------------------------------------------------------------
 
   - name: ground-truth-db
     targetNamespace: eval
@@ -320,16 +336,10 @@ secrets:
     data:
       - secretKey: username
         remoteRef: GroundTruthDbUsername
-
       - secretKey: password
         remoteRef: GroundTruthDbPassword
-
       - secretKey: uri
         remoteRef: GroundTruthDbUri
-
-  # ----------------------------------------------------------------------------
-  # SRE agent API
-  # ----------------------------------------------------------------------------
 
   - name: sre-agent-api
     targetNamespace: eval

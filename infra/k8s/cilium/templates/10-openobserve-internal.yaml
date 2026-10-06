@@ -1,0 +1,146 @@
+{{- if .Values.networkPolicies.enabled }}
+# =============================================================================
+# otel-daemonset → otel-gateway (trace/log forwarding)
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: otel-daemonset-to-gateway
+  namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+  labels:
+    app.kubernetes.io/part-of: autosre-cilium
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: otel-daemonset
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+            app.kubernetes.io/name: otel-gateway
+      toPorts:
+        - ports:
+            - port: "4317"
+              protocol: TCP
+            - port: "4318"
+              protocol: TCP
+---
+# =============================================================================
+# otel-gateway → openobserve (internal storage writes)
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: otel-gateway-to-openobserve
+  namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+  labels:
+    app.kubernetes.io/part-of: autosre-cilium
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: otel-gateway
+  egress:
+    # NOTE: openobserve pod uses `app.kubernetes.io/name: open-observe-minimal`
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+            app.kubernetes.io/name: open-observe-minimal
+      toPorts:
+        - ports:
+            - port: "5080"
+              protocol: TCP
+---
+# =============================================================================
+# Ingress on otel-gateway — who may push telemetry
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: otel-gateway-ingress
+  namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+  labels:
+    app.kubernetes.io/part-of: autosre-cilium
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: otel-gateway
+  ingress:
+    # All rivulet pods (telemetry emission)
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.rivuletNamespace }}
+      toPorts:
+        - ports:
+            - port: "4318"
+              protocol: TCP
+    # SRE agent (telemetry emission)
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.sreNamespace }}
+            app.kubernetes.io/name: autosre-agent
+      toPorts:
+        - ports:
+            - port: "4318"
+              protocol: TCP
+    # In-namespace forwarders (otel-daemonset → otel-gateway)
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+            app.kubernetes.io/name: otel-daemonset
+      toPorts:
+        - ports:
+            - port: "4317"
+              protocol: TCP
+            - port: "4318"
+              protocol: TCP
+    # hostNetwork telemetry sources (kubelet, kube-proxy)
+    - fromEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "4317"
+              protocol: TCP
+            - port: "4318"
+              protocol: TCP
+    # kubelet probes
+    - fromEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "13133"
+              protocol: TCP
+---
+# =============================================================================
+# Ingress on otel-daemonset — hostNetwork sources, kubelet probes
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: otel-daemonset-ingress
+  namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+  labels:
+    app.kubernetes.io/part-of: autosre-cilium
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: otel-daemonset
+  ingress:
+    # hostNetwork telemetry sources on this node
+    - fromEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "4317"
+              protocol: TCP
+            - port: "4318"
+              protocol: TCP
+            - port: "13133"
+              protocol: TCP
+{{- end }}
