@@ -7,28 +7,25 @@ on:
     branches: [main]
   workflow_dispatch:
 
-concurrency:
-  group: cd-${{ github.event.workflow_run.head_branch || github.ref }}
-  cancel-in-progress: false
-
 permissions:
   contents: read
   packages: write
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ghcr.io/${{ github.repository }}/autosre-agent
-  TESTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-  CANDIDATE_TAG: ci-${{ github.event.workflow_run.head_sha || github.sha }}
+concurrency:
+  group: cd-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: false
 
-  # Pinned tool versions — must match .devcontainer/bootstrap.sh
+env:
+  TRIVY_IMAGE: ghcr.io/athithya-sakthivel/trivy:0.69.3-safe@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
+  TRIVY_CACHE_DIR: /tmp/trivy-cache
+
   KUBECTL_VERSION: v1.36.4
   KIND_VERSION: v0.32.0
   HELM_VERSION: v4.3.0
 
 jobs:
   release:
-    name: Build → Deploy → Playwright → Eval → Push
+    name: Build → Scan → Deploy → Playwright → Eval → Push
     if: >-
       ${{
         github.event_name == 'workflow_dispatch' ||
@@ -38,25 +35,24 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      # -------------------------------------------------------------------
+      # =====================================================================
       # Checkout the exact commit CI tested
-      # -------------------------------------------------------------------
+      # =====================================================================
       - name: Checkout tested commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.TESTED_SHA }}
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
 
       - name: Announce run
         run: |
-          echo "Trigger:        ${{ github.event_name }}"
-          echo "Tested SHA:     ${TESTED_SHA}"
-          echo "Candidate tag:  ${CANDIDATE_TAG}"
-          echo "Release tag:    latest"
+          echo "Trigger:       ${{ github.event_name }}"
+          echo "Tested SHA:    ${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "Release tag:   latest"
 
-      # -------------------------------------------------------------------
-      # Python + Node setup
-      # -------------------------------------------------------------------
+      # =====================================================================
+      # Python + Node toolchain
+      # =====================================================================
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
@@ -81,9 +77,9 @@ jobs:
         working-directory: agents/ui
         run: bash lock-versions.sh
 
-      # -------------------------------------------------------------------
-      # Kubernetes toolchain via official pinned actions
-      # -------------------------------------------------------------------
+      # =====================================================================
+      # Kubernetes toolchain (official pinned actions)
+      # =====================================================================
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
         with:
@@ -113,46 +109,134 @@ jobs:
           jq --version
           bc --version | head -1
 
-      # -------------------------------------------------------------------
-      # Step 1: Build Docker image (candidate)
-      # -------------------------------------------------------------------
-      - name: Build candidate image
-        working-directory: agents
+      # =====================================================================
+      # Compute image metadata (lowercase required for GHCR)
+      # =====================================================================
+      - name: Compute image metadata
+        id: image-meta
+        shell: bash
         run: |
-          docker build \
-            --tag "${REGISTRY}/${IMAGE_NAME}:${CANDIDATE_TAG}" \
-            --label "org.opencontainers.image.revision=${TESTED_SHA}" \
-            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            .
+          set -euo pipefail
 
-      # -------------------------------------------------------------------
-      # Step 2: Deploy full SUT via existing e2e.sh
-      # -------------------------------------------------------------------
+          # GHCR requires lowercase repository names. github.repository returns
+          # the owner/repo exactly as cased on GitHub (e.g. Athithya-Sakthivel/AutoSRE).
+          GHCR_USER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          IMAGE_NAME="autosre-agent"
+          TESTED_SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          SHORT_SHA="$(echo "${TESTED_SHA}" | cut -c1-8)"
+          IMAGE_TAG="ci-$(TZ=UTC date +%Y-%m-%d-%H-%M)--${SHORT_SHA}"
+
+          CANDIDATE_IMAGE="ghcr.io/${GHCR_USER}/${IMAGE_NAME}:${IMAGE_TAG}"
+          RELEASE_IMAGE="ghcr.io/${GHCR_USER}/${IMAGE_NAME}:latest"
+
+          {
+            echo "ghcr_user=${GHCR_USER}"
+            echo "image_name=${IMAGE_NAME}"
+            echo "image_tag=${IMAGE_TAG}"
+            echo "tested_sha=${TESTED_SHA}"
+            echo "candidate_image=${CANDIDATE_IMAGE}"
+            echo "release_image=${RELEASE_IMAGE}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Candidate: ${CANDIDATE_IMAGE}"
+          echo "Release:   ${RELEASE_IMAGE}"
+
+      # =====================================================================
+      # Docker Buildx setup
+      # =====================================================================
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # =====================================================================
+      # Build image locally (load into docker daemon for kind to consume)
+      # =====================================================================
+      - name: Build image locally
+        id: build-image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./agents
+          file: ./agents/Dockerfile
+          load: true
+          push: false
+          pull: true
+          tags: |
+            ${{ steps.image-meta.outputs.candidate_image }}
+            ${{ steps.image-meta.outputs.release_image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.revision=${{ steps.image-meta.outputs.tested_sha }}
+            org.opencontainers.image.created=${{ github.event.workflow_run.head_branch || github.ref }}
+
+      # =====================================================================
+      # Trivy vulnerability scan (CRITICAL only, fails build)
+      # =====================================================================
+      - name: Compute Trivy cache key
+        id: trivy-key
+        shell: bash
+        run: echo "key=trivy-${RUNNER_OS}-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Trivy cache
+        run: mkdir -p "${TRIVY_CACHE_DIR}"
+
+      - name: Restore Trivy cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TRIVY_CACHE_DIR }}
+          key: ${{ steps.trivy-key.outputs.key }}
+          restore-keys: |
+            trivy-${{ runner.os }}-
+
+      - name: Scan image with Trivy
+        run: |
+          scan_image="${{ steps.build-image.outputs.imageid }}"
+          test -n "${scan_image}"
+
+          ignore_args=()
+          if [[ -f .trivyignore ]]; then
+            ignore_args+=(--ignorefile /workspace/.trivyignore)
+          fi
+
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${TRIVY_CACHE_DIR}:/root/.cache" \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            "${TRIVY_IMAGE}" \
+            image \
+            --cache-dir /root/.cache/trivy \
+            --scanners vuln \
+            --severity CRITICAL \
+            --exit-on-eol 1 \
+            --exit-code 1 \
+            "${ignore_args[@]}" \
+            "${scan_image}"
+
+      # =====================================================================
+      # Deploy SUT (Kind + Cilium + all workloads)
+      # =====================================================================
       - name: Deploy SUT (Kind + Cilium + Rivulet + OpenObserve + OTel)
         env:
           AUTOSRE_LLM__API_KEY: ${{ secrets.AUTOSRE_LLM__API_KEY }}
         run: bash scripts/staging/e2e.sh
 
-      # -------------------------------------------------------------------
-      # Step 3: Load candidate image into Kind + deploy agent
-      # -------------------------------------------------------------------
       - name: Load candidate image into Kind
         run: |
           kind load docker-image \
-            "${REGISTRY}/${IMAGE_NAME}:${CANDIDATE_TAG}" \
+            "${{ steps.image-meta.outputs.candidate_image }}" \
             --name kind
 
       - name: Deploy AutoSRE agent with candidate image
         env:
-          IMAGE_TAG: ${{ env.CANDIDATE_TAG }}
+          IMAGE_TAG: ${{ steps.image-meta.outputs.image_tag }}
         run: bash scripts/common/autosre-agent-deploy.sh deploy
 
       - name: Wait for all pods ready
         run: kubectl wait --for=condition=ready pod --all --all-namespaces --timeout=300s
 
-      # -------------------------------------------------------------------
-      # Step 4: Playwright E2E
-      # -------------------------------------------------------------------
+      # =====================================================================
+      # Playwright E2E
+      # =====================================================================
       - name: Start port-forwards
         run: |
           nohup kubectl port-forward -n sre svc/autosre-agent 8000:8000 >/tmp/pf-agent.log 2>&1 &
@@ -178,9 +262,9 @@ jobs:
           kill "$(cat /tmp/ui.pid 2>/dev/null)" 2>/dev/null || true
           pkill -f "kubectl port-forward" 2>/dev/null || true
 
-      # -------------------------------------------------------------------
-      # Step 5: Eval gate (real LLM against live agent)
-      # -------------------------------------------------------------------
+      # =====================================================================
+      # Eval gate (real LLM against live agent)
+      # =====================================================================
       - name: Run eval suite (real LLM)
         working-directory: agents
         env:
@@ -196,32 +280,33 @@ jobs:
           source .venv/bin/activate
           pytest eval/ -q --tb=short --no-header
 
-      # -------------------------------------------------------------------
-      # Step 6: Push to GHCR
-      # -------------------------------------------------------------------
-      - name: Login to GHCR
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login "${REGISTRY}" \
-            -u "${{ github.actor }}" --password-stdin
+      # =====================================================================
+      # Push to GHCR (only after all gates pass)
+      # =====================================================================
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ steps.image-meta.outputs.ghcr_user }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Tag + push candidate + release
+      - name: Push candidate + release tags
         run: |
-          CANDIDATE="${REGISTRY}/${IMAGE_NAME}:${CANDIDATE_TAG}"
-          RELEASE="${REGISTRY}/${IMAGE_NAME}:latest"
-          docker tag "${CANDIDATE}" "${RELEASE}"
-          docker push "${CANDIDATE}"
-          docker push "${RELEASE}"
-          echo "✅ Released: ${RELEASE}"
-          echo "   From tested SHA: ${TESTED_SHA}"
+          set -euo pipefail
+          docker push "${{ steps.image-meta.outputs.candidate_image }}"
+          docker push "${{ steps.image-meta.outputs.release_image }}"
+          echo "✅ Released: ${{ steps.image-meta.outputs.release_image }}"
+          echo "   Candidate: ${{ steps.image-meta.outputs.candidate_image }}"
+          echo "   From tested SHA: ${{ steps.image-meta.outputs.tested_sha }}"
 
-      # -------------------------------------------------------------------
+      # =====================================================================
       # Artifacts on failure
-      # -------------------------------------------------------------------
+      # =====================================================================
       - name: Upload artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: cd-logs-${{ github.run_id }}-${{ env.TESTED_SHA }}
+          name: cd-logs-${{ github.run_id }}-${{ steps.image-meta.outputs.image_tag }}
           path: |
             /tmp/pf-agent.log
             /tmp/pf-o2.log
