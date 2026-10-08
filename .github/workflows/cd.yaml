@@ -1,0 +1,242 @@
+name: CD (Eval-Gated Release)
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: cd-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/${{ github.repository }}/autosre-agent
+  # HEAD SHA of the commit CI actually tested (workflow_run) or the dispatch commit
+  TESTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+  CANDIDATE_TAG: ci-${{ github.event.workflow_run.head_sha || github.sha }}
+
+  # Pinned tool versions — must match .devcontainer/bootstrap.sh
+  KUBECTL_VERSION: v1.36.4
+  KIND_VERSION: v0.32.0
+  HELM_VERSION: v4.3.0
+
+jobs:
+  release:
+    name: Build → Deploy → Playwright → Eval → Push
+    # Run only if:
+    #   - Manually dispatched, OR
+    #   - Triggered by workflow_run AND CI succeeded
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        github.event.workflow_run.conclusion == 'success'
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      # -------------------------------------------------------------------
+      # Checkout the exact commit CI tested
+      # -------------------------------------------------------------------
+      - name: Checkout tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TESTED_SHA }}
+          fetch-depth: 0
+
+      - name: Announce run
+        run: |
+          echo "Trigger:        ${{ github.event_name }}"
+          echo "Tested SHA:     ${TESTED_SHA}"
+          echo "Candidate tag:  ${CANDIDATE_TAG}"
+          echo "Release tag:    latest"
+
+      # -------------------------------------------------------------------
+      # Python setup (needed for lock-versions.sh + eval pytest)
+      # -------------------------------------------------------------------
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "agents/uv.lock"
+
+      - name: Install Python 3.14
+        run: uv python install 3.14
+
+      - name: Lock Python dependencies
+        working-directory: agents
+        run: bash lock-versions.sh
+
+      # -------------------------------------------------------------------
+      # Node setup (needed for Playwright)
+      # -------------------------------------------------------------------
+      - name: Install Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: agents/ui/package-lock.json
+
+      - name: Lock Node dependencies + Playwright browsers
+        working-directory: agents/ui
+        run: bash lock-versions.sh
+
+      # -------------------------------------------------------------------
+      # Kubernetes tools via direct curl (no third-party actions)
+      # Matches .devcontainer/bootstrap.sh install patterns
+      # -------------------------------------------------------------------
+      - name: Install kubectl
+        run: |
+          ARCH="$(dpkg --print-architecture)"
+          curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" \
+            -o /usr/local/bin/kubectl
+          chmod 0755 /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Install kind
+        run: |
+          ARCH="$(dpkg --print-architecture)"
+          curl -fsSL "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${ARCH}" \
+            -o /usr/local/bin/kind
+          chmod 0755 /usr/local/bin/kind
+          kind version
+
+      - name: Install Helm
+        run: |
+          ARCH="$(dpkg --print-architecture)"
+          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz" \
+            | tar -xz -C /tmp
+          install -m 0755 "/tmp/linux-${ARCH}/helm" /usr/local/bin/helm
+          helm version --short
+
+      - name: Install jq and bc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends jq bc
+
+      # -------------------------------------------------------------------
+      # Step 1: Build Docker image (candidate)
+      # -------------------------------------------------------------------
+      - name: Build candidate image
+        working-directory: agents
+        run: |
+          docker build \
+            --tag "${REGISTRY}/${IMAGE_NAME}:${CANDIDATE_TAG}" \
+            --label "org.opencontainers.image.revision=${TESTED_SHA}" \
+            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            .
+
+      # -------------------------------------------------------------------
+      # Step 2: Deploy full SUT via existing e2e.sh
+      #   e2e.sh calls kind_cluster.sh which sets up Kind + Cilium
+      # -------------------------------------------------------------------
+      - name: Deploy SUT (Kind + Cilium + Rivulet + OpenObserve + OTel)
+        env:
+          AUTOSRE_LLM__API_KEY: ${{ secrets.AUTOSRE_LLM__API_KEY }}
+        run: bash scripts/staging/e2e.sh
+
+      # -------------------------------------------------------------------
+      # Step 3: Load candidate image into Kind + deploy agent
+      # -------------------------------------------------------------------
+      - name: Load candidate image into Kind
+        run: |
+          kind load docker-image \
+            "${REGISTRY}/${IMAGE_NAME}:${CANDIDATE_TAG}" \
+            --name kind
+
+      - name: Deploy AutoSRE agent with candidate image
+        env:
+          IMAGE_TAG: ${{ env.CANDIDATE_TAG }}
+        run: bash scripts/common/autosre-agent-deploy.sh deploy
+
+      - name: Wait for all pods ready
+        run: kubectl wait --for=condition=ready pod --all --all-namespaces --timeout=300s
+
+      # -------------------------------------------------------------------
+      # Step 4: Playwright E2E (requires agent + UI dev server)
+      # -------------------------------------------------------------------
+      - name: Start port-forwards
+        run: |
+          nohup kubectl port-forward -n sre svc/autosre-agent 8000:8000 >/tmp/pf-agent.log 2>&1 &
+          nohup kubectl port-forward -n openobserve svc/openobserve 5080:5080 >/tmp/pf-o2.log 2>&1 &
+          sleep 5
+          curl -sf http://127.0.0.1:8000/healthz || { cat /tmp/pf-agent.log; exit 1; }
+
+      - name: Start UI dev server
+        working-directory: agents/ui
+        run: |
+          nohup npx vite --host 127.0.0.1 --port 5173 --strictPort >/tmp/ui.log 2>&1 &
+          echo $! > /tmp/ui.pid
+          sleep 8
+          curl -sf http://127.0.0.1:5173/ || { cat /tmp/ui.log; exit 1; }
+
+      - name: Run Playwright E2E
+        working-directory: agents/ui
+        run: bash test_e2e.sh --playwright
+
+      - name: Stop UI + port-forwards
+        if: always()
+        run: |
+          kill "$(cat /tmp/ui.pid 2>/dev/null)" 2>/dev/null || true
+          pkill -f "kubectl port-forward" 2>/dev/null || true
+
+      # -------------------------------------------------------------------
+      # Step 5: Eval gate (real LLM against live agent)
+      # -------------------------------------------------------------------
+      - name: Run eval suite (real LLM)
+        working-directory: agents
+        env:
+          AUTOSRE_LLM__API_KEY: ${{ secrets.AUTOSRE_LLM__API_KEY }}
+          AUTOSRE_LLM__MODEL_COORDINATOR: gemini/gemini-3.8-flash
+          AUTOSRE_LLM__MODEL_WORKER: gemini/gemini-3.5-flash-lite
+          AUTOSRE_EVAL__JUDGE_MODEL: gemini/gemini-3.5-flash-lite
+          AGENT_BASE_URL: http://autosre-agent.sre.svc.cluster.local:8000
+          EVAL_INCIDENT_IDS: INC-001,INC-002,INC-009
+          EVAL_FORCE_RERUN: "1"
+          EVAL_DELAY_SECONDS: "15"
+        run: |
+          source .venv/bin/activate
+          pytest eval/ -q --tb=short --no-header
+
+      # -------------------------------------------------------------------
+      # Step 6: Push to GHCR (only after all gates pass)
+      # -------------------------------------------------------------------
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login "${REGISTRY}" \
+            -u "${{ github.actor }}" --password-stdin
+
+      - name: Tag + push candidate + release
+        run: |
+          CANDIDATE="${REGISTRY}/${IMAGE_NAME}:${CANDIDATE_TAG}"
+          RELEASE="${REGISTRY}/${IMAGE_NAME}:latest"
+          docker tag "${CANDIDATE}" "${RELEASE}"
+          docker push "${CANDIDATE}"
+          docker push "${RELEASE}"
+          echo " Released: ${RELEASE}"
+          echo "   From tested SHA: ${TESTED_SHA}"
+
+      # -------------------------------------------------------------------
+      # Artifacts on failure
+      # -------------------------------------------------------------------
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cd-logs-${{ github.run_id }}-${{ env.TESTED_SHA }}
+          path: |
+            /tmp/pf-agent.log
+            /tmp/pf-o2.log
+            /tmp/ui.log
+            agents/eval/results/
+            agents/ui/test-results/
+            agents/output.txt
+          if-no-files-found: warn
+          retention-days: 14

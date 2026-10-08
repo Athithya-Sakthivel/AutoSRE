@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python (lint + typecheck + tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "agents/uv.lock"
+
+      - name: Install Python 3.14
+        run: uv python install 3.14
+
+      - name: Lock Python dependencies
+        working-directory: agents
+        run: bash lock-versions.sh
+
+      - name: Run CI suite (ruff + mypy + pytest + dataset validation)
+        working-directory: agents
+        env:
+          LLM_API_KEY: ci-mock-key
+          AUTOSRE_LLM__API_KEY: ci-mock-key
+          AUTOSRE_LLM__BASE_URL: http://127.0.0.1:1/never-called
+          AUTOSRE_POSTGRES__PASSWORD: ci-mock
+          AUTOSRE_POSTGRES__HOST: 127.0.0.1
+          AUTOSRE_POSTGRES__PORT: "1"
+          AUTOSRE_POSTGRES__DB: ci_mock
+          AUTOSRE_POSTGRES__USER: ci_mock
+          AUTOSRE_OPENOBSERVE__EMAIL: ci@example.invalid
+          AUTOSRE_OPENOBSERVE__PASSWORD: ci-mock
+          AUTOSRE_OPENOBSERVE__URL: http://127.0.0.1:1
+          AUTOSRE_ALERT__WEBHOOK_SECRET: ci-mock
+          AUTOSRE_VALKEY__HOST: 127.0.0.1
+          AUTOSRE_VALKEY__PORT: "1"
+          AUTOSRE_VALKEY__PASSWORD: ci-mock
+        run: bash test_e2e.sh --ci
+
+  frontend:
+    name: Frontend (typecheck + lint + build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: agents/ui/package-lock.json
+
+      - name: Lock Node dependencies
+        working-directory: agents/ui
+        run: bash lock-versions.sh
+
+      - name: Validate (typecheck + lint + build)
+        working-directory: agents/ui
+        run: bash validate.sh
