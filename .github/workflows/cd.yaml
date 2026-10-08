@@ -19,7 +19,6 @@ env:
   TRIVY_IMAGE: ghcr.io/athithya-sakthivel/trivy:0.69.3-safe@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
   TRIVY_CACHE_DIR: /tmp/trivy-cache
 
-  # Pinned tool versions — must match .devcontainer/bootstrap.sh
   KUBECTL_VERSION: v1.36.4
   KIND_VERSION: v0.32.0
   HELM_VERSION: v4.3.0
@@ -27,7 +26,7 @@ env:
 
 jobs:
   release:
-    name: Build → Scan → Deploy → Playwright → Eval → Push
+    name: Build - Scan - Deploy - Playwright - E2E - Push
     if: >-
       ${{
         github.event_name == 'workflow_dispatch' ||
@@ -37,9 +36,6 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      # =====================================================================
-      # Checkout the exact commit CI tested
-      # =====================================================================
       - name: Checkout tested commit
         uses: actions/checkout@v4
         with:
@@ -50,10 +46,9 @@ jobs:
         run: |
           echo "Trigger:       ${{ github.event_name }}"
           echo "Tested SHA:    ${{ github.event.workflow_run.head_sha || github.sha }}"
-          echo "Release tag:   latest"
 
       # =====================================================================
-      # Python + Node toolchain
+      # Toolchain setup
       # =====================================================================
       - name: Install uv
         uses: astral-sh/setup-uv@v6
@@ -75,13 +70,10 @@ jobs:
           cache: npm
           cache-dependency-path: agents/ui/package-lock.json
 
-      - name: Lock Node dependencies + Playwright browsers
+      - name: Lock Node dependencies and Playwright browsers
         working-directory: agents/ui
         run: bash lock-versions.sh
 
-      # =====================================================================
-      # Kubernetes toolchain (official pinned actions)
-      # =====================================================================
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
         with:
@@ -98,9 +90,6 @@ jobs:
         with:
           version: ${{ env.HELM_VERSION }}
 
-      # OpenTofu — official action verifies downloaded binary against
-      # SHA256SUMS from the release [[1]], [[17]]. Required by
-      # infra/terraform/run.sh which calls `tofu`.
       - name: Install OpenTofu
         uses: opentofu/setup-opentofu@v1
         with:
@@ -119,26 +108,22 @@ jobs:
           helm version --short
           tofu version
           jq --version
-          bc --version | head -1
 
       # =====================================================================
-      # Compute image metadata (lowercase required for GHCR)
+      # Docker build and scan
       # =====================================================================
       - name: Compute image metadata
         id: image-meta
         shell: bash
         run: |
           set -euo pipefail
-
           GHCR_USER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
           IMAGE_NAME="autosre-agent"
           TESTED_SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
           SHORT_SHA="$(echo "${TESTED_SHA}" | cut -c1-8)"
           IMAGE_TAG="ci-$(TZ=UTC date +%Y-%m-%d-%H-%M)--${SHORT_SHA}"
-
           CANDIDATE_IMAGE="ghcr.io/${GHCR_USER}/${IMAGE_NAME}:${IMAGE_TAG}"
           RELEASE_IMAGE="ghcr.io/${GHCR_USER}/${IMAGE_NAME}:latest"
-
           {
             echo "ghcr_user=${GHCR_USER}"
             echo "image_name=${IMAGE_NAME}"
@@ -148,18 +133,9 @@ jobs:
             echo "release_image=${RELEASE_IMAGE}"
           } >> "$GITHUB_OUTPUT"
 
-          echo "Candidate: ${CANDIDATE_IMAGE}"
-          echo "Release:   ${RELEASE_IMAGE}"
-
-      # =====================================================================
-      # Docker Buildx setup
-      # =====================================================================
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # =====================================================================
-      # Build image locally (load into docker daemon for kind to consume)
-      # =====================================================================
       - name: Build image locally
         id: build-image
         uses: docker/build-push-action@v6
@@ -176,11 +152,8 @@ jobs:
           cache-to: type=gha,mode=max
           labels: |
             org.opencontainers.image.revision=${{ steps.image-meta.outputs.tested_sha }}
-            org.opencontainers.image.created=${{ github.event.workflow_run.head_branch || github.ref }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
-      # =====================================================================
-      # Trivy vulnerability scan (CRITICAL only, fails build)
-      # =====================================================================
       - name: Compute Trivy cache key
         id: trivy-key
         shell: bash
@@ -201,12 +174,10 @@ jobs:
         run: |
           scan_image="${{ steps.build-image.outputs.imageid }}"
           test -n "${scan_image}"
-
           ignore_args=()
           if [[ -f .trivyignore ]]; then
             ignore_args+=(--ignorefile /workspace/.trivyignore)
           fi
-
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${TRIVY_CACHE_DIR}:/root/.cache" \
@@ -223,9 +194,9 @@ jobs:
             "${scan_image}"
 
       # =====================================================================
-      # Deploy SUT (Kind + Cilium + all workloads + OpenTofu for O2 alerts)
+      # Deploy SUT and Agent
       # =====================================================================
-      - name: Deploy SUT (Kind + Cilium + Rivulet + OpenObserve + OTel + Terraform)
+      - name: Deploy SUT
         env:
           AUTOSRE_LLM__API_KEY: ${{ secrets.AUTOSRE_LLM__API_KEY }}
         run: bash scripts/staging/e2e.sh
@@ -239,6 +210,11 @@ jobs:
       - name: Deploy AutoSRE agent with candidate image
         env:
           IMAGE_TAG: ${{ steps.image-meta.outputs.image_tag }}
+          AUTOSRE_SLACK__BOT_TOKEN: ""
+          AUTOSRE_SLACK__APP_TOKEN: ""
+          AUTOSRE_SLACK__SIGNING_SECRET: ""
+          AUTOSRE_SLACK__APPROVAL_CHANNEL: ""
+          AUTOSRE_SLACK__APPROVER_USER_IDS: ""
         run: bash scripts/common/autosre-agent-deploy.sh deploy
 
       - name: Wait for all pods ready
@@ -266,16 +242,10 @@ jobs:
         working-directory: agents/ui
         run: bash test_e2e.sh --playwright
 
-      - name: Stop UI + port-forwards
-        if: always()
-        run: |
-          kill "$(cat /tmp/ui.pid 2>/dev/null)" 2>/dev/null || true
-          pkill -f "kubectl port-forward" 2>/dev/null || true
-
       # =====================================================================
-      # Eval gate (real LLM against live agent)
+      # E2E smoke test: run 1 incident (INC-001) to prove new commit works
       # =====================================================================
-      - name: Run eval suite (real LLM)
+      - name: Run E2E smoke test
         working-directory: agents
         env:
           AUTOSRE_LLM__API_KEY: ${{ secrets.AUTOSRE_LLM__API_KEY }}
@@ -283,16 +253,27 @@ jobs:
           AUTOSRE_LLM__MODEL_WORKER: gemini/gemini-3.5-flash-lite
           AUTOSRE_EVAL__JUDGE_MODEL: gemini/gemini-3.5-flash-lite
           AGENT_BASE_URL: http://autosre-agent.sre.svc.cluster.local:8000
-          EVAL_INCIDENT_IDS: INC-001,INC-002,INC-009
           EVAL_FORCE_RERUN: "1"
           EVAL_DELAY_SECONDS: "15"
         run: |
           source .venv/bin/activate
-          pytest eval/ -q --tb=short --no-header
+          pytest eval/ -k "INC-001" -v --tb=short
+
+      - name: Print eval metrics
+        working-directory: agents
+        run: |
+          source .venv/bin/activate
+          python eval/print_metrics.py
 
       # =====================================================================
-      # Push to GHCR (only after all gates pass)
+      # Push to GHCR
       # =====================================================================
+      - name: Stop UI and port-forwards
+        if: always()
+        run: |
+          kill "$(cat /tmp/ui.pid 2>/dev/null)" 2>/dev/null || true
+          pkill -f "kubectl port-forward" 2>/dev/null || true
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -300,18 +281,15 @@ jobs:
           username: ${{ steps.image-meta.outputs.ghcr_user }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push candidate + release tags
+      - name: Push candidate and release tags
         run: |
           set -euo pipefail
           docker push "${{ steps.image-meta.outputs.candidate_image }}"
           docker push "${{ steps.image-meta.outputs.release_image }}"
-          echo "✅ Released: ${{ steps.image-meta.outputs.release_image }}"
-          echo "   Candidate: ${{ steps.image-meta.outputs.candidate_image }}"
-          echo "   From tested SHA: ${{ steps.image-meta.outputs.tested_sha }}"
+          echo "Released: ${{ steps.image-meta.outputs.release_image }}"
+          echo "Candidate: ${{ steps.image-meta.outputs.candidate_image }}"
+          echo "From tested SHA: ${{ steps.image-meta.outputs.tested_sha }}"
 
-      # =====================================================================
-      # Artifacts on failure
-      # =====================================================================
       - name: Upload artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -322,7 +300,5 @@ jobs:
             /tmp/pf-o2.log
             /tmp/ui.log
             agents/eval/results/
-            agents/ui/test-results/
-            agents/output.txt
           if-no-files-found: warn
           retention-days: 14

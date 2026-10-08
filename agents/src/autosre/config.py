@@ -335,6 +335,7 @@ class SlackConfig(BaseSettings):
         env_prefix="AUTOSRE_SLACK__",
         env_nested_delimiter="__",
         extra="ignore",
+        env_ignore_empty=True,
     )
 
     mode: Literal["socket", "http"] = Field(default="socket")
