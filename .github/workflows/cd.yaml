@@ -19,9 +19,11 @@ env:
   TRIVY_IMAGE: ghcr.io/athithya-sakthivel/trivy:0.69.3-safe@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
   TRIVY_CACHE_DIR: /tmp/trivy-cache
 
+  # Pinned tool versions — must match .devcontainer/bootstrap.sh
   KUBECTL_VERSION: v1.36.4
   KIND_VERSION: v0.32.0
   HELM_VERSION: v4.3.0
+  TOFU_VERSION: "1.13.1"
 
 jobs:
   release:
@@ -96,6 +98,15 @@ jobs:
         with:
           version: ${{ env.HELM_VERSION }}
 
+      # OpenTofu — official action verifies downloaded binary against
+      # SHA256SUMS from the release [[1]], [[17]]. Required by
+      # infra/terraform/run.sh which calls `tofu`.
+      - name: Install OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+
       - name: Install jq and bc
         run: |
           sudo apt-get update
@@ -106,6 +117,7 @@ jobs:
           kubectl version --client
           kind version
           helm version --short
+          tofu version
           jq --version
           bc --version | head -1
 
@@ -118,8 +130,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # GHCR requires lowercase repository names. github.repository returns
-          # the owner/repo exactly as cased on GitHub (e.g. Athithya-Sakthivel/AutoSRE).
           GHCR_USER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
           IMAGE_NAME="autosre-agent"
           TESTED_SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
@@ -213,9 +223,9 @@ jobs:
             "${scan_image}"
 
       # =====================================================================
-      # Deploy SUT (Kind + Cilium + all workloads)
+      # Deploy SUT (Kind + Cilium + all workloads + OpenTofu for O2 alerts)
       # =====================================================================
-      - name: Deploy SUT (Kind + Cilium + Rivulet + OpenObserve + OTel)
+      - name: Deploy SUT (Kind + Cilium + Rivulet + OpenObserve + OTel + Terraform)
         env:
           AUTOSRE_LLM__API_KEY: ${{ secrets.AUTOSRE_LLM__API_KEY }}
         run: bash scripts/staging/e2e.sh
