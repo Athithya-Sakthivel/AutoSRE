@@ -22,10 +22,12 @@ O2_DAEMONSET_CHART_PATH="${O2_DAEMONSET_CHART_PATH:-infra/k8s/otel-daemonset}"
 O2_DAEMONSET_RELEASE="${O2_DAEMONSET_RELEASE:-otel-daemonset}"
 O2_NAMESPACE="${O2_NAMESPACE:-openobserve}"
 O2_AUTH_SECRET="${O2_AUTH_SECRET:-openobserve-auth}"
+O2_ORG="${O2_ORG:-${TF_VAR_o2_organization:-default}}"
 O2_HELM_TIMEOUT="${O2_HELM_TIMEOUT:-600s}"
 O2_POD_READY_TIMEOUT="${O2_POD_READY_TIMEOUT:-300s}"
 KUBECTL="${KUBECTL:-kubectl}"
 HELM="${HELM:-helm}"
+
 
 DRY_RUN=false
 O2_RUN_ID="$(date -u +%Y%m%d-%H%M%S)"

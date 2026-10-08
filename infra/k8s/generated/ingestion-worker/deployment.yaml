@@ -59,7 +59,7 @@ spec:
             limits:   { cpu: 100m, memory: 32Mi }
       containers:
         - name: ingestion-worker
-          image: ghcr.io/athithya-sakthivel/rivulet-ingestion-worker:d0e808b
+          image: ghcr.io/athithya-sakthivel/rivulet-ingestion-worker:2026-10-08-12-33-37--4fdf232
           imagePullPolicy: IfNotPresent
           env:
             # Service identity for telemetry
@@ -68,7 +68,7 @@ spec:
             - name: DEPLOYMENT_ENVIRONMENT
               value: "evaluation"
             - name: GIT_VERSION
-              value: "d0e808b"
+              value: "2026-10-08-12-33-37--4fdf232"
 
             # HTTP + Chaos ports (config.Load reads these)
             - name: HTTP_PORT

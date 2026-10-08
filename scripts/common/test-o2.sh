@@ -2,22 +2,21 @@
 # ==============================================================================
 # End-to-end smoke test for the OpenObserve + OTel Collector pipeline.
 #
-#   1. Verify all pods are Ready.
-#   2. Send synthetic traces, metrics, and logs to the OTel gateway.
-#   3. Confirm the gateway exported them without error.
-#   4. Confirm OpenObserve returned HTTP 200 for each signal.
-#   5. Confirm the OpenObserve search API responds.
+# Tests the full observability pipeline under Cilium zero-trust networking:
+#   1. Verify all observability pods are Ready.
+#   2. Create a temporary CiliumNetworkPolicy for test pods.
+#   3. Wait for eBPF policy compilation + Cilium identity assignment.
+#   4. Send synthetic traces, metrics, and logs via gRPC on port 4317.
+#   5. Confirm the gateway exported them without error.
+#   6. Confirm OpenObserve accepted the POST requests.
+#   7. Confirm the OpenObserve search API returns the test data.
 #
 # Usage:
 #   bash scripts/common/test-o2.sh [--dry-run] [--keep] [--help]
 #
-#   --dry-run   Print the manifests that would be applied; do not deploy.
-#   --keep      Do not delete the test pods on exit (for debugging).
+#   --dry-run   Print manifests only; do not deploy.
+#   --keep      Do not delete test resources on exit (for debugging).
 # ==============================================================================
-# kubectl -n openobserve port-forward svc/openobserve 5080:5080
-## Fetch Username (email) and password
-# kubectl -n openobserve get secret openobserve-auth -o jsonpath='{.data.ZO_ROOT_USER_EMAIL}' | base64 -d; echo
-# kubectl -n openobserve get secret openobserve-auth -o jsonpath='{.data.ZO_ROOT_USER_PASSWORD}' | base64 -d; echo
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -28,6 +27,7 @@ umask 0077
 NAMESPACE="${NAMESPACE:-openobserve}"
 GATEWAY_SERVICE="${GATEWAY_SERVICE:-otel-gateway}"
 GATEWAY_GRPC_PORT="${GATEWAY_GRPC_PORT:-4317}"
+GATEWAY_HTTP_PORT="${GATEWAY_HTTP_PORT:-4318}"
 OPENOBSERVE_SERVICE="${OPENOBSERVE_SERVICE:-openobserve}"
 OPENOBSERVE_PORT="${OPENOBSERVE_PORT:-5080}"
 TELEMETRYGEN_IMAGE="${TELEMETRYGEN_IMAGE:-ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.157.0}"
@@ -38,6 +38,11 @@ TEST_START_TIME=""
 TEST_START_US=""
 QUERY_RETRY_SECONDS="${QUERY_RETRY_SECONDS:-60}"
 QUERY_RETRY_INTERVAL="${QUERY_RETRY_INTERVAL:-3}"
+
+# Critical: Cilium needs time to compile policy into eBPF on each node AND
+# assign identities to new pods. Default 15s is safe; reduce only if confident.
+POLICY_PROPAGATION_SECONDS="${POLICY_PROPAGATION_SECONDS:-15}"
+IDENTITY_WAIT_SECONDS="${IDENTITY_WAIT_SECONDS:-30}"
 
 # Pod names
 TRACES_POD="telemetrygen-traces-${TEST_TAG}"
@@ -77,7 +82,6 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
 }
 
-# Cross-platform base64 encode (no line wrapping)
 b64_encode() {
   if base64 --help 2>&1 | grep -q -- '-w'; then
     base64 -w0
@@ -86,7 +90,6 @@ b64_encode() {
   fi
 }
 
-# Find pods matching a release label
 pod_for_release() {
   local release="$1"
   kubectl get pods -n "${NAMESPACE}" \
@@ -102,7 +105,6 @@ PORT_FORWARD_PID=""
 cleanup() {
   local exit_code=$?
 
-  # Kill port-forward if running
   if [[ -n "${PORT_FORWARD_PID}" ]]; then
     kill "${PORT_FORWARD_PID}" 2>/dev/null || true
     wait "${PORT_FORWARD_PID}" 2>/dev/null || true
@@ -111,16 +113,13 @@ cleanup() {
 
   if [[ "${KEEP}" == "true" ]]; then
     warn "Keeping test resources (--keep). Delete manually with:"
-    warn "  kubectl delete pod -n ${NAMESPACE} ${TRACES_POD} ${METRICS_POD} ${LOGS_POD}"
-    warn "  kubectl delete ciliumnetworkpolicy ${SMOKE_POLICY_NAME} -n ${NAMESPACE}"
+    warn "  kubectl delete pod -n ${NAMESPACE} ${TRACES_POD} ${METRICS_POD} ${LOGS_POD} --ignore-not-found"
+    warn "  kubectl delete ciliumnetworkpolicy ${SMOKE_POLICY_NAME} -n ${NAMESPACE} --ignore-not-found"
   else
-    # Delete test pods
     for pod in "${TRACES_POD}" "${METRICS_POD}" "${LOGS_POD}"; do
       kubectl delete pod -n "${NAMESPACE}" "${pod}" \
         --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
     done
-
-    # Delete temporary network policy
     kubectl delete ciliumnetworkpolicy "${SMOKE_POLICY_NAME}" \
       -n "${NAMESPACE}" --ignore-not-found=true >/dev/null 2>&1 || true
   fi
@@ -148,6 +147,61 @@ preflight() {
     || die "kubectl cannot reach a cluster"
   kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1 \
     || die "Namespace '${NAMESPACE}' does not exist"
+
+  # Verify the otel-gateway-ingress policy allows smoke-test pods.
+  # This is the #1 cause of smoke test failures — without this rule,
+  # telemetrygen pods are dropped at the gateway's ingress hook.
+  local ingress_yaml
+  ingress_yaml="$(kubectl get cnp otel-gateway-ingress -n "${NAMESPACE}" -o yaml 2>/dev/null || true)"
+  if [[ -z "${ingress_yaml}" ]]; then
+    warn "otel-gateway-ingress CNP not found. Smoke test may fail."
+  elif ! grep -q "observability-smoke-test" <<<"${ingress_yaml}"; then
+    fail "otel-gateway-ingress CNP is MISSING the smoke-test ingress rule."
+    fail "Add this rule to infra/k8s/cilium/templates/10-openobserve-internal.yaml:"
+    fail "    - fromEndpoints:"
+    fail "        - matchLabels:"
+    fail "            app.kubernetes.io/component: observability-smoke-test"
+    fail "      toPorts:"
+    fail "        - ports:"
+    fail "            - port: \"4317\""
+    fail "            - port: \"4318\""
+    fail "Then run: helm upgrade --install autosre-cilium infra/k8s/cilium/ --namespace kube-system"
+    die "Cannot proceed without smoke-test ingress rule"
+  fi
+  pass "otel-gateway-ingress CNP has smoke-test rule"
+
+  # Clean up stale resources from previous runs
+  local stale_policies
+  stale_policies="$(kubectl get ciliumnetworkpolicy -n "${NAMESPACE}" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | grep '^smoke-test-egress-' || true)"
+
+  if [[ -n "${stale_policies}" ]]; then
+    warn "Cleaning up stale smoke-test policies:"
+    while IFS= read -r policy; do
+      [[ -z "${policy}" ]] && continue
+      warn "  Deleting: ${policy}"
+      kubectl delete ciliumnetworkpolicy "${policy}" \
+        -n "${NAMESPACE}" --ignore-not-found=true >/dev/null 2>&1 || true
+    done <<<"${stale_policies}"
+    sleep 2
+  fi
+
+  local stale_pods
+  stale_pods="$(kubectl get pods -n "${NAMESPACE}" \
+    -l "app.kubernetes.io/component=observability-smoke-test" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+
+  if [[ -n "${stale_pods}" ]]; then
+    warn "Cleaning up stale smoke-test pods:"
+    while IFS= read -r pod; do
+      [[ -z "${pod}" ]] && continue
+      warn "  Deleting: ${pod}"
+      kubectl delete pod "${pod}" -n "${NAMESPACE}" \
+        --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
+    done <<<"${stale_pods}"
+    sleep 2
+  fi
 }
 
 # --- Test 1: Pod health ------------------------------------------------------
@@ -158,7 +212,6 @@ check_pods() {
   local failed=0
   for release in "${RELEASES[@]}"; do
     local pods
-    # Use jsonpath with explicit newlines to avoid word-splitting issues
     pods="$(kubectl get pods -n "${NAMESPACE}" \
       -l "app.kubernetes.io/instance=${release}" \
       -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
@@ -169,10 +222,8 @@ check_pods() {
       continue
     fi
 
-    # Use while-read loop to handle one pod per line
     while IFS= read -r pod; do
       [[ -z "${pod}" ]] && continue
-
       local ready
       ready="$(kubectl get pod "${pod}" -n "${NAMESPACE}" \
         -o jsonpath='{.status.containerStatuses[0].ready}')"
@@ -183,7 +234,7 @@ check_pods() {
         fail "${pod} is not Ready"
         failed=$((failed + 1))
       fi
-    done <<< "${pods}"
+    done <<<"${pods}"
   done
 
   [[ ${failed} -eq 0 ]] || die "${failed} pod(s) not ready"
@@ -196,7 +247,7 @@ create_smoke_policy() {
 
   local policy_manifest="${TMP_DIR}/smoke-policy.yaml"
 
-  cat > "${policy_manifest}" <<EOF
+  cat >"${policy_manifest}" <<EOF
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -221,20 +272,22 @@ spec:
             dns:
               - matchPattern: "*"
 
-    # Allow OTel gateway (gRPC)
+    # Allow OTel gateway (gRPC + HTTP) — same namespace
     - toEndpoints:
         - matchLabels:
-            app.kubernetes.io/instance: otel-gateway
+            app.kubernetes.io/name: otel-gateway
             k8s:io.kubernetes.pod.namespace: ${NAMESPACE}
       toPorts:
         - ports:
             - port: "${GATEWAY_GRPC_PORT}"
               protocol: TCP
+            - port: "${GATEWAY_HTTP_PORT}"
+              protocol: TCP
 
-    # Allow OpenObserve (HTTP) for direct queries
+    # Allow OpenObserve (HTTP) for direct queries — same namespace
     - toEndpoints:
         - matchLabels:
-            app.kubernetes.io/instance: openobserve
+            app.kubernetes.io/name: open-observe-minimal
             k8s:io.kubernetes.pod.namespace: ${NAMESPACE}
       toPorts:
         - ports:
@@ -249,10 +302,23 @@ EOF
   fi
 
   kubectl apply -f "${policy_manifest}" >/dev/null
-  pass "Created CiliumNetworkPolicy ${SMOKE_POLICY_NAME}"
+
+  log "Waiting for CiliumNetworkPolicy to be validated..."
+  if ! kubectl wait --for=condition=Valid \
+    ciliumnetworkpolicy/"${SMOKE_POLICY_NAME}" \
+    -n "${NAMESPACE}" --timeout=30s 2>/dev/null; then
+    fail "CiliumNetworkPolicy did not become Valid within 30s"
+    kubectl describe ciliumnetworkpolicy "${SMOKE_POLICY_NAME}" -n "${NAMESPACE}" >&2 || true
+    return 1
+  fi
+  pass "CiliumNetworkPolicy ${SMOKE_POLICY_NAME} is Valid"
+
+  log "Waiting ${POLICY_PROPAGATION_SECONDS}s for eBPF policy compilation..."
+  sleep "${POLICY_PROPAGATION_SECONDS}"
+  pass "Policy propagation wait complete"
 }
 
-# --- Test 3: Send synthetic telemetry ---------------------------------------
+# --- Test 3: Send synthetic telemetry ----------------------------------------
 
 render_pod() {
   local name="$1"
@@ -286,20 +352,61 @@ $(for arg in "${args[@]}"; do printf '        - %s\n' "${arg}"; done)
 EOF
 }
 
+wait_for_pod_identity() {
+  # Wait for Cilium to assign an identity to each smoke pod. Without an
+  # identity, the pod's egress traffic is dropped by default-deny even if
+  # an egress policy exists.
+  log "Waiting up to ${IDENTITY_WAIT_SECONDS}s for Cilium identities on smoke pods..."
+
+  local all_have_identity=true
+  for pod in "${TRACES_POD}" "${METRICS_POD}" "${LOGS_POD}"; do
+    local start
+    start="$(date +%s)"
+    local has_identity=false
+
+    while (( $(date +%s) - start < IDENTITY_WAIT_SECONDS )); do
+      # Check if pod exists and has a CiliumEndpoint with an identity
+      if kubectl get cep "${pod}" -n "${NAMESPACE}" \
+        -o jsonpath='{.status.identity.id}' 2>/dev/null | grep -qE '^[0-9]+$'; then
+        has_identity=true
+        break
+      fi
+      sleep 1
+    done
+
+    if [[ "${has_identity}" == "true" ]]; then
+      pass "Pod ${pod} has Cilium identity"
+    else
+      fail "Pod ${pod} did not get a Cilium identity within ${IDENTITY_WAIT_SECONDS}s"
+      all_have_identity=false
+    fi
+  done
+
+  if [[ "${all_have_identity}" != "true" ]]; then
+    warn "Some pods lack Cilium identities. Traffic may be dropped by default-deny."
+    warn "This usually means Cilium agents are slow to process new pods."
+    warn "Waiting an additional 10s to give Cilium more time..."
+    sleep 10
+  fi
+
+  # Extra settle time after identity assignment
+  sleep 3
+}
+
 apply_pods() {
   log "Test 3: Sending synthetic telemetry"
 
   local manifests="${TMP_DIR}/telemetrygen.yaml"
   {
-    render_pod "${TRACES_POD}"  "traces"  \
+    render_pod "${TRACES_POD}" "traces" \
       "--traces=5" "--child-spans=2" "--status-code=Ok"
     echo "---"
     render_pod "${METRICS_POD}" "metrics" \
       "--metrics=5" "--metric-type=Sum"
     echo "---"
-    render_pod "${LOGS_POD}"    "logs"    \
+    render_pod "${LOGS_POD}" "logs" \
       "--logs=5" "--severity-text=Info" "--body=Smoke test log entry"
-  } > "${manifests}"
+  } >"${manifests}"
 
   if [[ "${DRY_RUN}" == "true" ]]; then
     log "[dry-run] Would apply telemetrygen pods:"
@@ -309,11 +416,15 @@ apply_pods() {
 
   kubectl apply -f "${manifests}" >/dev/null
 
+  # Wait for Cilium identities BEFORE waiting for completion
+  wait_for_pod_identity
+
+  local failed=0
   for pod in "${TRACES_POD}" "${METRICS_POD}" "${LOGS_POD}"; do
     log "Waiting for ${pod} to complete"
     if kubectl wait \
-        --for=jsonpath='{.status.phase}'=Succeeded \
-        pod/"${pod}" -n "${NAMESPACE}" --timeout=120s 2>/dev/null; then
+      --for=jsonpath='{.status.phase}'=Succeeded \
+      pod/"${pod}" -n "${NAMESPACE}" --timeout=120s 2>/dev/null; then
       pass "${pod} completed"
     else
       local phase
@@ -321,19 +432,64 @@ apply_pods() {
         -o jsonpath='{.status.phase}' 2>/dev/null || echo Unknown)"
       fail "${pod} did not succeed (phase: ${phase})"
       echo
-      kubectl logs "${pod}" -n "${NAMESPACE}" 2>&1 | tail -20 || true
+      kubectl logs "${pod}" -n "${NAMESPACE}" 2>&1 | tail -30 || true
       echo
-      return 1
+      diagnose_drop "${pod}"
+      failed=$((failed + 1))
     fi
   done
+
+  [[ ${failed} -eq 0 ]] || die "${failed} telemetrygen pod(s) failed"
 }
 
-# --- Test 4: Verify gateway exported this test without error -----------------
+# --- Diagnostics -------------------------------------------------------------
+
+diagnose_drop() {
+  # Capture Cilium drop events during a failing pod's lifetime
+  local pod="$1"
+  warn "Running Cilium drop diagnostics for ${pod}..."
+
+  local pod_ip
+  pod_ip="$(kubectl get pod "${pod}" -n "${NAMESPACE}" \
+    -o jsonpath='{.status.podIP}' 2>/dev/null || true)"
+
+  if [[ -z "${pod_ip}" ]]; then
+    warn "  Could not get pod IP for ${pod}"
+    return 0
+  fi
+
+  local node
+  node="$(kubectl get pod "${pod}" -n "${NAMESPACE}" \
+    -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)"
+
+  if [[ -z "${node}" ]]; then
+    warn "  Could not get node for ${pod}"
+    return 0
+  fi
+
+  local cilium_pod
+  cilium_pod="$(kubectl get pods -n kube-system -l k8s-app=cilium \
+    --field-selector "spec.nodeName=${node}" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+
+  if [[ -z "${cilium_pod}" ]]; then
+    warn "  Could not find Cilium agent on node ${node}"
+    return 0
+  fi
+
+  warn "  Capturing drops involving ${pod_ip} from ${cilium_pod}..."
+  kubectl exec -n kube-system "${cilium_pod}" -c cilium-agent -- \
+    cilium-dbg monitor --last 1000 --type drop 2>/dev/null \
+    | grep "${pod_ip}" \
+    | head -20 \
+    | sed 's/^/    /' >&2 || true
+}
+
+# --- Test 4: Verify gateway exported this test without error ----------------
 
 verify_gateway() {
   log "Test 4: Verifying gateway export logs for this test run"
 
-  # Allow the gateway at least one export cycle after telemetrygen completes.
   sleep 15
 
   local pod
@@ -344,30 +500,28 @@ verify_gateway() {
   logs="$(kubectl logs "${pod}" -n "${NAMESPACE}" \
     --since-time="${TEST_START_TIME}" 2>&1)"
 
-  # Restrict the check to the OpenObserve exporter. This prevents unrelated
-  # exporters in the gateway from failing the smoke test.
   local export_failures nonretryable
-  export_failures="$(grep -E 'Exporting failed|Dropping data' <<< "${logs}" \
+  export_failures="$(grep -E 'Exporting failed|Dropping data' <<<"${logs}" \
     | grep 'otlp_http/openobserve' || true)"
-  nonretryable="$(grep -Ei 'refused|permanently failed' <<< "${logs}" \
+  nonretryable="$(grep -Ei 'refused|permanently failed' <<<"${logs}" \
     | grep 'otlp_http/openobserve' || true)"
 
   if [[ -n "${export_failures}" ]]; then
     fail "Gateway reported OpenObserve export failures during this test run:"
-    tail -10 <<< "${export_failures}" >&2
+    tail -10 <<<"${export_failures}" >&2
     return 1
   fi
   pass "No OpenObserve export failures during this test run"
 
   if [[ -n "${nonretryable}" ]]; then
     fail "Gateway reported non-retryable OpenObserve export errors during this test run:"
-    tail -10 <<< "${nonretryable}" >&2
+    tail -10 <<<"${nonretryable}" >&2
     return 1
   fi
   pass "No non-retryable OpenObserve export errors during this test run"
 }
 
-# --- Test 5: Verify OpenObserve accepted this test run ----------------------
+# --- Test 5: Verify OpenObserve accepted this test run ---------------------
 
 verify_openobserve() {
   log "Test 5: Verifying OpenObserve accepted telemetry from this test run"
@@ -383,7 +537,7 @@ verify_openobserve() {
   local failed=0
   for signal in traces metrics logs; do
     local count
-    count="$(grep -cE "POST /api/default/v1/${signal} HTTP/1.1\" 200" <<< "${logs}" || true)"
+    count="$(grep -cE "POST /api/default/v1/${signal} HTTP/1.1\" 200" <<<"${logs}" || true)"
     if [[ "${count}" -gt 0 ]]; then
       pass "OpenObserve accepted ${count} ${signal} POST(s) with HTTP 200 during this test run"
     else
@@ -395,20 +549,16 @@ verify_openobserve() {
   [[ ${failed} -eq 0 ]]
 }
 
-# Escape a value for a single-quoted SQL string.
+# --- SQL helpers -------------------------------------------------------------
+
 sql_escape() {
   printf '%s' "$1" | sed "s/'/''/g"
 }
 
-# Escape an SQL identifier for a double-quoted identifier.
 sql_identifier_escape() {
   printf '%s' "$1" | sed 's/"/""/g'
 }
 
-# Return candidate stream/field pairs that actually contain a smoke-test field.
-# We discover this from the live OpenObserve schema because OTLP attributes can
-# be normalized differently by signal/stream (for example,
-# service_smoke_test_id vs smoke_test_id).
 discover_smoke_targets() {
   local signal="$1"
   local streams_json="$2"
@@ -419,7 +569,7 @@ discover_smoke_targets() {
     | ([.schema[]?.name | select(test("(^|_)smoke_test_id$"; "i"))] | .[]) as $field
     | [$stream, $field]
     | @tsv
-  ' <<< "${streams_json}"
+  ' <<<"${streams_json}"
 }
 
 search_smoke_target() {
@@ -448,7 +598,7 @@ search_smoke_target() {
     -H "Content-Type: application/json" \
     -d "${body}")"
 
-  if jq -e '.hits? and (.hits | length > 0)' <<< "${response}" >/dev/null 2>&1; then
+  if jq -e '.hits? and (.hits | length > 0)' <<<"${response}" >/dev/null 2>&1; then
     printf '%s\n' "${response}"
     return 0
   fi
@@ -461,12 +611,10 @@ search_smoke_target() {
 verify_query() {
   log "Test 6: Verifying test-specific data through the OpenObserve search API"
 
-  # Start port-forward in background.
   kubectl port-forward -n "${NAMESPACE}" svc/openobserve "${O2_LOCAL_PORT}:5080" \
     >/dev/null 2>&1 &
   PORT_FORWARD_PID=$!
 
-  # Wait for port-forward readiness.
   local wait_start wait_elapsed
   wait_start="$(date +%s)"
   while true; do
@@ -485,7 +633,6 @@ verify_query() {
     sleep 1
   done
 
-  # Retrieve credentials.
   local email password
   email="$(kubectl get secret openobserve-auth -n "${NAMESPACE}" \
     -o jsonpath='{.data.ZO_ROOT_USER_EMAIL}' | base64 -d)"
@@ -496,10 +643,6 @@ verify_query() {
   local sql_tag
   sql_tag="$(sql_escape "${TEST_TAG}")"
 
-  # OpenObserve search requires microsecond time bounds. Keep the beginning of
-  # the query window slightly before the test started to tolerate small clock
-  # differences between telemetrygen and OpenObserve, and extend the end on
-  # each poll so delayed ingestion can become queryable.
   local query_start_us
   query_start_us=$(( TEST_START_US - 30000000 ))
   (( query_start_us < 0 )) && query_start_us=0
@@ -513,19 +656,16 @@ verify_query() {
     deadline=$(( $(date +%s) + QUERY_RETRY_SECONDS ))
 
     while (( $(date +%s) < deadline )); do
-      # Discover the live stream + schema on every retry. Streams such as the
-      # OTLP metric "gen" stream can be created asynchronously after the first
-      # ingestion request.
       if streams_json="$(curl -fsS \
-          -u "${email}:${password}" \
-          "http://localhost:${O2_LOCAL_PORT}/api/default/streams?type=${signal}&fetchSchema=true" 2>/dev/null)"; then
+        -u "${email}:${password}" \
+        "http://localhost:${O2_LOCAL_PORT}/api/default/streams?type=${signal}&fetchSchema=true" 2>/dev/null)"; then
         targets="$(discover_smoke_targets "${signal}" "${streams_json}" || true)"
       else
         targets=""
       fi
 
       target_count=0
-      [[ -n "${targets}" ]] && target_count="$(wc -l <<< "${targets}")"
+      [[ -n "${targets}" ]] && target_count="$(wc -l <<<"${targets}")"
 
       if (( target_count > 0 )); then
         end_us=$(( $(date -u +%s) * 1000000 + 60000000 ))
@@ -534,19 +674,19 @@ verify_query() {
           [[ -z "${target_stream}" || -z "${target_field}" ]] && continue
 
           if response="$(search_smoke_target \
-              "${signal}" \
-              "${target_stream}" \
-              "${target_field}" \
-              "${sql_tag}" \
-              "${query_start_us}" \
-              "${end_us}")"; then
+            "${signal}" \
+            "${target_stream}" \
+            "${target_field}" \
+            "${sql_tag}" \
+            "${query_start_us}" \
+            "${end_us}")"; then
             local hits
-            hits="$(jq '.hits | length' <<< "${response}")"
+            hits="$(jq '.hits | length' <<<"${response}")"
             pass "OpenObserve search found ${hits} ${signal} record(s) for ${TEST_TAG} in ${target_stream} using ${target_field}"
             found=1
             break
           fi
-        done <<< "${targets}"
+        done <<<"${targets}"
       fi
 
       (( found == 1 )) && break
@@ -559,13 +699,9 @@ verify_query() {
         fail "Discovered ${signal} target(s):"
         while IFS=$'\t' read -r target_stream target_field; do
           [[ -n "${target_stream}" ]] && printf '  stream=%s field=%s\n' "${target_stream}" "${target_field}" >&2
-        done <<< "${targets}"
+        done <<<"${targets}"
       else
         fail "No ${signal} stream currently exposes a smoke_test_id field"
-        if [[ -n "${streams_json:-}" ]]; then
-          echo "${streams_json}" |
-            jq '{list: [.list[]? | {name, stream_type, fields: [.schema[]?.name | select(test("smoke|test"; "i"))]}]}' >&2 || true
-        fi
       fi
       return 1
     fi
@@ -587,20 +723,22 @@ Options:
   --help, -h   Show this help.
 
 Environment (defaults shown):
-  NAMESPACE              openobserve
-  GATEWAY_SERVICE        otel-gateway
-  GATEWAY_GRPC_PORT      4317
-  OPENOBSERVE_SERVICE    openobserve
-  OPENOBSERVE_PORT       5080
-  O2_LOCAL_PORT          15080
-  TEST_SERVICE_NAME      smoke-test
-  TELEMETRYGEN_IMAGE     ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.157.0
-  QUERY_RETRY_SECONDS    60
-  QUERY_RETRY_INTERVAL   3
+  NAMESPACE                    openobserve
+  GATEWAY_SERVICE              otel-gateway
+  GATEWAY_GRPC_PORT            4317
+  GATEWAY_HTTP_PORT            4318
+  OPENOBSERVICE_SERVICE        openobserve
+  OPENOBSERVE_PORT             5080
+  O2_LOCAL_PORT                15080
+  TEST_SERVICE_NAME            smoke-test
+  TELEMETRYGEN_IMAGE           ghcr.io/.../telemetrygen:v0.157.0
+  QUERY_RETRY_SECONDS          60
+  QUERY_RETRY_INTERVAL         3
+  POLICY_PROPAGATION_SECONDS   15
+  IDENTITY_WAIT_SECONDS        30
 
-This test creates temporary pods and a CiliumNetworkPolicy to validate the
-full observability pipeline under zero-trust network policies. Assertions are
-scoped to the current smoke-test run and its unique smoke.test.id.
+Prerequisite: The otel-gateway-ingress CiliumNetworkPolicy must include a
+fromEndpoints rule matching app.kubernetes.io/component: observability-smoke-test.
 EOF
 }
 
@@ -608,9 +746,9 @@ main() {
   for arg in "$@"; do
     case "${arg}" in
       --dry-run) DRY_RUN="true" ;;
-      --keep)    KEEP="true" ;;
-      --help|-h) usage; exit 0 ;;
-      *)         die "Unknown argument: ${arg}" ;;
+      --keep) KEEP="true" ;;
+      --help | -h) usage; exit 0 ;;
+      *) die "Unknown argument: ${arg}" ;;
     esac
   done
 

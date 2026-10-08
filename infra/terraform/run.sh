@@ -13,6 +13,12 @@
 
 set -Eeuo pipefail
 
+export TF_VAR_o2_email=admin@autosre.local
+export TF_VAR_o2_password='StagingO2RootPass123!'
+export TF_VAR_o2_endpoint=http://localhost:5080
+export TF_VAR_o2_organization=default
+
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 TF_BIN="${TF_BIN:-tofu}"

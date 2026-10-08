@@ -54,6 +54,13 @@ spec:
 ---
 # =============================================================================
 # Ingress on otel-gateway — who may push telemetry
+#
+# Allowed sources:
+#   1. rivulet/* pods (telemetry emission) — HTTP/4318
+#   2. sre/autosre-agent (telemetry emission) — HTTP/4318
+#   3. openobserve/otel-daemonset (in-namespace forwarding) — gRPC/4317 + HTTP/4318
+#   4. host/remote-node (hostNetwork telemetry + kubelet probes)
+#   5. Smoke test pods (test-o2.sh telemetrygen) — gRPC/4317 + HTTP/4318
 # =============================================================================
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -90,6 +97,20 @@ spec:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
             app.kubernetes.io/name: otel-daemonset
+      toPorts:
+        - ports:
+            - port: "4317"
+              protocol: TCP
+            - port: "4318"
+              protocol: TCP
+    # Smoke test pods (test-o2.sh telemetrygen) — same namespace
+    # These pods are ephemeral, created per-test-run with label
+    # app.kubernetes.io/component: observability-smoke-test. They send
+    # synthetic traces/metrics/logs via gRPC on 4317 (and HTTP on 4318).
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+            app.kubernetes.io/component: observability-smoke-test
       toPorts:
         - ports:
             - port: "4317"
