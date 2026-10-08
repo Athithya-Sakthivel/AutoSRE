@@ -18,7 +18,6 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ghcr.io/${{ github.repository }}/autosre-agent
-  # HEAD SHA of the commit CI actually tested (workflow_run) or the dispatch commit
   TESTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
   CANDIDATE_TAG: ci-${{ github.event.workflow_run.head_sha || github.sha }}
 
@@ -30,9 +29,6 @@ env:
 jobs:
   release:
     name: Build → Deploy → Playwright → Eval → Push
-    # Run only if:
-    #   - Manually dispatched, OR
-    #   - Triggered by workflow_run AND CI succeeded
     if: >-
       ${{
         github.event_name == 'workflow_dispatch' ||
@@ -59,7 +55,7 @@ jobs:
           echo "Release tag:    latest"
 
       # -------------------------------------------------------------------
-      # Python setup (needed for lock-versions.sh + eval pytest)
+      # Python + Node setup
       # -------------------------------------------------------------------
       - name: Install uv
         uses: astral-sh/setup-uv@v6
@@ -74,9 +70,6 @@ jobs:
         working-directory: agents
         run: bash lock-versions.sh
 
-      # -------------------------------------------------------------------
-      # Node setup (needed for Playwright)
-      # -------------------------------------------------------------------
       - name: Install Node.js 24
         uses: actions/setup-node@v4
         with:
@@ -89,37 +82,36 @@ jobs:
         run: bash lock-versions.sh
 
       # -------------------------------------------------------------------
-      # Kubernetes tools via direct curl (no third-party actions)
-      # Matches .devcontainer/bootstrap.sh install patterns
+      # Kubernetes toolchain via official pinned actions
       # -------------------------------------------------------------------
       - name: Install kubectl
-        run: |
-          ARCH="$(dpkg --print-architecture)"
-          curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" \
-            -o /usr/local/bin/kubectl
-          chmod 0755 /usr/local/bin/kubectl
-          kubectl version --client
+        uses: azure/setup-kubectl@v4
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
 
       - name: Install kind
-        run: |
-          ARCH="$(dpkg --print-architecture)"
-          curl -fsSL "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${ARCH}" \
-            -o /usr/local/bin/kind
-          chmod 0755 /usr/local/bin/kind
-          kind version
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+          version: ${{ env.KIND_VERSION }}
 
       - name: Install Helm
-        run: |
-          ARCH="$(dpkg --print-architecture)"
-          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz" \
-            | tar -xz -C /tmp
-          install -m 0755 "/tmp/linux-${ARCH}/helm" /usr/local/bin/helm
-          helm version --short
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
 
       - name: Install jq and bc
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends jq bc
+
+      - name: Verify toolchain
+        run: |
+          kubectl version --client
+          kind version
+          helm version --short
+          jq --version
+          bc --version | head -1
 
       # -------------------------------------------------------------------
       # Step 1: Build Docker image (candidate)
@@ -135,7 +127,6 @@ jobs:
 
       # -------------------------------------------------------------------
       # Step 2: Deploy full SUT via existing e2e.sh
-      #   e2e.sh calls kind_cluster.sh which sets up Kind + Cilium
       # -------------------------------------------------------------------
       - name: Deploy SUT (Kind + Cilium + Rivulet + OpenObserve + OTel)
         env:
@@ -160,7 +151,7 @@ jobs:
         run: kubectl wait --for=condition=ready pod --all --all-namespaces --timeout=300s
 
       # -------------------------------------------------------------------
-      # Step 4: Playwright E2E (requires agent + UI dev server)
+      # Step 4: Playwright E2E
       # -------------------------------------------------------------------
       - name: Start port-forwards
         run: |
@@ -206,7 +197,7 @@ jobs:
           pytest eval/ -q --tb=short --no-header
 
       # -------------------------------------------------------------------
-      # Step 6: Push to GHCR (only after all gates pass)
+      # Step 6: Push to GHCR
       # -------------------------------------------------------------------
       - name: Login to GHCR
         run: |
@@ -220,7 +211,7 @@ jobs:
           docker tag "${CANDIDATE}" "${RELEASE}"
           docker push "${CANDIDATE}"
           docker push "${RELEASE}"
-          echo " Released: ${RELEASE}"
+          echo "✅ Released: ${RELEASE}"
           echo "   From tested SHA: ${TESTED_SHA}"
 
       # -------------------------------------------------------------------
