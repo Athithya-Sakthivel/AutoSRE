@@ -202,11 +202,27 @@ log "waiting for Deployment/postgres rollout"
 kubectl -n "$NS" rollout status deploy/postgres --timeout=180s
 
 # -----------------------------------------------------------------------------
-# 5. Smoke test
+# 5. Smoke test (with retry — postgres can briefly report ready then restart)
 # -----------------------------------------------------------------------------
 log "smoke test: SELECT 1 via unix socket (bare psql)"
-if ! kubectl -n "$NS" exec deploy/postgres -- psql -Atqc 'SELECT 1' >/dev/null; then
-  die "psql smoke test failed"
+
+smoke_ok=false
+for attempt in $(seq 1 10); do
+  output=$(kubectl -n "$NS" exec deploy/postgres -- psql -Atqc 'SELECT 1' 2>&1) || true
+  if [[ "$output" == "1" ]]; then
+    smoke_ok=true
+    break
+  fi
+  log "smoke test attempt ${attempt}/10 failed: ${output}"
+  sleep 3
+done
+
+if [[ "$smoke_ok" != "true" ]]; then
+  log "postgres pod events:"
+  kubectl -n "$NS" get events --sort-by='.lastTimestamp' | tail -20 || true
+  log "postgres pod logs:"
+  kubectl -n "$NS" logs deploy/postgres --tail=50 || true
+  die "psql smoke test failed after 10 attempts"
 fi
 
 log "postgres ready at postgres.${NS}.svc:5432"
