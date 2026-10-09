@@ -394,11 +394,9 @@ log "Backoff:        ${AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS}s..${AUTOSRE_LLM__MA
 if [[ "$MODE" != "run" ]]; then
     log "Judge model:    $AUTOSRE_EVAL__JUDGE_MODEL"
 fi
-if [[ "$SLACK_ENABLED" == "true" ]]; then
-    log "Slack:          enabled (mode=$AUTOSRE_SLACK__MODE)"
-else
-    log "Slack:          disabled"
-fi
+
+log "Slack:          removed"
+
 
 # =============================================================================
 # PHASE 2 — Infrastructure + port-forwards (NOT in --ci)
