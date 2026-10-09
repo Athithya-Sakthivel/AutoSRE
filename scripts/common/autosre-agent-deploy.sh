@@ -42,7 +42,8 @@ umask 0077
 NAMESPACE="${NAMESPACE:-sre}"
 APP_NAME="${APP_NAME:-autosre-agent}"
 IMAGE_REPO="${IMAGE_REPO:-ghcr.io/athithya-sakthivel/autosre-agent}"
-IMAGE_TAG="${IMAGE_TAG:-2026-10-08-12-33-37--4fdf232}"
+IMAGE_TAG="${IMAGE_TAG:?IMAGE_TAG environment variable is required}"
+# IMAGE_TAG="${IMAGE_TAG:-2026-10-08-12-33-37--4fdf232}"
 
 DEPLOYMENT_ENVIRONMENT="${DEPLOYMENT_ENVIRONMENT:-staging}"
 OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-autosre-agent}"
@@ -617,22 +618,6 @@ spec:
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_EVAL__JUDGE_MODEL, optional: true } }
             - name: AUTOSRE_EVAL__JUDGE_BASE_URL
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_EVAL__JUDGE_BASE_URL, optional: true } }
-
-            # ================================================================
-            # AUTOSRE_SLACK__* (6 keys, optional)
-            # ================================================================
-            - name: AUTOSRE_SLACK__BOT_TOKEN
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SLACK__BOT_TOKEN, optional: true } }
-            - name: AUTOSRE_SLACK__APP_TOKEN
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SLACK__APP_TOKEN, optional: true } }
-            - name: AUTOSRE_SLACK__SIGNING_SECRET
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SLACK__SIGNING_SECRET, optional: true } }
-            - name: AUTOSRE_SLACK__MODE
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SLACK__MODE, optional: true } }
-            - name: AUTOSRE_SLACK__APPROVAL_CHANNEL
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SLACK__APPROVAL_CHANNEL, optional: true } }
-            - name: AUTOSRE_SLACK__APPROVER_USER_IDS
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SLACK__APPROVER_USER_IDS, optional: true } }
 
             # ================================================================
             # OTel exporter headers (optional, from separate secret)

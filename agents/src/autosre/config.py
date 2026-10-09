@@ -12,7 +12,6 @@ Section prefixes:
     AUTOSRE_OPENOBSERVE__            OpenObserveConfig
     AUTOSRE_OTEL__                   OTelConfig
     AUTOSRE_SAFETY__                 SafetyConfig
-    AUTOSRE_SLACK__                  SlackConfig
     AUTOSRE_ADMIN__                  AdminConfig
     AUTOSRE_<top_level>              Settings
 
@@ -22,7 +21,6 @@ Secrets use SecretStr so they never appear in logs, tracebacks, or reprs.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
 from urllib.parse import quote_plus
 
 from pydantic import Field, SecretStr, model_validator
@@ -326,50 +324,6 @@ class SafetyConfig(BaseSettings):
 
 
 # ---------------------------------------------------------------------------
-# Slack
-# ---------------------------------------------------------------------------
-
-
-class SlackConfig(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_prefix="AUTOSRE_SLACK__",
-        env_nested_delimiter="__",
-        extra="ignore",
-        env_ignore_empty=True,
-    )
-
-    mode: Literal["socket", "http"] = Field(default="socket")
-    bot_token: SecretStr | None = Field(default=None)
-    app_token: SecretStr | None = Field(default=None)
-    signing_secret: SecretStr | None = Field(default=None)
-    approval_channel: str | None = Field(default=None)
-    approver_user_ids: set[str] = Field(default_factory=set)
-
-    @property
-    def is_enabled(self) -> bool:
-        if self.bot_token is None:
-            return False
-        if self.mode == "socket":
-            return self.app_token is not None
-        return self.signing_secret is not None
-
-    @model_validator(mode="after")
-    def _validate_mode_credentials(self) -> SlackConfig:
-        if self.bot_token is None:
-            return self
-        if self.mode == "socket" and self.app_token is None:
-            raise ValueError("Slack mode=socket requires bot_token and app_token")
-        if self.mode == "http" and self.signing_secret is None:
-            raise ValueError("Slack mode=http requires bot_token and signing_secret")
-        if not self.approver_user_ids:
-            raise ValueError(
-                "Slack is enabled but approver_user_ids is empty; "
-                "an unrestricted approval channel is unsafe"
-            )
-        return self
-
-
-# ---------------------------------------------------------------------------
 # Admin
 # ---------------------------------------------------------------------------
 
@@ -404,7 +358,6 @@ class Settings(BaseSettings):
     openobserve: OpenObserveConfig = Field(default_factory=OpenObserveConfig)
     otel: OTelConfig = Field(default_factory=OTelConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
-    slack: SlackConfig = Field(default_factory=SlackConfig)
     admin: AdminConfig = Field(default_factory=AdminConfig)
 
     deployment_environment: str = Field(default=_DEFAULT_DEPLOYMENT_ENVIRONMENT)
@@ -439,7 +392,6 @@ __all__ = [
     "PostgresConfig",
     "SafetyConfig",
     "Settings",
-    "SlackConfig",
     "get_settings",
     "reset_settings_cache",
 ]

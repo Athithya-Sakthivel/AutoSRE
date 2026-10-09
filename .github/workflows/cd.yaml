@@ -44,9 +44,12 @@ jobs:
 
       - name: Announce run
         run: |
-          echo "Trigger:       ${{ github.event_name }}"
-          echo "Tested SHA:    ${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "Trigger:    ${{ github.event_name }}"
+          echo "Tested SHA: ${{ github.event.workflow_run.head_sha || github.sha }}"
 
+      # =================================================================
+      # Toolchain
+      # =================================================================
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
@@ -106,6 +109,9 @@ jobs:
           tofu version
           jq --version
 
+      # =================================================================
+      # Image metadata + validation
+      # =================================================================
       - name: Compute image metadata
         id: image-meta
         shell: bash
@@ -127,6 +133,24 @@ jobs:
             echo "release_image=${RELEASE_IMAGE}"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Validate image metadata outputs
+        run: |
+          set -euo pipefail
+          echo "image_tag:         ${{ steps.image-meta.outputs.image_tag }}"
+          echo "candidate_image:   ${{ steps.image-meta.outputs.candidate_image }}"
+          echo "release_image:     ${{ steps.image-meta.outputs.release_image }}"
+          echo "tested_sha:        ${{ steps.image-meta.outputs.tested_sha }}"
+          [[ -n "${{ steps.image-meta.outputs.image_tag }}" ]] \
+            || { echo "ERROR: image_tag is empty"; exit 1; }
+          [[ -n "${{ steps.image-meta.outputs.candidate_image }}" ]] \
+            || { echo "ERROR: candidate_image is empty"; exit 1; }
+          [[ -n "${{ steps.image-meta.outputs.tested_sha }}" ]] \
+            || { echo "ERROR: tested_sha is empty"; exit 1; }
+          echo "All image metadata outputs validated."
+
+      # =================================================================
+      # Docker build and scan
+      # =================================================================
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -146,6 +170,23 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ steps.image-meta.outputs.tested_sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Verify Slack module removed from image
+        run: |
+          set -euo pipefail
+          docker run --rm "${{ steps.image-meta.outputs.candidate_image }}" python -c "
+          import sys
+          try:
+              import autosre.slack
+              print('FAIL: autosre.slack still present')
+              sys.exit(1)
+          except ImportError:
+              print('OK: autosre.slack removed')
+          from autosre.config import get_settings
+          s = get_settings()
+          assert not hasattr(s, 'slack'), 'FAIL: Settings still has slack'
+          print('OK: Settings has no slack attribute')
+          "
 
       - name: Compute Trivy cache key
         id: trivy-key
@@ -186,6 +227,9 @@ jobs:
             "${ignore_args[@]}" \
             "${scan_image}"
 
+      # =================================================================
+      # Deploy SUT and Agent
+      # =================================================================
       - name: Deploy SUT
         env:
           AUTOSRE_LLM__API_KEY: ${{ secrets.AUTOSRE_LLM__API_KEY }}
@@ -197,39 +241,61 @@ jobs:
             "${{ steps.image-meta.outputs.candidate_image }}" \
             --name kind
 
-      - name: Deploy AutoSRE agent with candidate image
+      - name: Deploy AutoSRE agent
         env:
-          # CRITICAL: Pass IMAGE_TAG (not IMAGE) - the deploy script uses IMAGE_REPO:IMAGE_TAG
           IMAGE_TAG: ${{ steps.image-meta.outputs.image_tag }}
-          AUTOSRE_SLACK__BOT_TOKEN: ""
-          AUTOSRE_SLACK__APP_TOKEN: ""
-          AUTOSRE_SLACK__SIGNING_SECRET: ""
-          AUTOSRE_SLACK__APPROVAL_CHANNEL: ""
-          AUTOSRE_SLACK__APPROVER_USER_IDS: ""
-        run: bash scripts/common/autosre-agent-deploy.sh deploy
+        run: |
+          set -euo pipefail
+          echo "IMAGE_TAG passed to deploy script: '${IMAGE_TAG}'"
+          [[ -n "${IMAGE_TAG}" ]] \
+            || { echo "FATAL: IMAGE_TAG is empty before calling deploy script"; exit 1; }
+          bash scripts/common/autosre-agent-deploy.sh deploy
+
+      - name: Verify deployed image matches candidate
+        run: |
+          set -euo pipefail
+          DEPLOYED="$(kubectl get deploy autosre-agent -n sre \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          EXPECTED="${{ steps.image-meta.outputs.candidate_image }}"
+          echo "Deployed: ${DEPLOYED}"
+          echo "Expected: ${EXPECTED}"
+          [[ "${DEPLOYED}" == "${EXPECTED}" ]] \
+            || { echo "ERROR: deployed image does not match candidate"; exit 1; }
+          echo "Deployed image verified."
 
       - name: Wait for all pods ready
         run: kubectl wait --for=condition=ready pod --all --all-namespaces --timeout=300s
 
+      # =================================================================
+      # Playwright E2E
+      # =================================================================
       - name: Start port-forwards
         run: |
-          nohup kubectl port-forward -n sre svc/autosre-agent 8000:8000 >/tmp/pf-agent.log 2>&1 &
-          nohup kubectl port-forward -n openobserve svc/openobserve 5080:5080 >/tmp/pf-o2.log 2>&1 &
+          nohup kubectl port-forward -n sre svc/autosre-agent 8000:8000 \
+            >/tmp/pf-agent.log 2>&1 &
+          nohup kubectl port-forward -n openobserve svc/openobserve 5080:5080 \
+            >/tmp/pf-o2.log 2>&1 &
           sleep 5
-          curl -sf http://127.0.0.1:8000/healthz || { cat /tmp/pf-agent.log; exit 1; }
+          curl -sf http://127.0.0.1:8000/healthz \
+            || { cat /tmp/pf-agent.log; exit 1; }
 
       - name: Start UI dev server
         working-directory: agents/ui
         run: |
-          nohup npx vite --host 127.0.0.1 --port 5173 --strictPort >/tmp/ui.log 2>&1 &
+          nohup npx vite --host 127.0.0.1 --port 5173 --strictPort \
+            >/tmp/ui.log 2>&1 &
           echo $! > /tmp/ui.pid
           sleep 8
-          curl -sf http://127.0.0.1:5173/ || { cat /tmp/ui.log; exit 1; }
+          curl -sf http://127.0.0.1:5173/ \
+            || { cat /tmp/ui.log; exit 1; }
 
       - name: Run Playwright E2E
         working-directory: agents/ui
         run: bash test_e2e.sh --playwright
 
+      # =================================================================
+      # E2E smoke test (1 incident)
+      # =================================================================
       - name: Run E2E smoke test
         working-directory: agents
         env:
@@ -250,6 +316,9 @@ jobs:
           source .venv/bin/activate
           python eval/print_metrics.py
 
+      # =================================================================
+      # Push to GHCR
+      # =================================================================
       - name: Stop UI and port-forwards
         if: always()
         run: |
@@ -268,9 +337,9 @@ jobs:
           set -euo pipefail
           docker push "${{ steps.image-meta.outputs.candidate_image }}"
           docker push "${{ steps.image-meta.outputs.release_image }}"
-          echo "Released: ${{ steps.image-meta.outputs.release_image }}"
+          echo "Released:  ${{ steps.image-meta.outputs.release_image }}"
           echo "Candidate: ${{ steps.image-meta.outputs.candidate_image }}"
-          echo "From tested SHA: ${{ steps.image-meta.outputs.tested_sha }}"
+          echo "Tested SHA: ${{ steps.image-meta.outputs.tested_sha }}"
 
       - name: Upload artifacts on failure
         if: failure()

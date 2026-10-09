@@ -51,23 +51,6 @@
 #   free-tier rate limits (RPM/TPM/RPD). All backoff sleep time is
 #   recorded in RunMetrics so MTTR reporting excludes provider waits.
 #
-# Slack (optional)
-# ----------------
-#   When AUTOSRE_SLACK__BOT_TOKEN is set, the agent starts the Slack
-#   client, handler, listener, and (in socket mode) the Socket Mode
-#   connection. Otherwise Slack is disabled.
-#
-#   Socket mode (default):
-#     export AUTOSRE_SLACK__BOT_TOKEN="xoxb-..."
-#     export AUTOSRE_SLACK__APP_TOKEN="xapp-..."
-#     export AUTOSRE_SLACK__APPROVAL_CHANNEL="C0123456789"
-#     export AUTOSRE_SLACK__APPROVER_USER_IDS='["U0123456789"]'
-#
-#   HTTP mode:
-#     export AUTOSRE_SLACK__MODE=http
-#     export AUTOSRE_SLACK__BOT_TOKEN="xoxb-..."
-#     export AUTOSRE_SLACK__SIGNING_SECRET="..."
-#
 #   The harness exports Slack vars ONLY when AUTOSRE_SLACK__BOT_TOKEN is
 #   non-empty. Empty-string exports would trigger Settings() validation
 #   and fail startup.
@@ -218,26 +201,6 @@ export AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT="${AUTOSRE_SAFETY__MIN_CONFIDE
 
 export AUTOSRE_EVAL__JUDGE_MODEL="${AUTOSRE_EVAL__JUDGE_MODEL:-gemini/gemini-3.5-flash-lite}"
 export AUTOSRE_EVAL__JUDGE_API_KEY="${AUTOSRE_EVAL__JUDGE_API_KEY:-$AUTOSRE_LLM__API_KEY}"
-
-
-# -----------------------------------------------------------------------------
-# Slack configuration (optional, opt-in by bot token presence)
-# -----------------------------------------------------------------------------
-
-SLACK_ENABLED=false
-if [[ -n "${AUTOSRE_SLACK__BOT_TOKEN:-}" ]]; then
-    SLACK_ENABLED=true
-    export AUTOSRE_SLACK__MODE="${AUTOSRE_SLACK__MODE:-socket}"
-    export AUTOSRE_SLACK__BOT_TOKEN
-    export AUTOSRE_SLACK__APPROVAL_CHANNEL="${AUTOSRE_SLACK__APPROVAL_CHANNEL:-}"
-    export AUTOSRE_SLACK__APPROVER_USER_IDS="${AUTOSRE_SLACK__APPROVER_USER_IDS:-[]}"
-
-    if [[ "$AUTOSRE_SLACK__MODE" == "socket" ]]; then
-        export AUTOSRE_SLACK__APP_TOKEN="${AUTOSRE_SLACK__APP_TOKEN:-}"
-    else
-        export AUTOSRE_SLACK__SIGNING_SECRET="${AUTOSRE_SLACK__SIGNING_SECRET:-}"
-    fi
-fi
 
 # Strong defaults for --test-locally. Only consumed by the eval suite.
 : "${EVAL_FORCE_RERUN:=1}"
