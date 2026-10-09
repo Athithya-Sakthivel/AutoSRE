@@ -47,6 +47,9 @@ jobs:
           echo "Trigger:       ${{ github.event_name }}"
           echo "Tested SHA:    ${{ github.event.workflow_run.head_sha || github.sha }}"
 
+      # =====================================================================
+      # Toolchain setup
+      # =====================================================================
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
@@ -106,6 +109,9 @@ jobs:
           tofu version
           jq --version
 
+      # =====================================================================
+      # Docker build and scan
+      # =====================================================================
       - name: Compute image metadata
         id: image-meta
         shell: bash
@@ -139,11 +145,10 @@ jobs:
           load: true
           push: false
           pull: true
+          no-cache: true
           tags: |
             ${{ steps.image-meta.outputs.candidate_image }}
             ${{ steps.image-meta.outputs.release_image }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           labels: |
             org.opencontainers.image.revision=${{ steps.image-meta.outputs.tested_sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -187,6 +192,9 @@ jobs:
             "${ignore_args[@]}" \
             "${scan_image}"
 
+      # =====================================================================
+      # Deploy SUT and Agent
+      # =====================================================================
       - name: Deploy SUT
         env:
           AUTOSRE_LLM__API_KEY: ${{ secrets.AUTOSRE_LLM__API_KEY }}
@@ -200,7 +208,10 @@ jobs:
 
       - name: Deploy AutoSRE agent with candidate image
         env:
-          IMAGE_TAG: ${{ steps.image-meta.outputs.image_tag }}
+          # CRITICAL: Pass the FULL image URL (not just tag). The deploy script
+          # computes its own tag if IMAGE is not set, leading to stale images.
+          IMAGE: ${{ steps.image-meta.outputs.candidate_image }}
+          # Disable Slack in CI - empty strings become None via env_ignore_empty=True
           AUTOSRE_SLACK__BOT_TOKEN: ""
           AUTOSRE_SLACK__APP_TOKEN: ""
           AUTOSRE_SLACK__SIGNING_SECRET: ""
@@ -211,6 +222,9 @@ jobs:
       - name: Wait for all pods ready
         run: kubectl wait --for=condition=ready pod --all --all-namespaces --timeout=300s
 
+      # =====================================================================
+      # Playwright E2E
+      # =====================================================================
       - name: Start port-forwards
         run: |
           nohup kubectl port-forward -n sre svc/autosre-agent 8000:8000 >/tmp/pf-agent.log 2>&1 &
@@ -230,6 +244,9 @@ jobs:
         working-directory: agents/ui
         run: bash test_e2e.sh --playwright
 
+      # =====================================================================
+      # E2E smoke test: 1 incident to prove agent works
+      # =====================================================================
       - name: Run E2E smoke test
         working-directory: agents
         env:
@@ -250,6 +267,9 @@ jobs:
           source .venv/bin/activate
           python eval/print_metrics.py
 
+      # =====================================================================
+      # Push to GHCR
+      # =====================================================================
       - name: Stop UI and port-forwards
         if: always()
         run: |
