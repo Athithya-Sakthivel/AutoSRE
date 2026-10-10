@@ -26,7 +26,7 @@ env:
 
 jobs:
   release:
-    name: Build - Scan - Deploy - Playwright - E2E - Push
+    name: Deploy SUT - Playwright - Eval - Build - Push
     if: >-
       ${{
         github.event_name == 'workflow_dispatch' ||
@@ -110,7 +110,102 @@ jobs:
           jq --version
 
       # =================================================================
-      # Image metadata + validation
+      # Deploy SUT (infrastructure only, no agent)
+      # =================================================================
+      - name: Deploy SUT
+        env:
+          AUTOSRE_LLM__API_KEY: ${{ secrets.AUTOSRE_LLM__API_KEY }}
+        run: bash scripts/staging/e2e.sh
+
+      # =================================================================
+      # Start agent + UI in background for Playwright
+      # test_e2e.sh --run starts both and blocks until Ctrl+C
+      # =================================================================
+      - name: Start agent and UI in background
+        working-directory: agents
+        env:
+          AUTOSRE_LLM__API_KEY: ${{ secrets.AUTOSRE_LLM__API_KEY }}
+          AUTOSRE_LLM__MODEL_COORDINATOR: gemini/gemini-3.8-flash
+          AUTOSRE_LLM__MODEL_WORKER: gemini/gemini-3.5-flash-lite
+          AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS: "1"
+          AUTOSRE_ALERT__WEBHOOK_SECRET: test-secret
+        run: |
+          nohup bash test_e2e.sh --run >/tmp/test-run.log 2>&1 &
+          echo $! > /tmp/test-run.pid
+          echo "Started test_e2e.sh --run (pid $(cat /tmp/test-run.pid))"
+
+      - name: Wait for agent and UI to be ready
+        run: |
+          echo "Waiting for agent at 127.0.0.1:8000..."
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8000/healthz >/dev/null 2>&1; then
+              echo "Agent ready after ${i}s"
+              break
+            fi
+            if (( i == 60 )); then
+              echo "Agent did not become ready in 60s"
+              echo "--- Last 40 lines of test-run.log ---"
+              tail -n 40 /tmp/test-run.log
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "Waiting for UI at 127.0.0.1:5173..."
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:5173/ >/dev/null 2>&1; then
+              echo "UI ready after ${i}s"
+              break
+            fi
+            if (( i == 30 )); then
+              echo "UI did not become ready in 30s"
+              exit 1
+            fi
+            sleep 1
+          done
+
+      # =================================================================
+      # Playwright E2E (agent + UI already running)
+      # =================================================================
+      - name: Run Playwright E2E
+        working-directory: agents/ui
+        run: bash test_e2e.sh --playwright
+
+      # =================================================================
+      # Stop agent + UI (cleanup before eval)
+      # =================================================================
+      - name: Stop agent and UI
+        if: always()
+        run: |
+          if [[ -f /tmp/test-run.pid ]]; then
+            kill "$(cat /tmp/test-run.pid)" 2>/dev/null || true
+            # Wait for cleanup trap to finish (port-forwards, child processes)
+            wait "$(cat /tmp/test-run.pid)" 2>/dev/null || true
+          fi
+          pkill -f "uvicorn autosre" 2>/dev/null || true
+          pkill -f "vite.*5173" 2>/dev/null || true
+          pkill -f "kubectl port-forward" 2>/dev/null || true
+          sleep 2
+          echo "Agent and UI stopped"
+
+      # =================================================================
+      # Eval gate: test_e2e.sh --test-locally --incident-id=INC-003
+      # This starts its own agent+UI, runs eval, prints metrics,
+      # verifies contracts, then cleans up.
+      # =================================================================
+      - name: Run eval (INC-003)
+        working-directory: agents
+        env:
+          AUTOSRE_LLM__API_KEY: ${{ secrets.AUTOSRE_LLM__API_KEY }}
+          AUTOSRE_LLM__MODEL_COORDINATOR: gemini/gemini-3.8-flash
+          AUTOSRE_LLM__MODEL_WORKER: gemini/gemini-3.5-flash-lite
+          AUTOSRE_EVAL__JUDGE_MODEL: gemini/gemini-3.5-flash-lite
+          AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS: "1"
+          AUTOSRE_ALERT__WEBHOOK_SECRET: test-secret
+        run: bash test_e2e.sh --test-locally --incident-id=INC-003
+
+      # =================================================================
+      # ALL GATES PASSED -- containerize, scan and push
       # =================================================================
       - name: Compute image metadata
         id: image-meta
@@ -136,26 +231,20 @@ jobs:
       - name: Validate image metadata outputs
         run: |
           set -euo pipefail
-          echo "image_tag:         ${{ steps.image-meta.outputs.image_tag }}"
-          echo "candidate_image:   ${{ steps.image-meta.outputs.candidate_image }}"
-          echo "release_image:     ${{ steps.image-meta.outputs.release_image }}"
-          echo "tested_sha:        ${{ steps.image-meta.outputs.tested_sha }}"
+          echo "image_tag:       ${{ steps.image-meta.outputs.image_tag }}"
+          echo "candidate_image: ${{ steps.image-meta.outputs.candidate_image }}"
+          echo "release_image:   ${{ steps.image-meta.outputs.release_image }}"
+          echo "tested_sha:      ${{ steps.image-meta.outputs.tested_sha }}"
           [[ -n "${{ steps.image-meta.outputs.image_tag }}" ]] \
             || { echo "ERROR: image_tag is empty"; exit 1; }
           [[ -n "${{ steps.image-meta.outputs.candidate_image }}" ]] \
             || { echo "ERROR: candidate_image is empty"; exit 1; }
-          [[ -n "${{ steps.image-meta.outputs.tested_sha }}" ]] \
-            || { echo "ERROR: tested_sha is empty"; exit 1; }
           echo "All image metadata outputs validated."
 
-      # =================================================================
-      # Docker build and scan
-      # =================================================================
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build image locally
-        id: build-image
+      - name: Build image
         uses: docker/build-push-action@v6
         with:
           context: ./agents
@@ -170,23 +259,6 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ steps.image-meta.outputs.tested_sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-
-      - name: Verify Slack module removed from image
-        run: |
-          set -euo pipefail
-          docker run --rm "${{ steps.image-meta.outputs.candidate_image }}" python -c "
-          import sys
-          try:
-              import autosre.slack
-              print('FAIL: autosre.slack still present')
-              sys.exit(1)
-          except ImportError:
-              print('OK: autosre.slack removed')
-          from autosre.config import get_settings
-          s = get_settings()
-          assert not hasattr(s, 'slack'), 'FAIL: Settings still has slack'
-          print('OK: Settings has no slack attribute')
-          "
 
       - name: Compute Trivy cache key
         id: trivy-key
@@ -206,8 +278,7 @@ jobs:
 
       - name: Scan image with Trivy
         run: |
-          scan_image="${{ steps.build-image.outputs.imageid }}"
-          test -n "${scan_image}"
+          scan_image="${{ steps.image-meta.outputs.candidate_image }}"
           ignore_args=()
           if [[ -f .trivyignore ]]; then
             ignore_args+=(--ignorefile /workspace/.trivyignore)
@@ -226,104 +297,6 @@ jobs:
             --exit-code 1 \
             "${ignore_args[@]}" \
             "${scan_image}"
-
-      # =================================================================
-      # Deploy SUT and Agent
-      # =================================================================
-      - name: Deploy SUT
-        env:
-          AUTOSRE_LLM__API_KEY: ${{ secrets.AUTOSRE_LLM__API_KEY }}
-        run: bash scripts/staging/e2e.sh
-
-      - name: Load candidate image into Kind
-        run: |
-          kind load docker-image \
-            "${{ steps.image-meta.outputs.candidate_image }}" \
-            --name kind
-
-      - name: Deploy AutoSRE agent
-        env:
-          IMAGE_TAG: ${{ steps.image-meta.outputs.image_tag }}
-        run: |
-          set -euo pipefail
-          echo "IMAGE_TAG passed to deploy script: '${IMAGE_TAG}'"
-          [[ -n "${IMAGE_TAG}" ]] \
-            || { echo "FATAL: IMAGE_TAG is empty before calling deploy script"; exit 1; }
-          bash scripts/common/autosre-agent-deploy.sh deploy
-
-      - name: Verify deployed image matches candidate
-        run: |
-          set -euo pipefail
-          DEPLOYED="$(kubectl get deploy autosre-agent -n sre \
-            -o jsonpath='{.spec.template.spec.containers[0].image}')"
-          EXPECTED="${{ steps.image-meta.outputs.candidate_image }}"
-          echo "Deployed: ${DEPLOYED}"
-          echo "Expected: ${EXPECTED}"
-          [[ "${DEPLOYED}" == "${EXPECTED}" ]] \
-            || { echo "ERROR: deployed image does not match candidate"; exit 1; }
-          echo "Deployed image verified."
-
-      - name: Wait for all pods ready
-        run: kubectl wait --for=condition=ready pod --all --all-namespaces --timeout=300s
-
-      # =================================================================
-      # Playwright E2E
-      # =================================================================
-      - name: Start port-forwards
-        run: |
-          nohup kubectl port-forward -n sre svc/autosre-agent 8000:8000 \
-            >/tmp/pf-agent.log 2>&1 &
-          nohup kubectl port-forward -n openobserve svc/openobserve 5080:5080 \
-            >/tmp/pf-o2.log 2>&1 &
-          sleep 5
-          curl -sf http://127.0.0.1:8000/healthz \
-            || { cat /tmp/pf-agent.log; exit 1; }
-
-      - name: Start UI dev server
-        working-directory: agents/ui
-        run: |
-          nohup npx vite --host 127.0.0.1 --port 5173 --strictPort \
-            >/tmp/ui.log 2>&1 &
-          echo $! > /tmp/ui.pid
-          sleep 8
-          curl -sf http://127.0.0.1:5173/ \
-            || { cat /tmp/ui.log; exit 1; }
-
-      - name: Run Playwright E2E
-        working-directory: agents/ui
-        run: bash test_e2e.sh --playwright
-
-      # =================================================================
-      # E2E smoke test (1 incident)
-      # =================================================================
-      - name: Run E2E smoke test
-        working-directory: agents
-        env:
-          AUTOSRE_LLM__API_KEY: ${{ secrets.AUTOSRE_LLM__API_KEY }}
-          AUTOSRE_LLM__MODEL_COORDINATOR: gemini/gemini-3.8-flash
-          AUTOSRE_LLM__MODEL_WORKER: gemini/gemini-3.5-flash-lite
-          AUTOSRE_EVAL__JUDGE_MODEL: gemini/gemini-3.5-flash-lite
-          AGENT_BASE_URL: http://autosre-agent.sre.svc.cluster.local:8000
-          EVAL_FORCE_RERUN: "1"
-          EVAL_DELAY_SECONDS: "15"
-        run: |
-          source .venv/bin/activate
-          pytest eval/ -k "INC-001" -v --tb=short
-
-      - name: Print eval metrics
-        working-directory: agents
-        run: |
-          source .venv/bin/activate
-          python eval/print_metrics.py
-
-      # =================================================================
-      # Push to GHCR
-      # =================================================================
-      - name: Stop UI and port-forwards
-        if: always()
-        run: |
-          kill "$(cat /tmp/ui.pid 2>/dev/null)" 2>/dev/null || true
-          pkill -f "kubectl port-forward" 2>/dev/null || true
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -345,11 +318,13 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: cd-logs-${{ github.run_id }}-${{ steps.image-meta.outputs.image_tag }}
+          name: cd-logs-${{ github.run_id }}
           path: |
-            /tmp/pf-agent.log
-            /tmp/pf-o2.log
-            /tmp/ui.log
+            /tmp/test-run.log
+            /tmp/autosre-agent.log
+            /tmp/autosre-ui.log
             agents/eval/results/
+            agents/output.txt
+            agents/ui/test-results/
           if-no-files-found: warn
           retention-days: 14

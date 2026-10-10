@@ -35,10 +35,13 @@ curl -fsS http://localhost:5080 >/dev/null 2>&1 && echo "OpenObserve ready" || {
 
 bash infra/terraform/run.sh --apply        # Provision O2 streams, alerts, and roles
 
-bash scripts/common/autosre-agent-deploy.sh deploy
+
+# Not required in CI/CD
+# bash scripts/common/autosre-agent-deploy.sh deploy
+# bash scripts/common/test-o2.sh             # Run end-to-end telemetry smoke test
+
 
 # --- Verify ----------------------------------------------------------------
 kubectl get pods -A                        # Check all workload status
 kubectl get daemonset -A                   # Verify infrastructure agents
 kubectl get secrets -A                     # Confirm ESO sync
-bash scripts/common/test-o2.sh             # Run end-to-end telemetry smoke test

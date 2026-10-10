@@ -20,7 +20,6 @@ from autosre.config import (
     PostgresConfig,
     SafetyConfig,
     Settings,
-    SlackConfig,
     reset_settings_cache,
 )
 
@@ -330,74 +329,6 @@ class TestSafetyConfig:
 
 
 # ---------------------------------------------------------------------------
-# SlackConfig
-# ---------------------------------------------------------------------------
-
-_TEST_APPROVERS = {"U0123456789"}
-
-
-class TestSlackConfig:
-    def test_defaults_disabled(self) -> None:
-        config = SlackConfig()
-        assert config.bot_token is None
-        assert config.app_token is None
-        assert config.signing_secret is None
-        assert config.approver_user_ids == set()
-        assert config.is_enabled is False
-
-    def test_socket_mode_enabled_with_both_tokens(self) -> None:
-        config = SlackConfig(
-            mode="socket",
-            bot_token="xoxb-test",
-            app_token="xapp-test",
-            approval_channel="C0123456789",
-            approver_user_ids=_TEST_APPROVERS,
-        )
-        assert config.is_enabled is True
-        assert config.mode == "socket"
-        assert config.approver_user_ids == _TEST_APPROVERS
-
-    def test_http_mode_enabled_with_token_and_secret(self) -> None:
-        config = SlackConfig(
-            mode="http",
-            bot_token="xoxb-test",
-            signing_secret="sig-test",
-            approval_channel="C0123456789",
-            approver_user_ids=_TEST_APPROVERS,
-        )
-        assert config.is_enabled is True
-        assert config.mode == "http"
-
-    def test_socket_mode_rejects_missing_app_token(self) -> None:
-        with pytest.raises(ValidationError, match="mode=socket"):
-            SlackConfig(
-                mode="socket",
-                bot_token="xoxb-test",
-                approver_user_ids=_TEST_APPROVERS,
-            )
-
-    def test_http_mode_rejects_missing_signing_secret(self) -> None:
-        with pytest.raises(ValidationError, match="mode=http"):
-            SlackConfig(
-                mode="http",
-                bot_token="xoxb-test",
-                approver_user_ids=_TEST_APPROVERS,
-            )
-
-    def test_enabled_without_approvers_is_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="approver_user_ids"):
-            SlackConfig(
-                mode="socket",
-                bot_token="xoxb-test",
-                app_token="xapp-test",
-            )
-
-    def test_empty_config_is_valid_and_disabled(self) -> None:
-        config = SlackConfig()
-        assert config.is_enabled is False
-
-
-# ---------------------------------------------------------------------------
 # AdminConfig
 # ---------------------------------------------------------------------------
 
@@ -506,12 +437,6 @@ class TestSettings:
         assert settings.safety.max_risk_tier_autonomous == 1
         assert settings.safety.max_actions_per_incident == 10
         assert settings.safety.max_wall_clock_seconds == 600
-
-    def test_slack_disabled_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._set_minimum_env(monkeypatch)
-        settings = Settings()
-        assert settings.slack.is_enabled is False
-        assert settings.slack.mode == "socket"
 
     def test_admin_secret_none_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_minimum_env(monkeypatch)

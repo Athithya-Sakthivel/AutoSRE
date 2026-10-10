@@ -839,7 +839,7 @@ def approval_value_to_bool(value: Any) -> bool:
 
     Accepts:
         * bool — returned as-is
-        * {"approved": True | "yes" | ...} — canonical Slack/UI payload
+        * {"approved": True | "yes" | ...} — canonical approval payload
         * {"decisions": [{"type": "approve"}]} — alternate shape
         * "yes" / "approve" / "approved" / "true" — string form
 

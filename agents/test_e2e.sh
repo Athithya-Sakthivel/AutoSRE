@@ -8,7 +8,7 @@
 #   --run           (default) Interactive. Starts agent + UI, streams logs,
 #                   prints URIs, blocks until Ctrl+C. Requires Kind.
 #
-#   --test-locally  Full local harness. Static checks, unit and integration
+#   --test-locally  (CD) Full local harness. Static checks, unit and integration
 #                   tests, then agent + UI, eval suite, metrics, and
 #                   contract verification. Requires Kind. Non-interactive.
 #

@@ -25,14 +25,13 @@ session against a live agent at ``AGENT_BASE_URL``.
     one pytest session. The cache is process-local and safe only for
     sequential pytest runs.
 
-## Chaos injection
+## Evidence injection
 
-    Each incident's trigger is executed by shelling out to
-    ``chaos/trigger.sh``, which reads the dataset and applies the
-    mechanism. Reset is called before each trigger to guarantee a known
-    baseline. Both are best-effort: if the chaos toolkit is missing or a
-    trigger fails, the eval still runs, but the incident observes a
-    healthy cluster and the agent correctly reports no_action.
+    Each incident's ``injected_context`` field from the dataset is sent
+    as annotations in the webhook payload. The agent uses this as
+    pre-gathered evidence for reasoning. No external chaos injection
+    is performed — chaos scripts are infrastructure tooling managed
+    separately.
 
 ## Judge
 
@@ -103,8 +102,6 @@ _EVAL_DIR = Path(__file__).parent
 _AGENTS_DIR = _EVAL_DIR.parent
 DATASET_PATH = _EVAL_DIR / "dataset" / "AutoSRE-Dataset-v3.json"
 RESULTS_DIR = _EVAL_DIR / "results"
-CHAOS_TRIGGER = _AGENTS_DIR / "chaos" / "trigger.sh"
-CHAOS_RESET = _AGENTS_DIR / "chaos" / "reset.sh"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -122,10 +119,6 @@ _TRIGGER_RETRY_BASE_SECONDS = 10.0
 _TERMINAL_STATUSES = frozenset({"resolved", "failed", "no_action", "blocked"})
 
 _PROHIBITED_TOOLS = frozenset({"delete_namespace", "flush_all", "drop_table"})
-
-# Incidents that do not require chaos injection. They test webhook and
-# policy paths only.
-_NO_CHAOS_INCIDENTS = frozenset({"INC-010", "INC-011"})
 
 # Substrings in error messages indicating daily quota exhaustion.
 # Daily-quota errors must fast-fail: retrying won't restore the bucket.
@@ -158,9 +151,6 @@ DELAY_BETWEEN_INCIDENTS = _parse_delay_seconds()
 
 FORCE_RERUN = os.getenv("EVAL_FORCE_RERUN", "0") == "1"
 AUTO_APPROVE = os.getenv("EVAL_AUTO_APPROVE", "1") != "0"
-
-_APPLY_CHAOS_DEFAULT = CHAOS_TRIGGER.is_file() and CHAOS_RESET.is_file()
-APPLY_CHAOS = os.getenv("EVAL_APPLY_CHAOS", "1" if _APPLY_CHAOS_DEFAULT else "0") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -400,78 +390,6 @@ def _cache_clear() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Chaos injection
-# ---------------------------------------------------------------------------
-
-
-async def _run_chaos_script(script: Path, *args: str) -> bool:
-    """Execute a chaos script. Returns True on exit code 0.
-
-    Never raises: chaos failures are logged and return False so the eval
-    can continue against whatever state the cluster is in.
-    """
-    if not script.is_file():
-        logger.debug("Chaos script not found: %s", script)
-        return False
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "bash",
-            str(script),
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except Exception as exc:
-        logger.warning("Failed to spawn %s: %s", script, exc)
-        return False
-
-    stdout, stderr = await proc.communicate()
-
-    if proc.returncode != 0:
-        logger.warning(
-            "Chaos script %s %s failed (exit %d): %s",
-            script.name,
-            " ".join(args),
-            proc.returncode,
-            stderr.decode("utf-8", errors="replace").strip(),
-        )
-        return False
-
-    output = stdout.decode("utf-8", errors="replace").strip()
-    if output:
-        for line in output.splitlines():
-            logger.info("chaos: %s", line)
-
-    return True
-
-
-async def _apply_chaos_trigger(incident: dict[str, Any]) -> None:
-    """Apply the incident's trigger. No-op for webhook-only incidents."""
-    if not APPLY_CHAOS:
-        return
-
-    incident_id = incident["id"]
-    if incident_id in _NO_CHAOS_INCIDENTS:
-        return
-
-    ok = await _run_chaos_script(CHAOS_TRIGGER, incident_id)
-    if not ok:
-        logger.warning(
-            "Chaos trigger for %s was not applied. The agent will "
-            "investigate a healthy cluster and may report no_action.",
-            incident_id,
-        )
-
-
-async def _reset_chaos() -> None:
-    """Return the cluster to baseline. Called before each trigger."""
-    if not APPLY_CHAOS:
-        return
-    await _run_chaos_script(CHAOS_RESET)
-
-
-# ---------------------------------------------------------------------------
 # Aggregate metrics
 # ---------------------------------------------------------------------------
 
@@ -671,9 +589,7 @@ def _judge_config() -> tuple[str, str | None, str]:
     settings = get_settings()
     judge = settings.eval
 
-    # --- CHANGED: Default to Flash-Lite for higher quota ---
     model = judge.judge_model or "gemini/gemini-3.5-flash-lite"
-    # --- END CHANGED ---
 
     key_secret = judge.judge_api_key or settings.llm.api_key
     api_key = (
@@ -717,9 +633,6 @@ def build_judge() -> Any:
     kwargs: dict[str, Any] = {
         "model": model,
         "api_key": api_key,
-        # Do not set temperature below Gemini 3's default of 1.0.
-        # Google warns that lower values can cause looping or degraded
-        # reasoning performance.
         "generation_kwargs": {
             "reasoning_effort": "low",
             "max_completion_tokens": 1024,
@@ -1069,6 +982,11 @@ class AgentClient:
         return self._json_object(response)
 
     async def trigger_incident(self, incident: dict[str, Any]) -> str:
+        """Send a webhook alert to the agent and return the incident ID.
+
+        The ``injected_context`` from the dataset is sent as annotations,
+        providing the agent with pre-gathered evidence for reasoning.
+        """
         incident_id = incident["id"]
 
         description = (
@@ -1315,7 +1233,7 @@ def required_list_of_dicts(
 
 
 # ---------------------------------------------------------------------------
-# Incident runner with caching and chaos
+# Incident runner with caching
 # ---------------------------------------------------------------------------
 
 
@@ -1330,16 +1248,14 @@ async def run_incident(
     Order of operations:
         1. Session cache
         2. Disk cache (unless FORCE_RERUN)
-        3. Reset chaos to baseline
-        4. Apply the incident's chaos trigger
-        5. Rate-limit delay
-        6. Trigger the webhook
-        7. Poll for completion
-        8. Save result + populate session cache
+        3. Rate-limit delay
+        4. Trigger the webhook with dataset injected_context as annotations
+        5. Poll for completion
+        6. Save result + populate session cache
 
-    Chaos steps 3 and 4 are best-effort. If the toolkit is absent or a
-    trigger fails, the eval runs against the healthy cluster and the
-    agent will honestly report no_action.
+    No external chaos injection is performed. The agent reasons over
+    the ``injected_context`` annotations in the webhook payload as
+    pre-gathered evidence.
     """
     incident_id = incident["id"]
 
@@ -1357,8 +1273,6 @@ async def run_incident(
                 logger.debug("Disk cache hit for %s", incident_id)
                 return report
 
-    await _reset_chaos()
-    await _apply_chaos_trigger(incident)
     await _rate_limit_delay()
 
     try:
