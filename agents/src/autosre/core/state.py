@@ -151,6 +151,7 @@ class AgentState(TypedDict, total=False):
     requires_human_approval: bool
     approval_granted: bool | None
     approval_comment: str | None
+    approval_requested_at: float | None  # Timestamp when approval was first requested
 
     # Token and cost tracking (split for accuracy)
     tokens_used: int
@@ -166,6 +167,7 @@ class AgentState(TypedDict, total=False):
     wall_clock_seconds: float
     backoff_seconds: float
     active_seconds: float
+    approval_wait_seconds: float  # Time spent waiting for human approval
     started_at: float
     status: str
 
@@ -215,9 +217,15 @@ class RunMetrics:
         attempt. The router checks llm_call_count against
         graph_context.max_llm_calls_per_incident and raises
         LLMBudgetExhaustedError when the budget is exceeded.
+
+    Approval wait tracking:
+        record_approval_wait(seconds) is called by approve_node after
+        resume. complete_node subtracts approval_wait_seconds from
+        active_seconds so HITL wait time doesn't inflate MTTR.
     """
 
     backoff_seconds: float = 0.0
+    approval_wait_seconds: float = 0.0
     llm_call_count: int = 0
     llm_retry_count: int = 0
     llm_consecutive_failures: int = 0
@@ -226,6 +234,11 @@ class RunMetrics:
         """Accumulate rate-limit or retry sleep time."""
         if seconds > 0:
             self.backoff_seconds += seconds
+
+    def record_approval_wait(self, seconds: float) -> None:
+        """Accumulate time spent waiting for human approval."""
+        if seconds > 0:
+            self.approval_wait_seconds += seconds
 
     def record_llm_call(self) -> None:
         """Count every LLM dispatch attempt (success or failure)."""
@@ -242,6 +255,7 @@ class RunMetrics:
     def reset(self) -> None:
         """Return the object to its initial state."""
         self.backoff_seconds = 0.0
+        self.approval_wait_seconds = 0.0
         self.llm_call_count = 0
         self.llm_retry_count = 0
         self.llm_consecutive_failures = 0
@@ -284,6 +298,7 @@ def create_initial_state(
         requires_human_approval=False,
         approval_granted=None,
         approval_comment=None,
+        approval_requested_at=None,
         tokens_used=0,
         prompt_tokens=0,
         completion_tokens=0,
@@ -293,6 +308,7 @@ def create_initial_state(
         wall_clock_seconds=0.0,
         backoff_seconds=0.0,
         active_seconds=0.0,
+        approval_wait_seconds=0.0,
         started_at=time.time(),
         status="running",
     )

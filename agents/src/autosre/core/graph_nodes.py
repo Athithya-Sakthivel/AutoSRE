@@ -32,6 +32,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
+from langgraph.types import interrupt
 
 from autosre.config import LLMConfig
 from autosre.core.graph_helpers import (
@@ -86,9 +87,10 @@ _JSON_FORMAT = {"type": "json_object"}
 # name from incident metadata, so these templates use placeholder values
 # that get overridden at runtime.
 # ---------------------------------------------------------------------------
-
 FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
-    # --- K8s pod-level issues (restart is safe, Tier 1) ---
+    # =====================================================================
+    # K8s pod-level issues (restart is safe, Tier 1)
+    # =====================================================================
     "pod_crash_loop": {
         "tool_name": "restart_deployment",
         "tool_args": {"reason": "CrashLoopBackOff detected; rolling restart to clear stuck state"},
@@ -96,7 +98,7 @@ FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
     },
     "memory_pressure": {
         "tool_name": "restart_deployment",
-        "tool_args": {"reason": "OOMKilled or memory pressure detected; restart to reclaim memory"},
+        "tool_args": {"reason": "Memory pressure detected; restart to reclaim memory"},
         "risk_tier": 1,
     },
     "high_cpu": {
@@ -104,7 +106,16 @@ FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
         "tool_args": {"reason": "Sustained high CPU; restart to clear potential runaway process"},
         "risk_tier": 1,
     },
-    # --- K8s scaling issues (Tier 2, requires HITL) ---
+    "pod_oom": {
+        "tool_name": "restart_deployment",
+        "tool_args": {
+            "reason": "Container OOMKilled; restart to recover and flag for limit review"
+        },
+        "risk_tier": 1,
+    },
+    # =====================================================================
+    # K8s scaling issues (Tier 2, requires HITL)
+    # =====================================================================
     "cpu_saturation": {
         "tool_name": "scale_deployment",
         "tool_args": {
@@ -113,7 +124,25 @@ FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
         },
         "risk_tier": 2,
     },
-    # --- PostgreSQL issues ---
+    # =====================================================================
+    # K8s pod lifecycle issues
+    # =====================================================================
+    "stale_pod": {
+        "tool_name": "restart_deployment",
+        "tool_args": {"reason": "Pod stuck in Terminating; rolling restart replaces stuck pod"},
+        "risk_tier": 1,
+    },
+    # =====================================================================
+    # HTTP/upstream issues
+    # =====================================================================
+    "http_errors": {
+        "tool_name": "restart_deployment",
+        "tool_args": {"reason": "Upstream timeout cascade; restart to clear stuck connections"},
+        "risk_tier": 1,
+    },
+    # =====================================================================
+    # PostgreSQL issues
+    # =====================================================================
     "db_connection_exhaustion": {
         "tool_name": "restart_deployment",
         "tool_args": {"reason": "Connection pool exhaustion; restart to release stuck connections"},
@@ -134,11 +163,13 @@ FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
         "tool_args": {"reason": "Stale idle-in-transaction connections; restart to reclaim pool"},
         "risk_tier": 1,
     },
-    # --- Valkey/Redis issues ---
-    "cache_poison": {
+    # =====================================================================
+    # Valkey/Redis issues
+    # =====================================================================
+    "cache_poison_key": {
         "tool_name": "delete_valkey_key",
         "tool_args": {
-            "key": "poisoned:main",
+            "key": "poison:session:abc123",
             "reason": "Cache poisoning detected; delete corrupted key",
         },
         "risk_tier": 1,
@@ -161,8 +192,15 @@ FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
         "tool_args": {"reason": "Stream consumer backlog; restart to reinitialize consumer group"},
         "risk_tier": 1,
     },
+    # =====================================================================
+    # Composite/multi-signal issues
+    # =====================================================================
+    "cascading_failure": {
+        "tool_name": "restart_deployment",
+        "tool_args": {"reason": "Cascading failure; restart primary service to break the chain"},
+        "risk_tier": 1,
+    },
 }
-
 # Maximum number of tools to execute per investigation iteration.
 # Increased from 3 to 5 to gather sufficient evidence when LLM is unavailable.
 _MAX_TOOLS_PER_ITERATION = 5
@@ -230,23 +268,47 @@ def _coerce_tool_name(value: Any) -> str | None:
     return stripped if stripped else None
 
 
+# Set of tool names that accept a "namespace" parameter.
+# Postgres, Valkey, and OpenObserve tools do NOT accept namespace.
+_TOOLS_WITH_NAMESPACE = frozenset(
+    {
+        "list_pods",
+        "get_pod_events",
+        "get_pod_logs",
+        "get_deployment_status",
+        "get_pod_metrics",
+        "restart_deployment",
+        "scale_deployment",
+        "delete_pod",
+    }
+)
+
+
 def _clamp_namespace(
     tool_args: dict[str, Any],
     incident_ns: str | None,
+    tool_name: str = "",
 ) -> dict[str, Any]:
-    """ALWAYS enforce the incident namespace on tool args.
+    """Enforce the incident namespace on tool args for K8s tools only.
 
     This is a security boundary: the agent must never query or modify a
-    namespace outside the incident scope, even if the LLM hallucinates a
-    different namespace. If the tool doesn't take a namespace, this is a no-op.
+    namespace outside the incident scope. For non-K8s tools (postgres,
+    valkey, observability), namespace is not injected because those tools
+    use extra="forbid" and would reject unknown fields.
+
+    Args:
+        tool_args: The tool arguments to clamp.
+        incident_ns: The incident's namespace from metadata.
+        tool_name: The tool being called (used to decide whether to inject).
     """
     if incident_ns is None:
         return tool_args
 
-    if "namespace" not in tool_args:
+    # Only inject/override namespace for tools that accept it
+    if tool_name not in _TOOLS_WITH_NAMESPACE:
         return tool_args
 
-    # ALWAYS override with incident namespace — no exceptions
+    # Always set namespace for K8s tools — both override and injection
     return {**tool_args, "namespace": incident_ns}
 
 
@@ -254,26 +316,38 @@ def _build_fallback_args(
     fallback: dict[str, Any],
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build fallback tool_args with dynamic service name from metadata.
-
-    The fallback templates in FALLBACK_ACTIONS use placeholder values.
-    This function fills in the actual deployment/resource name from
-    the incident's ``service`` field.
-    """
+    """Build fallback tool_args with dynamic service name and namespace."""
     base_args = fallback.get("tool_args", {})
     if not isinstance(base_args, Mapping):
         return {}
 
     args = dict(base_args)
     service = str(metadata.get("service", "")).strip()
-
+    namespace = str(metadata.get("namespace", "")).strip()
     tool_name = str(fallback.get("tool_name", ""))
 
-    # K8s tools use "name" for the deployment/pod name
-    if tool_name in ("restart_deployment", "scale_deployment", "delete_pod") and service:
+    # 1. K8s deployment tools need the "name" field
+    if tool_name in ("restart_deployment", "scale_deployment") and service:
         args["name"] = service
 
-    # Ensure reason is always present (required by tool input models)
+    # 2. ALL K8s tools require the "namespace" field. This was the missing piece.
+    if (
+        tool_name
+        in (
+            "restart_deployment",
+            "scale_deployment",
+            "delete_pod",
+            "list_pods",
+            "get_pod_events",
+            "get_pod_logs",
+            "get_deployment_status",
+            "get_pod_metrics",
+        )
+        and namespace
+    ):
+        args["namespace"] = namespace
+
+    # 3. Ensure reason is always present (required by tool input models)
     if "reason" not in args or not args["reason"]:
         args["reason"] = f"Auto-remediation for {tool_name}"
 
@@ -733,8 +807,7 @@ Return:
         tool_args = call.get("args", {})
         if not isinstance(tool_args, dict):
             tool_args = {}
-
-        tool_args = _clamp_namespace(tool_args, incident_ns)
+        tool_args = _clamp_namespace(tool_args, incident_ns, tool_name=tool_name_str)
 
         if sre_context is None:
             executed_tool_results.append(
@@ -804,7 +877,6 @@ async def hypothesize_node(
 
     stagnation_limit = graph_context.stagnation_limit
     confidence_fast_path = graph_context.confidence_fast_path
-    confidence_propose = graph_context.confidence_propose
     min_confidence_improvement = graph_context.min_confidence_improvement
 
     hypotheses = _coerce_dict_list(state.get("hypotheses"))
@@ -836,28 +908,17 @@ async def hypothesize_node(
             "last_top_confidence": current_confidence,
         }
 
-    # Budget exhausted. Propose if actionable, else no_action.
+    # Budget exhausted. ALWAYS route to propose_node so FALLBACK_ACTIONS
+    # can fire. The propose_node handles the low-confidence case by checking
+    # the FALLBACK_ACTIONS dictionary for category-based remediation.
     if iteration_budget <= 0:
-        if current_confidence >= confidence_propose:
-            logger.info(
-                "Budget exhausted at confidence %.2f >= %.2f; proceeding to propose",
-                current_confidence,
-                confidence_propose,
-            )
-            return {
-                "current_phase": PHASE_PROPOSE,
-                "last_top_confidence": current_confidence,
-            }
-
         logger.info(
-            "Budget exhausted at confidence %.2f < %.2f; completing with no_action",
+            "Budget exhausted at confidence %.2f; routing to propose for fallback evaluation",
             current_confidence,
-            confidence_propose,
         )
         return {
-            "current_phase": PHASE_COMPLETE,
+            "current_phase": PHASE_PROPOSE,
             "last_top_confidence": current_confidence,
-            "status": "no_action",
         }
 
     prompt = f"""You are an SRE agent refining hypothesis confidence based on evidence.
@@ -927,33 +988,18 @@ Current hypotheses:
                 **usage_update,
             }
 
-        # Post-refinement stagnation check
+        # Post-refinement stagnation check — ALWAYS route to propose
+        # so FALLBACK_ACTIONS can fire when confidence is low.
         if new_stagnation >= stagnation_limit:
-            if new_confidence >= confidence_propose:
-                logger.info(
-                    "Stagnation limit reached but confidence %.2f >= %.2f; proceeding to propose",
-                    new_confidence,
-                    confidence_propose,
-                )
-                return {
-                    "hypotheses": refined,
-                    "current_phase": PHASE_PROPOSE,
-                    "last_top_confidence": new_confidence,
-                    "stagnation_count": new_stagnation,
-                    **usage_update,
-                }
-
             logger.info(
-                "Stagnation limit reached at confidence %.2f < %.2f; completing with no_action",
+                "Stagnation limit reached at confidence %.2f; routing to propose for fallback",
                 new_confidence,
-                confidence_propose,
             )
             return {
                 "hypotheses": refined,
-                "current_phase": PHASE_COMPLETE,
+                "current_phase": PHASE_PROPOSE,
                 "last_top_confidence": new_confidence,
                 "stagnation_count": new_stagnation,
-                "status": "no_action",
                 **usage_update,
             }
 
@@ -993,8 +1039,6 @@ Current hypotheses:
 # ---------------------------------------------------------------------------
 # Node: propose
 # ---------------------------------------------------------------------------
-
-
 async def propose_node(
     state: AgentState,
     config: RunnableConfig,
@@ -1102,11 +1146,22 @@ Risk tiers:
 Top hypothesis:
 {json.dumps(best, indent=2)}
 
+Decision framework for choosing actions:
+- CPU saturation (high CPU across multiple pods, high RPS): PREFER scale_deployment (Tier 2) over restart. Restarting doesn't add capacity; scaling does.
+- Memory pressure (OOMKilled, high memory): restart_deployment (Tier 1) is appropriate to reclaim memory.
+- Pod crash loops: restart_deployment (Tier 1) to clear stuck state.
+- Database connection exhaustion: restart_deployment (Tier 1) to release connections.
+- Cache issues: delete_valkey_key (Tier 1) to clear problematic keys.
+- Network/timeout cascades: restart_deployment (Tier 1) to clear stuck connections.
+
+Key insight: If the root cause is INSUFFICIENT CAPACITY (not a stuck process or resource leak), you MUST choose scale_deployment even though it requires approval.
+
 Rules:
 - Output valid JSON only. No prose, no markdown fences.
 - Do NOT propose a tool that was already executed this incident.
 - Do NOT propose Tier 0 (read-only) tools as remediation.
-- Prefer the most targeted action.
+- For CPU saturation with high RPS or traffic: ALWAYS use scale_deployment (Tier 2).
+- For stuck processes or resource leaks: use restart_deployment (Tier 1).
 - If no remediation tool applies, return tool_name="none".
 
 {error_feedback}
@@ -1115,7 +1170,7 @@ Return a JSON object:
 {{
   "tool_name": "...",
   "tool_args": {{...}},
-  "risk_tier": 1,
+  "risk_tier": 1 or 2,
   "rationale": "..."
 }}
 
@@ -1214,14 +1269,38 @@ Executed actions (DO NOT REPEAT THESE):
                 **usage_update,
             }
 
-    # Validate the proposed action
+    # If the LLM returned "none", check FALLBACK_ACTIONS before giving up.
+    # This handles the case where the LLM doesn't see enough evidence but
+    # the incident category has a known remediation.
     if tool_name_str is None or tool_name_str == "none":
-        logger.info("Agent proposed no action; completing with no_action")
-        return {
-            "current_phase": PHASE_COMPLETE,
-            "status": "no_action",
-            **usage_update,
-        }
+        labels = metadata.get("labels", {})
+        category = labels.get("category", "") if isinstance(labels, dict) else ""
+
+        if category in FALLBACK_ACTIONS:
+            fallback = FALLBACK_ACTIONS[category]
+            tool_name_str = str(fallback.get("tool_name", ""))
+            tool_args = _build_fallback_args(fallback, metadata)
+            risk_tier = int(fallback.get("risk_tier", 1))
+
+            best_description = str(best.get("description", ""))[:100] if best is not None else ""
+            rationale = (
+                f"Fallback action for category '{category}' "
+                f"(LLM returned no action). Top hypothesis: {best_description}"
+            )
+
+            logger.info(
+                "LLM returned none; using fallback for category '%s': %s (Tier %d)",
+                category,
+                tool_name_str,
+                risk_tier,
+            )
+        else:
+            logger.info("Agent proposed no action and no fallback for category '%s'", category)
+            return {
+                "current_phase": PHASE_COMPLETE,
+                "status": "no_action",
+                **usage_update,
+            }
 
     if is_action_already_executed(tool_name_str, tool_args, executed_actions):
         logger.warning(
@@ -1248,7 +1327,7 @@ Executed actions (DO NOT REPEAT THESE):
         }
 
     # Enforce namespace security boundary
-    tool_args = _clamp_namespace(tool_args, incident_ns)
+    tool_args = _clamp_namespace(tool_args, incident_ns, tool_name=tool_name_str)
 
     proposed = _build_proposed_action(
         tool_name=tool_name_str,
@@ -1269,29 +1348,128 @@ Executed actions (DO NOT REPEAT THESE):
 # ---------------------------------------------------------------------------
 # Node: approve
 # ---------------------------------------------------------------------------
-
-
 async def approve_node(
     state: AgentState,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """Wait for human approval on Tier-2+ actions."""
+    """Wait for human approval on Tier-2+ actions using LangGraph interrupts.
+
+    Uses a two-pass approach to measure approval wait time:
+    1. First pass: Record approval_requested_at timestamp, re-enter this node.
+    2. Second pass: Call interrupt(), which pauses the graph.
+    3. After resume: interrupt() returns the decision, calculate wait time.
+
+    This allows accurate measurement of how long the graph was paused
+    waiting for human approval, which is excluded from active_seconds.
+    """
     requires_approval = bool(state.get("requires_human_approval", False))
     approval_granted = state.get("approval_granted")
 
+    # If no approval needed, proceed to execute
     if not requires_approval:
         return {"current_phase": PHASE_EXECUTE}
 
-    if approval_granted is None:
-        logger.info("Awaiting human approval for Tier-2+ action")
-        return {}
+    # If already decided (from previous resume), route based on decision
+    if approval_granted is not None:
+        if approval_granted:
+            logger.info("Approval already granted; proceeding to execute")
+            return {"current_phase": PHASE_EXECUTE}
+        else:
+            logger.info("Approval already denied; completing with no_action")
+            return {
+                "current_phase": PHASE_COMPLETE,
+                "status": "no_action",
+            }
 
-    if approval_granted:
-        logger.info("Approval granted; proceeding to execute")
-        return {"current_phase": PHASE_EXECUTE}
-    else:
-        logger.info("Approval denied; completing with no_action")
+    # --- Two-pass approach for wait time measurement ---
+
+    approval_requested_at = state.get("approval_requested_at")
+
+    # First pass: record the timestamp and re-enter this node.
+    if approval_requested_at is None:
+        logger.info("Recording approval_requested_at timestamp")
         return {
+            "approval_requested_at": time.time(),
+            "current_phase": PHASE_APPROVE,
+        }
+
+    # Second pass (or after resume): timestamp is set, call interrupt()
+    proposed_actions = _coerce_dict_list(state.get("proposed_actions"))
+    if not proposed_actions:
+        logger.warning("No proposed actions to approve")
+        return {
+            "current_phase": PHASE_COMPLETE,
+            "status": "no_action",
+        }
+
+    proposed = proposed_actions[0]
+
+    interrupt_payload = {
+        "question": "This action requires human approval before execution.",
+        "incident_id": state.get("incident_id", ""),
+        "alert_name": state.get("alert_name", ""),
+        "proposed_action": {
+            "tool_name": proposed.get("tool_name"),
+            "tool_args": proposed.get("tool_args", {}),
+            "risk_tier": proposed.get("risk_tier"),
+            "rationale": proposed.get("rationale", ""),
+        },
+    }
+
+    logger.info(
+        "Pausing for HITL approval: incident=%s tool=%s tier=%d",
+        state.get("incident_id"),
+        proposed.get("tool_name"),
+        proposed.get("risk_tier", 0),
+    )
+
+    # Call interrupt() — pauses graph on second pass, returns resume value on third pass
+    decision = interrupt(interrupt_payload)
+
+    # --- After resume: calculate wait time ---
+    wait_time = time.time() - float(approval_requested_at)
+    run_metrics = _get_run_metrics(config)
+    if run_metrics is not None:
+        run_metrics.record_approval_wait(wait_time)
+
+    logger.info(
+        "HITL wait time: %.1fs (approval_requested_at=%.0f, now=%.0f)",
+        wait_time,
+        approval_requested_at,
+        time.time(),
+    )
+
+    # Parse the decision from the resume value
+    if isinstance(decision, dict):
+        approved = bool(decision.get("approved", False))
+        comment = str(decision.get("comment", ""))
+    else:
+        approved = bool(decision)
+        comment = ""
+
+    logger.info(
+        "HITL decision received: approved=%s comment=%r",
+        approved,
+        comment,
+    )
+
+    if approved:
+        updated_proposals = []
+        for action in proposed_actions:
+            updated = dict(action)
+            updated["requires_approval"] = False
+            updated_proposals.append(updated)
+
+        return {
+            "approval_granted": True,
+            "proposed_actions": updated_proposals,
+            "approval_wait_seconds": round(wait_time, 3),
+            "current_phase": PHASE_EXECUTE,
+        }
+    else:
+        return {
+            "approval_granted": False,
+            "approval_wait_seconds": round(wait_time, 3),
             "current_phase": PHASE_COMPLETE,
             "status": "no_action",
         }
@@ -1367,7 +1545,6 @@ async def execute_node(
             return {
                 "executed_actions": new_executed,
                 "action_attempts": new_attempts,
-                "proposed_actions": [],
                 "current_phase": PHASE_VERIFY,
             }
         else:
@@ -1378,7 +1555,6 @@ async def execute_node(
             return {
                 "executed_actions": new_executed,
                 "action_attempts": new_attempts,
-                "proposed_actions": [],
                 "current_phase": PHASE_PROPOSE,
             }
 
@@ -1464,27 +1640,40 @@ def complete_node(
 ) -> dict[str, Any]:
     """Compute final metrics and set terminal status.
 
-    If the incident is awaiting human approval (requires_human_approval=True
-    and approval_granted is None), the status must remain 'running' so the
-    dashboard correctly shows it as awaiting approval.
+    Status derivation logic:
+    1. If awaiting approval → status remains "running"
+    2. If any executed action succeeded → status = "resolved"
+    3. If actions were attempted but none succeeded → status = "failed"
+    4. If no actions were attempted → status = "no_action"
+
+    Timing:
+    active_seconds = wall_clock - backoff - approval_wait
+    This ensures HITL wait time doesn't inflate MTTR metrics.
     """
     started_at = float(state.get("started_at", 0.0) or 0.0)
     wall_clock = time.time() - started_at if started_at > 0 else 0.0
 
     run_metrics = _get_run_metrics(config)
     backoff = run_metrics.backoff_seconds if run_metrics is not None else 0.0
-    active = max(0.0, wall_clock - backoff)
+    approval_wait = run_metrics.approval_wait_seconds if run_metrics is not None else 0.0
+    active = max(0.0, wall_clock - backoff - approval_wait)
 
-    current_status = str(state.get("status", "running"))
+    executed_actions = _coerce_dict_list(state.get("executed_actions"))
     requires_approval = bool(state.get("requires_human_approval", False))
     approval_granted = state.get("approval_granted")
 
-    # If awaiting approval, preserve running status so dashboard shows it
+    # Derive status from executed actions, not from current_status field
     if requires_approval and approval_granted is None:
+        # Still waiting for human approval
         final_status = "running"
-    elif current_status in ("resolved", "failed", "no_action", "blocked"):
-        final_status = current_status
+    elif any(action.get("success") for action in executed_actions):
+        # At least one action succeeded → incident resolved
+        final_status = "resolved"
+    elif executed_actions:
+        # Actions were attempted but none succeeded
+        final_status = "failed"
     else:
+        # No actions attempted or executed
         final_status = "no_action"
 
     return {
@@ -1492,6 +1681,7 @@ def complete_node(
         "status": final_status,
         "wall_clock_seconds": round(wall_clock, 3),
         "backoff_seconds": round(backoff, 3),
+        "approval_wait_seconds": round(approval_wait, 3),
         "active_seconds": round(active, 3),
     }
 
@@ -1528,8 +1718,10 @@ def route_after_execute(state: AgentState) -> str:
 
 
 def route_after_approval(state: AgentState) -> str:
-    """Route after approve to execute or complete."""
+    """Route after approve to execute, re-enter approve, or complete."""
     phase = state.get("current_phase", PHASE_EXECUTE)
+    if phase == PHASE_APPROVE:
+        return PHASE_APPROVE  # Re-enter for two-pass timestamp recording
     if phase == PHASE_EXECUTE:
         return PHASE_EXECUTE
     return PHASE_COMPLETE

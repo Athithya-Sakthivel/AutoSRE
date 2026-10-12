@@ -1,4 +1,4 @@
-"""Evaluation harness: dataset loading, agent client, and shared fixtures.
+"""Evaluation harness: dataset loading, agent client, chaos injection, and shared fixtures.
 
 ## Purpose
 
@@ -25,13 +25,23 @@ session against a live agent at ``AGENT_BASE_URL``.
     one pytest session. The cache is process-local and safe only for
     sequential pytest runs.
 
+## Chaos injection
+
+    When ``EVAL_APPLY_CHAOS=1`` (default), the harness calls
+    ``chaos/incidents.sh`` before each incident to inject real faults
+    into the Kubernetes cluster. The chaos script:
+
+    1. ``reset`` — cleans all chaos state before each incident
+    2. ``trigger`` — injects the specific fault for the incident
+
+    Chaos scripts are best-effort: if a script fails, the eval continues
+    against the healthy cluster and the agent correctly reports no_action.
+
 ## Evidence injection
 
     Each incident's ``injected_context`` field from the dataset is sent
-    as annotations in the webhook payload. The agent uses this as
-    pre-gathered evidence for reasoning. No external chaos injection
-    is performed — chaos scripts are infrastructure tooling managed
-    separately.
+    as annotations in the webhook payload, providing supplementary
+    evidence alongside the real cluster state observed by the agent.
 
 ## Judge
 
@@ -102,6 +112,7 @@ _EVAL_DIR = Path(__file__).parent
 _AGENTS_DIR = _EVAL_DIR.parent
 DATASET_PATH = _EVAL_DIR / "dataset" / "AutoSRE-Dataset-v3.json"
 RESULTS_DIR = _EVAL_DIR / "results"
+CHAOS_SCRIPT = _AGENTS_DIR / "chaos" / "incidents.sh"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -112,6 +123,7 @@ AGENT_WEBHOOK_SECRET = os.getenv("ALERT_WEBHOOK_SECRET", "test-secret")
 
 _DEFAULT_DELAY_SECONDS = 8.0
 _CLIENT_TIMEOUT_SECONDS = 700.0
+_CHAOS_TIMEOUT_SECONDS = 180.0
 
 _MAX_TRIGGER_RETRIES = 4
 _TRIGGER_RETRY_BASE_SECONDS = 10.0
@@ -119,6 +131,9 @@ _TRIGGER_RETRY_BASE_SECONDS = 10.0
 _TERMINAL_STATUSES = frozenset({"resolved", "failed", "no_action", "blocked"})
 
 _PROHIBITED_TOOLS = frozenset({"delete_namespace", "flush_all", "drop_table"})
+
+# Incidents that are webhook-only and need no chaos injection.
+_NO_CHAOS_INCIDENTS = frozenset({"INC-010", "INC-011"})
 
 # Substrings in error messages indicating daily quota exhaustion.
 # Daily-quota errors must fast-fail: retrying won't restore the bucket.
@@ -151,6 +166,7 @@ DELAY_BETWEEN_INCIDENTS = _parse_delay_seconds()
 
 FORCE_RERUN = os.getenv("EVAL_FORCE_RERUN", "0") == "1"
 AUTO_APPROVE = os.getenv("EVAL_AUTO_APPROVE", "1") != "0"
+APPLY_CHAOS = os.getenv("EVAL_APPLY_CHAOS", "1") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +406,105 @@ def _cache_clear() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Chaos injection — calls agents/chaos/incidents.sh
+# ---------------------------------------------------------------------------
+
+
+async def _run_chaos(incident_id: str, action: str) -> bool:
+    """Run chaos/incidents.sh <INCIDENT_ID> <action>.
+
+    Returns True on exit code 0. Never raises: chaos failures are logged
+    and return False so the eval can continue against a healthy cluster.
+    """
+    if not CHAOS_SCRIPT.is_file():
+        logger.debug("Chaos script not found: %s", CHAOS_SCRIPT)
+        return False
+
+    args = ["bash", str(CHAOS_SCRIPT)]
+    if incident_id:
+        args.append(incident_id)
+    args.append(action)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except Exception as exc:
+        logger.warning("Failed to spawn chaos script: %s", exc)
+        return False
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=_CHAOS_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.warning(
+            "Chaos script timed out after %ds: %s %s",
+            _CHAOS_TIMEOUT_SECONDS,
+            incident_id,
+            action,
+        )
+        proc.kill()
+        return False
+
+    stderr_text = stderr.decode("utf-8", errors="replace").strip()
+
+    if proc.returncode != 0:
+        logger.warning(
+            "Chaos %s %s failed (exit %d): %s",
+            incident_id or "(global)",
+            action,
+            proc.returncode,
+            stderr_text,
+        )
+        return False
+
+    if stderr_text:
+        for line in stderr_text.splitlines():
+            logger.info("chaos: %s", line)
+
+    return True
+
+
+async def _apply_chaos_trigger(incident: dict[str, Any]) -> None:
+    """Inject the fault for an incident via chaos/incidents.sh trigger.
+
+    No-op for webhook-only incidents (INC-010, INC-011) and when
+    EVAL_APPLY_CHAOS=0.
+    """
+    if not APPLY_CHAOS:
+        logger.debug("Chaos injection disabled (EVAL_APPLY_CHAOS=0)")
+        return
+
+    incident_id = incident["id"]
+    if incident_id in _NO_CHAOS_INCIDENTS:
+        logger.debug("Skipping chaos for webhook-only incident %s", incident_id)
+        return
+
+    ok = await _run_chaos(incident_id, "trigger")
+    if not ok:
+        logger.warning(
+            "Chaos trigger for %s was not applied. The agent will "
+            "investigate the cluster as-is and may report no_action.",
+            incident_id,
+        )
+
+
+async def _reset_chaos() -> None:
+    """Return the cluster to baseline before each incident.
+
+    Calls ``chaos/incidents.sh reset`` which cleans all chaos state:
+    idle-in-tx sessions, stuck pods, poison keys, and chaos planes.
+    """
+    if not APPLY_CHAOS:
+        return
+    await _run_chaos("", "reset")
+
+
+# ---------------------------------------------------------------------------
 # Aggregate metrics
 # ---------------------------------------------------------------------------
 
@@ -426,6 +541,7 @@ def compute_aggregate_metrics() -> dict[str, Any]:
             "avg_mttr_seconds": 0.0,
             "avg_wall_clock_seconds": 0.0,
             "avg_backoff_seconds": 0.0,
+            "avg_approval_wait_seconds": 0.0,
             "baseline_mttr_seconds": 0.0,
             "mttr_reduction_pct": 0.0,
             "total_cost_usd": 0.0,
@@ -444,6 +560,7 @@ def compute_aggregate_metrics() -> dict[str, Any]:
     active_times: list[float] = []
     wall_times: list[float] = []
     backoff_times: list[float] = []
+    approval_wait_times: list[float] = []
     baselines: list[float] = []
 
     total_cost = 0.0
@@ -476,6 +593,7 @@ def compute_aggregate_metrics() -> dict[str, Any]:
         )
         wall = _safe_float(report.get("wall_clock_seconds"), 0.0)
         backoff = _safe_float(report.get("backoff_seconds"), 0.0)
+        approval_wait = _safe_float(report.get("approval_wait_seconds"), 0.0)
         cost = _safe_float(report.get("cost_usd"), 0.0)
         tokens = _safe_int(report.get("tokens_used"), 0)
 
@@ -486,6 +604,8 @@ def compute_aggregate_metrics() -> dict[str, Any]:
                 wall_times.append(wall)
             if backoff >= 0:
                 backoff_times.append(backoff)
+            if approval_wait >= 0:
+                approval_wait_times.append(approval_wait)
 
             baseline = _safe_float(dataset.get("baseline_mttr_seconds"), 0.0)
             if baseline > 0:
@@ -507,6 +627,7 @@ def compute_aggregate_metrics() -> dict[str, Any]:
                 "mttr_seconds": active,
                 "wall_clock_seconds": wall,
                 "backoff_seconds": backoff,
+                "approval_wait_seconds": approval_wait,
                 "cost_usd": cost,
                 "tokens_used": tokens,
             }
@@ -515,6 +636,9 @@ def compute_aggregate_metrics() -> dict[str, Any]:
     avg_active = sum(active_times) / len(active_times) if active_times else 0.0
     avg_wall = sum(wall_times) / len(wall_times) if wall_times else 0.0
     avg_backoff = sum(backoff_times) / len(backoff_times) if backoff_times else 0.0
+    avg_approval_wait = (
+        sum(approval_wait_times) / len(approval_wait_times) if approval_wait_times else 0.0
+    )
     avg_baseline = sum(baselines) / len(baselines) if baselines else 0.0
 
     reduction = ((avg_baseline - avg_active) / avg_baseline) * 100.0 if avg_baseline > 0 else 0.0
@@ -530,6 +654,7 @@ def compute_aggregate_metrics() -> dict[str, Any]:
         "avg_mttr_seconds": round(avg_active, 2),
         "avg_wall_clock_seconds": round(avg_wall, 2),
         "avg_backoff_seconds": round(avg_backoff, 2),
+        "avg_approval_wait_seconds": round(avg_approval_wait, 2),
         "baseline_mttr_seconds": round(avg_baseline, 2),
         "mttr_reduction_pct": round(reduction, 2),
         "total_cost_usd": round(total_cost, 6),
@@ -985,7 +1110,8 @@ class AgentClient:
         """Send a webhook alert to the agent and return the incident ID.
 
         The ``injected_context`` from the dataset is sent as annotations,
-        providing the agent with pre-gathered evidence for reasoning.
+        providing the agent with supplementary evidence alongside the
+        real cluster state observed by its investigation tools.
         """
         incident_id = incident["id"]
 
@@ -1077,11 +1203,34 @@ class AgentClient:
         *,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        return await self._request_json(
-            "GET",
-            f"/incidents/{incident_id}/report",
-            timeout=timeout,
-        )
+        """Fetch incident status with retry on transient 404s."""
+        import httpx
+
+        max_retries = 3
+        last_error: BaseException | None = None
+
+        for attempt in range(max_retries):
+            try:
+                return await self._request_json(
+                    "GET",
+                    f"/incidents/{incident_id}/report",
+                    timeout=timeout,
+                )
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                if exc.response.status_code == 404 and attempt < max_retries - 1:
+                    logger.debug(
+                        "Transient 404 for %s (attempt %d/%d); retrying in 0.5s",
+                        incident_id,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    await asyncio.sleep(0.5)
+                    continue
+                raise
+
+        assert last_error is not None
+        raise last_error
 
     async def approve_incident(
         self,
@@ -1233,7 +1382,7 @@ def required_list_of_dicts(
 
 
 # ---------------------------------------------------------------------------
-# Incident runner with caching
+# Incident runner with chaos injection and caching
 # ---------------------------------------------------------------------------
 
 
@@ -1243,27 +1392,31 @@ async def run_incident(
     *,
     auto_approve: bool = AUTO_APPROVE,
 ) -> dict[str, Any]:
-    """Trigger, wait, persist, and cache one incident's result.
+    """Reset chaos, inject fault, trigger, wait, persist, and cache.
 
     Order of operations:
-        1. Session cache
-        2. Disk cache (unless FORCE_RERUN)
-        3. Rate-limit delay
-        4. Trigger the webhook with dataset injected_context as annotations
-        5. Poll for completion
-        6. Save result + populate session cache
+        1. Session cache (skip all if hit)
+        2. Disk cache (skip all if hit, unless FORCE_RERUN)
+        3. Reset chaos — clean all faults from previous incident
+        4. Apply chaos trigger — inject the specific fault
+        5. Rate-limit delay — respect provider RPM limits
+        6. Trigger webhook — send alert to the agent
+        7. Poll for completion — wait for terminal status
+        8. Save result + populate session cache
 
-    No external chaos injection is performed. The agent reasons over
-    the ``injected_context`` annotations in the webhook payload as
-    pre-gathered evidence.
+    Chaos steps 3 and 4 are best-effort. If the chaos toolkit is absent
+    or a trigger fails, the eval runs against the cluster as-is and the
+    agent will honestly report what it observes.
     """
     incident_id = incident["id"]
 
+    # 1. Session cache
     cached = _cache_get(incident_id)
     if cached is not None:
         logger.debug("Session cache hit for %s", incident_id)
         return cached
 
+    # 2. Disk cache
     if not FORCE_RERUN:
         disk_entry = load_result(incident_id)
         if disk_entry is not None:
@@ -1273,8 +1426,16 @@ async def run_incident(
                 logger.debug("Disk cache hit for %s", incident_id)
                 return report
 
+    # 3. Reset chaos — clean all faults from previous incident
+    await _reset_chaos()
+
+    # 4. Apply chaos trigger — inject the specific fault
+    await _apply_chaos_trigger(incident)
+
+    # 5. Rate-limit delay
     await _rate_limit_delay()
 
+    # 6-8. Trigger, poll, persist
     try:
         triggered_id = await agent_client.trigger_incident(incident)
 
@@ -1352,7 +1513,9 @@ def pytest_collection_modifyitems(
 __all__ = [
     "AGENT_BASE_URL",
     "AGENT_WEBHOOK_SECRET",
+    "APPLY_CHAOS",
     "AgentClient",
+    "CHAOS_SCRIPT",
     "DATASET_PATH",
     "DELAY_BETWEEN_INCIDENTS",
     "RateLimitError",

@@ -42,8 +42,7 @@ umask 0077
 NAMESPACE="${NAMESPACE:-sre}"
 APP_NAME="${APP_NAME:-autosre-agent}"
 IMAGE_REPO="${IMAGE_REPO:-ghcr.io/athithya-sakthivel/autosre-agent}"
-IMAGE_TAG="${IMAGE_TAG:?IMAGE_TAG environment variable is required}"
-# IMAGE_TAG="${IMAGE_TAG:-2026-10-08-12-33-37--4fdf232}"
+IMAGE_TAG="${IMAGE_TAG:-2026-10-08-12-33-37--4fdf232}"
 
 DEPLOYMENT_ENVIRONMENT="${DEPLOYMENT_ENVIRONMENT:-staging}"
 OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-autosre-agent}"

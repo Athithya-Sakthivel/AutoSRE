@@ -271,6 +271,7 @@ class IncidentSummary(BaseModel):
     wall_clock_seconds: float
     active_seconds: float
     backoff_seconds: float
+    approval_wait_seconds: float = 0.0
     iterations: int
     proposed_actions: list[dict[str, Any]] = Field(default_factory=list)
     executed_actions: list[dict[str, Any]] = Field(default_factory=list)
@@ -306,6 +307,7 @@ class IncidentReportResponse(BaseModel):
     wall_clock_seconds: float
     active_seconds: float
     backoff_seconds: float
+    approval_wait_seconds: float = 0.0
     iterations: int
     requires_human_approval: bool
     approval_granted: bool | None
@@ -603,6 +605,7 @@ def _extract_summary(
         wall_clock_seconds=_as_float(values.get("wall_clock_seconds", 0.0)),
         active_seconds=_as_float(values.get("active_seconds", 0.0)),
         backoff_seconds=_as_float(values.get("backoff_seconds", 0.0)),
+        approval_wait_seconds=_as_float(values.get("approval_wait_seconds", 0.0)),
         iterations=_as_int(values.get("iteration_count", 0)),
         proposed_actions=proposed_actions,
         executed_actions=executed_actions,
@@ -1121,9 +1124,13 @@ async def get_incident_report(
     if not isinstance(executed_actions, list):
         executed_actions = []
 
+    raw_status = _as_str(values.get("status", "unknown"))
+    requires_approval = bool(values.get("requires_human_approval", False))
+    approval_granted = values.get("approval_granted")
+
     return IncidentReportResponse(
         incident_id=incident_id,
-        status=_as_str(values.get("status", "unknown")),
+        status=_derive_status(raw_status, requires_approval, approval_granted),
         phase=_as_str(values.get("current_phase", "unknown")),
         alert_name=_as_str(metadata.get("alert_name", "")),
         service=_as_str(metadata.get("service", "")),
@@ -1142,6 +1149,7 @@ async def get_incident_report(
         wall_clock_seconds=_as_float(values.get("wall_clock_seconds", 0.0)),
         active_seconds=_as_float(values.get("active_seconds", 0.0)),
         backoff_seconds=_as_float(values.get("backoff_seconds", 0.0)),
+        approval_wait_seconds=_as_float(values.get("approval_wait_seconds", 0.0)),
         iterations=_as_int(values.get("iteration_count", 0)),
         requires_human_approval=bool(
             values.get(

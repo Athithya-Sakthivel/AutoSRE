@@ -10,8 +10,10 @@ export function ApprovalPanel({
 }): JSX.Element | null {
   const [comment, setComment] = useState("");
   const [showComment, setShowComment] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
   const mutation = useApproveIncident();
 
+  // Only show panel when awaiting approval
   if (incident.status !== "awaiting_approval") {
     return null;
   }
@@ -25,14 +27,30 @@ export function ApprovalPanel({
 
   const isPending = mutation.isPending;
 
-  const handleAction = (approved: boolean): void => {
-    mutation.mutate({
-      incidentId: incident.incident_id,
-      request: {
-        approved,
-        comment: comment.trim() || (approved ? "" : "Rejected by operator"),
-      },
-    });
+  const handleAction = async (approved: boolean): Promise<void> => {
+    setLocalError(null);
+
+    const approvalComment =
+      comment.trim() || (approved ? "" : "Rejected by operator");
+
+    try {
+      await mutation.mutateAsync({
+        incidentId: incident.incident_id,
+        request: {
+          approved,
+          comment: approvalComment,
+        },
+      });
+
+      // Force reload after short delay to ensure backend state is updated
+      setTimeout(() => {
+        window.location.reload();
+      }, 2000);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error("[ApprovalPanel] Approval failed:", errorMsg, error);
+      setLocalError(errorMsg);
+    }
   };
 
   return (
@@ -107,12 +125,13 @@ export function ApprovalPanel({
         </button>
       </div>
 
-      {mutation.isError && (
+      {(localError || mutation.isError) && (
         <div className="mt-3 rounded-md bg-status-failed/10 p-2.5 text-xs text-status-failed">
           <span className="font-medium">Approval failed: </span>
-          {mutation.error instanceof Error
-            ? mutation.error.message
-            : "Unknown error. Please try again."}
+          {localError ||
+            (mutation.error instanceof Error
+              ? mutation.error.message
+              : "Unknown error. Please try again.")}
         </div>
       )}
     </div>

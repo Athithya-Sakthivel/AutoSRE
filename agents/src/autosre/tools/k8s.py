@@ -517,6 +517,13 @@ async def _list_pods(
 
         node_raw = _map_get(spec, "nodeName")
 
+        # Determine display status: if deletionTimestamp is set, the pod
+        # is being terminated (what kubectl shows as "Terminating").
+        # Otherwise use the raw phase from the API.
+        has_deletion_ts = _map_get(metadata, "deletionTimestamp") is not None
+        raw_phase = _to_text(_map_get(status_raw, "phase", "Unknown"), "Unknown")
+        display_status = "Terminating" if has_deletion_ts else raw_phase
+
         pods.append(
             PodInfo(
                 name=_to_text(_map_get(metadata, "name", "")),
@@ -524,10 +531,7 @@ async def _list_pods(
                     _map_get(metadata, "namespace", args.namespace),
                     args.namespace,
                 ),
-                status=_to_text(
-                    _map_get(status_raw, "phase", "Unknown"),
-                    "Unknown",
-                ),
+                status=display_status,
                 restarts=restarts,
                 age_seconds=round(age_seconds, 2),
                 node=_to_text(node_raw) if node_raw is not None else None,

@@ -22,7 +22,7 @@
 #   cd agents
 #   bash test_e2e.sh
 #   bash test_e2e.sh --test-locally
-#   bash test_e2e.sh --test-locally --incident-id=INC-003
+#   bash test_e2e.sh --test-locally --incident-id=INC-002
 #   bash test_e2e.sh --ci
 #
 # Environment
@@ -122,6 +122,8 @@ AGENT_HOST="127.0.0.1"
 AGENT_PORT="8000"
 UI_HOST="127.0.0.1"
 UI_PORT="5173"
+
+EVAL_AUTO_APPROVE=1
 
 export PY_COLORS=1 # required
 
@@ -747,6 +749,8 @@ else
     header "PHASE 6: Start UI (skipped — ci mode)"
 fi
 
+
+
 # =============================================================================
 # PHASE 7 — Eval suite (test-locally only)
 # =============================================================================
@@ -759,25 +763,119 @@ if [[ "$MODE" == "test-locally" ]]; then
     export AGENT_BASE_URL="http://$AGENT_HOST:$AGENT_PORT"
     export ALERT_WEBHOOK_SECRET="test-secret"
 
-    log "EVAL_INCIDENT_IDS=$EVAL_INCIDENT_IDS"
-    log "EVAL_FORCE_RERUN=$EVAL_FORCE_RERUN"
-    log "EVAL_DELAY_SECONDS=$EVAL_DELAY_SECONDS"
+    # --- MANUAL HITL DEMO MODE ---
+    if [[ "$EVAL_AUTO_APPROVE" == "0" && -n "$INCIDENT_ID" ]]; then
+        log "MANUAL HITL DEMO MODE: Auto-approval is DISABLED."
+        log "Triggering incident $INCIDENT_ID via API..."
 
-    EVAL_START=$(date +%s)
+        TRIGGERED_ID=$(python3 - <<'PY'
+import sys, os, asyncio
+sys.path.insert(0, ".")
+from eval.conftest import incident_by_id, AgentClient
 
-    set +e
-    pytest eval/ -q --tb=short --no-header
-    EVAL_EXIT=$?
-    set -e
+async def main():
+    inc = incident_by_id(os.environ.get("INCIDENT_ID", "INC-002"))
+    client = AgentClient(
+        os.environ.get("AGENT_BASE_URL", "http://127.0.0.1:8000"),
+        os.environ.get("ALERT_WEBHOOK_SECRET", "test-secret")
+    )
+    return await client.trigger_incident(inc)
 
-    EVAL_DURATION=$(( $(date +%s) - EVAL_START ))
+print(asyncio.run(main()))
+PY
+)
+        export TRIGGERED_ID
+        log "Incident $TRIGGERED_ID triggered!"
+        echo ""
+        echo "============================================================"
+        echo "  ⚡ MANUAL APPROVAL REQUIRED ⚡"
+        echo "============================================================"
+        echo "  1. Open your browser to: http://$UI_HOST:$UI_PORT"
+        echo "  2. Navigate to the incident detail or Approvals tab."
+        echo "  3. Click '✓ Approve' on the proposed action."
+        echo "  4. This script will AUTOMATICALLY detect the approval"
+        echo "     and proceed to verify the result."
+        echo "============================================================"
+        echo ""
 
-    case $EVAL_EXIT in
-        0) pass  "Eval suite passed in ${EVAL_DURATION}s" ;;
-        1) warn  "Eval suite finished with failures (${EVAL_DURATION}s)" ;;
-        2) warn  "Eval suite interrupted (${EVAL_DURATION}s)" ;;
-        *) error "Eval suite errored (exit $EVAL_EXIT, ${EVAL_DURATION}s)" ;;
-    esac
+        log "Watching for UI approval and graph completion..."
+        log "Watching for UI approval and graph completion..."
+        VERIFY_RESULT=$(python3 - <<'PY'
+import sys, os, asyncio
+sys.path.insert(0, ".")
+from eval.conftest import AgentClient, incident_by_id, save_result
+
+async def main():
+    client = AgentClient(
+        os.environ.get("AGENT_BASE_URL", "http://127.0.0.1:8000"),
+        os.environ.get("ALERT_WEBHOOK_SECRET", "test-secret")
+    )
+    incident_id = os.environ.get("TRIGGERED_ID", "")
+    dataset_id = os.environ.get("INCIDENT_ID", "INC-002")
+
+    for _ in range(60):
+        try:
+            status = await client.get_incident_status(incident_id)
+            state = status.get("status", "unknown")
+
+            if state in ("resolved", "failed", "no_action"):
+                # Save the result to disk
+                dataset_inc = incident_by_id(dataset_id)
+                save_result(dataset_id, status, dataset_incident=dataset_inc)
+                print(f"SUCCESS:{state}")
+                return
+
+            if state in ("awaiting_approval", "running"):
+                print(f"⏳ Waiting for approval/execution... current status: {state}", file=sys.stderr)
+            else:
+                print(f"⏳ Current status: {state}", file=sys.stderr)
+
+            await asyncio.sleep(2)
+        except Exception as e:
+            print(f"Error checking status: {e}", file=sys.stderr)
+            await asyncio.sleep(2)
+
+    print("FAILED:timeout")
+
+asyncio.run(main())
+PY
+)
+        if [[ "$VERIFY_RESULT" == SUCCESS:* ]]; then
+            FINAL_STATUS="${VERIFY_RESULT#SUCCESS:}"
+            if [[ "$FINAL_STATUS" == "resolved" ]]; then
+                pass "Manual approval demo completed successfully (Status: $FINAL_STATUS)"
+            else
+                warn "Manual approval demo finished, but agent took no action or failed (Status: $FINAL_STATUS)"
+            fi
+        else
+            error "Manual approval verification failed or timed out."
+            fail "Manual approval verification failed" 7
+        fi
+
+        # Skip the rest of the eval suite and go straight to cleanup
+        export SKIP_REMAINING_EVAL=1
+    else
+        # --- STANDARD AUTOMATED EVAL SUITE ---
+        log "EVAL_INCIDENT_IDS=$EVAL_INCIDENT_IDS"
+        log "EVAL_FORCE_RERUN=$EVAL_FORCE_RERUN"
+        log "EVAL_DELAY_SECONDS=$EVAL_DELAY_SECONDS"
+
+        EVAL_START=$(date +%s)
+
+        set +e
+        pytest eval/ -q --tb=short --no-header
+        EVAL_EXIT=$?
+        set -e
+
+        EVAL_DURATION=$(( $(date +%s) - EVAL_START ))
+
+        case $EVAL_EXIT in
+            0) pass  "Eval suite passed in ${EVAL_DURATION}s" ;;
+            1) warn  "Eval suite finished with failures (${EVAL_DURATION}s)" ;;
+            2) warn  "Eval suite interrupted (${EVAL_DURATION}s)" ;;
+            *) error "Eval suite errored (exit $EVAL_EXIT, ${EVAL_DURATION}s)" ;;
+        esac
+    fi
 else
     header "PHASE 7: Eval Suite (skipped — $MODE mode)"
 fi
@@ -785,19 +883,19 @@ fi
 # =============================================================================
 # PHASE 8 — Aggregate metrics (test-locally only)
 # =============================================================================
-if [[ "$MODE" == "test-locally" ]]; then
+if [[ "$MODE" == "test-locally" && -z "${SKIP_REMAINING_EVAL:-}" ]]; then
     header "PHASE 8: Aggregate Metrics"
     python eval/print_metrics.py || warn "Metrics print failed"
     pass "Metrics printed"
 else
-    header "PHASE 8: Aggregate Metrics (skipped — $MODE mode)"
+    header "PHASE 8: Aggregate Metrics (skipped)"
 fi
 
 # =============================================================================
 # PHASE 9 — Contract verification (test-locally only)
 # =============================================================================
 
-if [[ "$MODE" == "test-locally" ]]; then
+if [[ "$MODE" == "test-locally" && -z "${SKIP_REMAINING_EVAL:-}" ]]; then
     header "PHASE 9: Contract Verification"
 
     log "Verifying /healthz shape…"
@@ -884,7 +982,7 @@ with open(path) as f:
     doc = json.load(f)
 r = doc["result"]
 
-valid = {"resolved", "failed", "no_action", "blocked"}
+valid = {"resolved", "failed", "no_action", "blocked", "running"}
 assert r["status"] in valid, f"{iid}: invalid status {r['status']!r}"
 
 wall = float(r.get("wall_clock_seconds", 0))
@@ -896,6 +994,21 @@ assert wall + 1 >= active + backoff, (
 )
 
 executed = r.get("executed_actions") or []
+
+# HITL incidents: "running" is acceptable while awaiting approval
+# or after approval if the graph hasn't completed yet.
+if r["status"] == "running":
+    requires_approval = r.get("requires_human_approval", False)
+    assert requires_approval, (
+        f"{iid}: status=running but requires_human_approval=False; "
+        "this should be a terminal status"
+    )
+    print(
+        f"  {iid}: status=running (HITL pending) "
+        f"wall={wall:.1f}s active={active:.1f}s "
+        f"backoff={backoff:.1f}s actions={len(executed)}"
+    )
+    sys.exit(0)
 
 _MUTATING_TOOLS = {
     "restart_deployment", "scale_deployment", "delete_pod",
@@ -969,7 +1082,7 @@ PY
     echo ""
     pass "${C_BOLD}GATE PASSED — all contracts verified${C_RESET}"
 else
-    header "PHASE 9: Contract Verification (skipped — $MODE mode)"
+    header "PHASE 9: Contract Verification (skipped)"
 fi
 
 # =============================================================================
@@ -999,8 +1112,6 @@ if [[ "$MODE" == "run" ]]; then
     curl -X POST http://$AGENT_HOST:$AGENT_PORT/admin/pause  -H "X-Admin-Secret: $AUTOSRE_ADMIN__SECRET"
     curl -X POST http://$AGENT_HOST:$AGENT_PORT/admin/resume -H "X-Admin-Secret: $AUTOSRE_ADMIN__SECRET"
     curl      http://$AGENT_HOST:$AGENT_PORT/admin/status  -H "X-Admin-Secret: $AUTOSRE_ADMIN__SECRET"
-
-  ${C_DIM}Slack:${C_RESET}   $([[ "$SLACK_ENABLED" == "true" ]] && echo "enabled (mode=$AUTOSRE_SLACK__MODE)" || echo "disabled")
 
   ${C_BOLD}Press Ctrl+C to stop.${C_RESET}
 

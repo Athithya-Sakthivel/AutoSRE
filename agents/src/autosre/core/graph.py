@@ -113,6 +113,7 @@ def compile_graph(
         PHASE_APPROVE,
         route_after_approval,
         {
+            "approve": PHASE_APPROVE,  # Re-enter for two-pass timestamp recording
             "execute": PHASE_EXECUTE,
             "complete": PHASE_COMPLETE,
         },

@@ -465,7 +465,14 @@ async def test_graph_triage_to_completion(
     assert result["hypotheses"][0]["id"] == "H1"
 
     # execute_node clears proposed_actions after execution
-    assert len(result["proposed_actions"]) == 0
+    # proposed_actions is preserved as an audit trail (not cleared after execution)
+    # Verify the proposal matches the executed action
+    if result["executed_actions"]:
+        executed_tool = result["executed_actions"][0].get("tool_name", "")
+        proposed_tools = [p.get("tool_name") for p in result["proposed_actions"]]
+        assert executed_tool in proposed_tools, (
+            f"Executed tool {executed_tool!r} not found in proposed_actions: {proposed_tools}"
+        )
 
     # executed_actions should contain the remediation
     assert len(result["executed_actions"]) >= 1

@@ -1,48 +1,41 @@
 {
   "incident_id": "INC-003",
-  "completed_at": "2026-10-04T12:29:21Z",
+  "completed_at": "2026-10-11T03:18:46Z",
   "result": {
-    "incident_id": "94c022b8-2773-4bea-8e5d-b6073a1fb21a",
+    "incident_id": "c4520199-ec6a-426f-8f36-827e82524d99",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "IdleInTransactionBacklog",
     "service": "api-gateway",
     "namespace": "rivulet",
     "severity": "sev1",
-    "started_at": "2026-10-04T12:29:05Z",
+    "started_at": "2026-10-11T03:18:30Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "Application code in the api-gateway service is failing to commit or rollback database transactions, causing database connections to remain idle in a transaction and exhausting the available connection pool.",
-        "confidence": 0.8,
+        "confidence": 0.4,
+        "status": "proposed",
         "evidence": [
-          "Alert: IdleInTransactionBacklog",
-          "Service: api-gateway in namespace rivulet",
-          "Category: db_connection_exhaustion",
-          "Active connections: 12",
-          "Idle in transaction: 5",
-          "Max connections: 20",
-          "Tool get_active_queries({\"exclude_idle\": false, \"min_duration_seconds\": 0, \"limit\": 50}) status=succeeded output={\"queries\": [{\"datname\": \"app\", \"pid\": 68754, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 309.8505, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 68755, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 309.848564, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 68756, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 309.842612, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 68757, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 309.840187, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 68758, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 309.818237, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 69414, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 8.997745, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 69415, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 8.996327, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 69416, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 8.994596, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 69417, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 8.993685, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 69418, \"query\": \"BEGIN; SELECT 1; SE",
-          "Tool get_connection_stats({}) status=succeeded output={\"stats\": {\"active\": 11, \"idle\": 6, \"idle_in_transaction\": 0, \"max_connections\": 100, \"total_connections\": 17, \"utilisation_pct\": 17.0}}",
-          "Tool query_openobserve({\"query\": \"SELECT * FROM logs WHERE level = 'ERROR' OR message LIKE '%transaction%'\", \"time_range_minutes\": 30, \"limit\": 50}) status=succeeded output={\"error\": \"Client error '400 Bad Request' for url 'http://127.0.0.1:15080/api/default/_search'\\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400\", \"rows\": [], \"total\": 0, \"truncated\": false}"
-        ],
-        "status": "checked"
+          "Tool get_connection_stats({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_connection_stats' failed: 1 validation error for GetConnectionStatsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
+          "Tool get_active_queries({\"min_duration_seconds\": 5, \"exclude_idle\": true, \"namespace\": \"rivulet\"}) status=failed error=Tool 'get_active_queries' failed: 1 validation error for GetActiveQueriesInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
+          "Tool get_lock_waits({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_lock_waits' failed: 1 validation error for GetLockWaitsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
+          "Tool get_connection_stats({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_connection_stats' failed: 1 validation error for GetConnectionStatsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
+          "Tool get_active_queries({\"min_duration_seconds\": 5, \"exclude_idle\": true, \"namespace\": \"rivulet\"}) status=failed error=Tool 'get_active_queries' failed: 1 validation error for GetActiveQueriesInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
+          "Tool get_lock_waits({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_lock_waits' failed: 1 validation error for GetLockWaitsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden"
+        ]
       },
       {
         "id": "H2",
-        "description": "An upstream network timeout or client disconnect occurs while the api-gateway holds an open database transaction, leaving the connection in an idle-in-transaction state until cleaned up.",
         "confidence": 0.3,
+        "status": "proposed",
         "evidence": [
-          "Alert: IdleInTransactionBacklog",
-          "Service: api-gateway in namespace rivulet",
-          "Category: db_connection_exhaustion",
-          "Idle in transaction: 5",
-          "Max connections: 20",
-          "Tool get_active_queries({\"exclude_idle\": false, \"min_duration_seconds\": 0, \"limit\": 50}) status=succeeded output={\"queries\": [{\"datname\": \"app\", \"pid\": 68754, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 309.8505, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 68755, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 309.848564, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 68756, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 309.842612, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 68757, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 309.840187, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 68758, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 309.818237, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 69414, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 8.997745, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 69415, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 8.996327, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 69416, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 8.994596, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 69417, \"query\": \"BEGIN; SELECT 1; SELECT pg_sleep(600);\", \"query_duration_seconds\": 8.993685, \"state\": \"active\", \"usename\": \"app\", \"wait_event\": \"PgSleep\", \"wait_event_type\": \"Timeout\"}, {\"datname\": \"app\", \"pid\": 69418, \"query\": \"BEGIN; SELECT 1; SE",
-          "Tool get_connection_stats({}) status=succeeded output={\"stats\": {\"active\": 11, \"idle\": 6, \"idle_in_transaction\": 0, \"max_connections\": 100, \"total_connections\": 17, \"utilisation_pct\": 17.0}}",
-          "Tool query_openobserve({\"query\": \"SELECT * FROM logs WHERE level = 'ERROR' OR message LIKE '%transaction%'\", \"time_range_minutes\": 30, \"limit\": 50}) status=succeeded output={\"error\": \"Client error '400 Bad Request' for url 'http://127.0.0.1:15080/api/default/_search'\\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400\", \"rows\": [], \"total\": 0, \"truncated\": false}"
-        ],
-        "status": "proposed"
+          "Tool get_connection_stats({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_connection_stats' failed: 1 validation error for GetConnectionStatsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
+          "Tool get_active_queries({\"min_duration_seconds\": 5, \"exclude_idle\": true, \"namespace\": \"rivulet\"}) status=failed error=Tool 'get_active_queries' failed: 1 validation error for GetActiveQueriesInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
+          "Tool get_lock_waits({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_lock_waits' failed: 1 validation error for GetLockWaitsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
+          "Tool get_connection_stats({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_connection_stats' failed: 1 validation error for GetConnectionStatsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
+          "Tool get_active_queries({\"min_duration_seconds\": 5, \"exclude_idle\": true, \"namespace\": \"rivulet\"}) status=failed error=Tool 'get_active_queries' failed: 1 validation error for GetActiveQueriesInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
+          "Tool get_lock_waits({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_lock_waits' failed: 1 validation error for GetLockWaitsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden"
+        ]
       }
     ],
     "proposed_actions": [],
@@ -50,39 +43,39 @@
       {
         "tool_name": "restart_deployment",
         "tool_args": {
-          "namespace": "rivulet",
+          "reason": "Connection pool exhaustion; restart to release stuck connections",
           "name": "api-gateway",
-          "reason": "Restarting api-gateway deployment to clear stuck backend transactions holding database connections."
+          "namespace": "rivulet"
         },
-        "tool_call_id": "call_1791116958900",
+        "tool_call_id": "call_1791688723475",
         "result": {
           "name": "api-gateway",
           "namespace": "rivulet",
           "restarted": true,
-          "reason": "Restarting api-gateway deployment to clear stuck backend transactions holding database connections.",
+          "reason": "Connection pool exhaustion; restart to release stuck connections",
           "success": true,
           "verification_passed": null
         },
         "success": true,
-        "executed_at": "2026-10-04T12:29:18Z",
+        "executed_at": "2026-10-11T03:18:43Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 11616,
-    "prompt_tokens": 8560,
-    "completion_tokens": 3056,
-    "cost_usd": 0.010208000000000002,
-    "estimated_paid_cost_usd": 0.010208000000000002,
+    "tokens_used": 14415,
+    "prompt_tokens": 12823,
+    "completion_tokens": 1592,
+    "cost_usd": 0.006759899999999999,
+    "estimated_paid_cost_usd": 0.0089419,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
-        "calls": 4,
-        "tokens": 11616
+        "calls": 7,
+        "tokens": 14615
       }
     },
-    "wall_clock_seconds": 12.991,
-    "active_seconds": 12.991,
+    "wall_clock_seconds": 12.687,
+    "active_seconds": 12.687,
     "backoff_seconds": 0.0,
-    "iterations": 1,
+    "iterations": 3,
     "requires_human_approval": false,
     "approval_granted": null
   },

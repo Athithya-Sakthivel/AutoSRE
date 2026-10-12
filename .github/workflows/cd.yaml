@@ -1,29 +1,23 @@
 name: CD (Eval-Gated Release)
-
 on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
     branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
   packages: write
-
 concurrency:
   group: cd-${{ github.event.workflow_run.head_branch || github.ref }}
   cancel-in-progress: false
-
 env:
   TRIVY_IMAGE: ghcr.io/athithya-sakthivel/trivy:0.69.3-safe@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
   TRIVY_CACHE_DIR: /tmp/trivy-cache
-
   KUBECTL_VERSION: v1.36.4
   KIND_VERSION: v0.32.0
   HELM_VERSION: v4.3.0
   TOFU_VERSION: "1.13.1"
-
 jobs:
   release:
     name: Deploy SUT - Playwright - Eval - Build - Push
@@ -34,19 +28,16 @@ jobs:
       }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-
     steps:
       - name: Checkout tested commit
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
-
       - name: Announce run
         run: |
           echo "Trigger:    ${{ github.event_name }}"
           echo "Tested SHA: ${{ github.event.workflow_run.head_sha || github.sha }}"
-
       # =================================================================
       # Toolchain
       # =================================================================
@@ -55,52 +46,42 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "agents/uv.lock"
-
       - name: Install Python 3.14
         run: uv python install 3.14
-
       - name: Lock Python dependencies
         working-directory: agents
         run: bash lock-versions.sh
-
       - name: Install Node.js 24
         uses: actions/setup-node@v4
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: agents/ui/package-lock.json
-
       - name: Lock Node dependencies and Playwright browsers
         working-directory: agents/ui
         run: bash lock-versions.sh
-
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
         with:
           version: ${{ env.KUBECTL_VERSION }}
-
       - name: Install kind
         uses: helm/kind-action@v1
         with:
           install_only: true
           version: ${{ env.KIND_VERSION }}
-
       - name: Install Helm
         uses: azure/setup-helm@v4
         with:
           version: ${{ env.HELM_VERSION }}
-
       - name: Install OpenTofu
         uses: opentofu/setup-opentofu@v1
         with:
           tofu_version: ${{ env.TOFU_VERSION }}
           tofu_wrapper: false
-
       - name: Install jq and bc
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends jq bc
-
       - name: Verify toolchain
         run: |
           kubectl version --client
@@ -108,7 +89,6 @@ jobs:
           helm version --short
           tofu version
           jq --version
-
       # =================================================================
       # Deploy SUT (infrastructure only, no agent)
       # =================================================================
@@ -116,7 +96,6 @@ jobs:
         env:
           AUTOSRE_LLM__API_KEY: ${{ secrets.AUTOSRE_LLM__API_KEY }}
         run: bash scripts/staging/e2e.sh
-
       # =================================================================
       # Start agent + UI in background for Playwright
       # test_e2e.sh --run starts both and blocks until Ctrl+C
@@ -133,7 +112,6 @@ jobs:
           nohup bash test_e2e.sh --run >/tmp/test-run.log 2>&1 &
           echo $! > /tmp/test-run.pid
           echo "Started test_e2e.sh --run (pid $(cat /tmp/test-run.pid))"
-
       - name: Wait for agent and UI to be ready
         run: |
           echo "Waiting for agent at 127.0.0.1:8000..."
@@ -150,7 +128,6 @@ jobs:
             fi
             sleep 1
           done
-
           echo "Waiting for UI at 127.0.0.1:5173..."
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:5173/ >/dev/null 2>&1; then
@@ -163,14 +140,12 @@ jobs:
             fi
             sleep 1
           done
-
       # =================================================================
       # Playwright E2E (agent + UI already running)
       # =================================================================
       - name: Run Playwright E2E
         working-directory: agents/ui
         run: bash test_e2e.sh --playwright
-
       # =================================================================
       # Stop agent + UI (cleanup before eval)
       # =================================================================
@@ -187,7 +162,6 @@ jobs:
           pkill -f "kubectl port-forward" 2>/dev/null || true
           sleep 2
           echo "Agent and UI stopped"
-
       # =================================================================
       # Eval gate: test_e2e.sh --test-locally --incident-id=INC-003
       # This starts its own agent+UI, runs eval, prints metrics,
@@ -203,7 +177,6 @@ jobs:
           AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS: "1"
           AUTOSRE_ALERT__WEBHOOK_SECRET: test-secret
         run: bash test_e2e.sh --test-locally --incident-id=INC-003
-
       # =================================================================
       # ALL GATES PASSED -- containerize, scan and push
       # =================================================================
@@ -227,7 +200,6 @@ jobs:
             echo "candidate_image=${CANDIDATE_IMAGE}"
             echo "release_image=${RELEASE_IMAGE}"
           } >> "$GITHUB_OUTPUT"
-
       - name: Validate image metadata outputs
         run: |
           set -euo pipefail
@@ -240,10 +212,8 @@ jobs:
           [[ -n "${{ steps.image-meta.outputs.candidate_image }}" ]] \
             || { echo "ERROR: candidate_image is empty"; exit 1; }
           echo "All image metadata outputs validated."
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Build image
         uses: docker/build-push-action@v6
         with:
@@ -259,15 +229,12 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ steps.image-meta.outputs.tested_sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-
       - name: Compute Trivy cache key
         id: trivy-key
         shell: bash
         run: echo "key=trivy-${RUNNER_OS}-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
-
       - name: Prepare Trivy cache
         run: mkdir -p "${TRIVY_CACHE_DIR}"
-
       - name: Restore Trivy cache
         uses: actions/cache@v4
         with:
@@ -275,7 +242,6 @@ jobs:
           key: ${{ steps.trivy-key.outputs.key }}
           restore-keys: |
             trivy-${{ runner.os }}-
-
       - name: Scan image with Trivy
         run: |
           scan_image="${{ steps.image-meta.outputs.candidate_image }}"
@@ -297,14 +263,12 @@ jobs:
             --exit-code 1 \
             "${ignore_args[@]}" \
             "${scan_image}"
-
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ steps.image-meta.outputs.ghcr_user }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
+          password: ${{ secrets.GHCR_TOKEN }}
       - name: Push candidate and release tags
         run: |
           set -euo pipefail
@@ -313,7 +277,6 @@ jobs:
           echo "Released:  ${{ steps.image-meta.outputs.release_image }}"
           echo "Candidate: ${{ steps.image-meta.outputs.candidate_image }}"
           echo "Tested SHA: ${{ steps.image-meta.outputs.tested_sha }}"
-
       - name: Upload artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4

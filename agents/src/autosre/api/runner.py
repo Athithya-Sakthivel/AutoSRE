@@ -48,7 +48,6 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from langgraph.types import Command
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
@@ -526,72 +525,77 @@ class LangGraphRunner:
         approved: bool,
         comment: str = "",
     ) -> bool:
-        """Resume a paused graph with the operator's approval decision.
+        """Resume a paused HITL incident with the given approval decision.
 
-        Idempotent: an incident that already has an ``approval_granted``
-        value returns False without resuming.
+        Uses ONLY Command(resume=...) to resume the graph. The resume value
+        becomes the return value of interrupt() in approve_node, which then
+        sets approval_granted in the state. No aupdate_state needed.
         """
+        from langgraph.types import Command
+
         if not incident_id:
-            logger.warning("approve_incident called with empty incident_id")
             return False
+
+        logger.info("approve_incident: Starting for %s, approved=%s", incident_id, approved)
 
         config = self._build_config(incident_id)
 
+        # Verify the incident exists and is awaiting approval
         try:
-            state_snapshot = await self.graph.aget_state(config)
-
-            if state_snapshot is None:
-                logger.warning("Cannot approve: incident %s not found", incident_id)
-                return False
-
-            values = state_snapshot.values
-
-            if not isinstance(values, Mapping):
-                logger.warning(
-                    "Incident %s has malformed state values (%s)",
-                    incident_id,
-                    type(values).__name__,
-                )
-                return False
-
-            if not values.get("requires_human_approval", False):
-                logger.warning("Incident %s does not require approval", incident_id)
-                return False
-
-            if values.get("approval_granted") is not None:
-                logger.warning(
-                    "Incident %s already has approval decision=%s",
-                    incident_id,
-                    values.get("approval_granted"),
-                )
-                return False
-
-            await self.graph.ainvoke(
-                Command(
-                    resume={
-                        "approved": bool(approved),
-                        "comment": str(comment),
-                    }
-                ),
-                config=config,
-            )
-
-            logger.info(
-                "Incident %s %s (comment=%r)",
-                incident_id,
-                "approved" if approved else "rejected",
-                comment,
-            )
-            return True
-
+            current_state = await self.graph.aget_state(config)
         except Exception as exc:
-            logger.error(
-                "Failed to approve incident %s: %s",
-                incident_id,
-                exc,
-                exc_info=True,
-            )
+            logger.error("approve_incident: Failed to get state: %s", exc)
             return False
+
+        if not current_state or not current_state.values:
+            logger.error("approve_incident: No state found for %s", incident_id)
+            return False
+
+        state_values = current_state.values
+        requires_approval = state_values.get("requires_human_approval", False)
+        approval_granted = state_values.get("approval_granted")
+
+        if not requires_approval:
+            logger.warning("approve_incident: %s does not require approval", incident_id)
+            return False
+
+        if approval_granted is not None:
+            logger.warning("approve_incident: %s already decided", incident_id)
+            return False
+
+        # Build the resume value that approve_node's interrupt() will return
+        resume_value = {"approved": approved, "comment": comment}
+
+        logger.info(
+            "approve_incident: Resuming %s with Command(resume=%s)", incident_id, resume_value
+        )
+
+        async def _resume_graph() -> None:
+            try:
+                # DO NOT call aupdate_state — Command(resume=...) is sufficient.
+                # The resume value becomes the return value of interrupt() in approve_node.
+                # approve_node then sets approval_granted based on the resume value.
+                async for update in self.graph.astream(
+                    Command(resume=resume_value),
+                    config=config,
+                    stream_mode="updates",
+                ):
+                    logger.info("approve_incident: Graph update: %s", list(update.keys()))
+                logger.info("approve_incident: Graph completed for %s", incident_id)
+            except Exception as exc:
+                logger.error("approve_incident: Graph resume failed: %s", exc, exc_info=True)
+
+        task = asyncio.create_task(
+            _resume_graph(),
+            name=f"autosre-resume-{incident_id}",
+        )
+
+        async with self._background_lock:
+            self._background_tasks.add(task)
+
+        task.add_done_callback(self._on_background_task_done)
+
+        return True
 
 
 __all__ = ["LangGraphRunner"]

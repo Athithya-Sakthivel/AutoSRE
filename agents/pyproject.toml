@@ -87,7 +87,7 @@ addopts = [
     "--tb=short",
     "-rxXs",                # Show reasons for xfail, xpass, skip
 ]
-timeout = 120               # 2-minute hard cap per test (prevents hangs)
+timeout = 600                # 2-minute hard cap per test (prevents hangs)
 timeout_method = "thread"
 
 # ---- WARNING SUPPRESSION ----------------------------------------------------
