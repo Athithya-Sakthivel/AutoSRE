@@ -908,6 +908,7 @@ class TokenVelocityRouter:
 
                     if run_metrics is not None:
                         run_metrics.record_llm_failure()
+                        run_metrics.record_llm_latency(latency)
 
                     await self.metrics.record_failure(candidate, category)
 
@@ -927,7 +928,11 @@ class TokenVelocityRouter:
                         LLMErrorCategory.QUOTA_EXHAUSTED,
                         LLMErrorCategory.CAPACITY_EXHAUSTED,
                     ):
-                        # Fast-fail: rotate to next fallback model. No retry.
+                        # Fast-fail: rotate to next fallback model.
+                        # Record the time wasted on this failed call as backoff.
+                        if run_metrics is not None:
+                            run_metrics.record_backoff(latency)
+
                         await self.circuit_breaker.record_failure(candidate)
                         self._increment_model_usage(candidate)
                         logger.info(
@@ -943,10 +948,10 @@ class TokenVelocityRouter:
                         LLMErrorCategory.VALIDATION,
                     ):
                         # Non-recoverable: propagate immediately.
-                        # Wrapping preserves the original message for matching.
+                        # Do NOT retry, do NOT rotate.
                         raise LLMBudgetExhaustedError(
-                            f"LLM {category.value} error on {candidate} "
-                            f"(budget exhausted, quota exhausted): {exc}"
+                            f"LLM {category.value} error on {candidate}: {exc}. "
+                            "budget exhausted, quota exhausted."
                         ) from exc
 
                     # TRANSIENT: retry with backoff on this model.
@@ -982,6 +987,7 @@ class TokenVelocityRouter:
 
                 if run_metrics is not None:
                     run_metrics.record_llm_success()
+                    run_metrics.record_llm_latency(latency)
 
                 await self.circuit_breaker.record_success(candidate)
                 await self.metrics.record_success(candidate, latency)

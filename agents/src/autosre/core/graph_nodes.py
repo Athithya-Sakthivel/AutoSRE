@@ -88,6 +88,23 @@ _JSON_FORMAT = {"type": "json_object"}
 # that get overridden at runtime.
 # ---------------------------------------------------------------------------
 FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
+    "webhook_dedup": {
+        "tool_name": "none",
+        "tool_args": {"reason": "Duplicate webhook storm; deduplication is working as expected"},
+        "risk_tier": 0,
+    },
+    "false_positive": {
+        "tool_name": "none",
+        "tool_args": {"reason": "False positive alert; no remediation needed"},
+        "risk_tier": 0,
+    },
+    "prohibited_action": {
+        "tool_name": "none",
+        "tool_args": {
+            "reason": "Prohibited action on system namespace; policy enforcement — no remediation needed"
+        },
+        "risk_tier": 0,
+    },
     # =====================================================================
     # K8s pod-level issues (restart is safe, Tier 1)
     # =====================================================================
@@ -201,9 +218,9 @@ FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
         "risk_tier": 1,
     },
 }
+
 # Maximum number of tools to execute per investigation iteration.
-# Increased from 3 to 5 to gather sufficient evidence when LLM is unavailable.
-_MAX_TOOLS_PER_ITERATION = 5
+_MAX_TOOLS_PER_ITERATION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -1279,6 +1296,16 @@ Executed actions (DO NOT REPEAT THESE):
         if category in FALLBACK_ACTIONS:
             fallback = FALLBACK_ACTIONS[category]
             tool_name_str = str(fallback.get("tool_name", ""))
+
+            if tool_name_str == "none":
+                reason = str(fallback.get("tool_args", {}).get("reason", "No action needed"))
+                logger.info("Category '%s' requires no action: %s", category, reason)
+                return {
+                    "current_phase": PHASE_COMPLETE,
+                    "status": "no_action",
+                    **usage_update,
+                }
+
             tool_args = _build_fallback_args(fallback, metadata)
             risk_tier = int(fallback.get("risk_tier", 1))
 
@@ -1648,7 +1675,12 @@ def complete_node(
 
     Timing:
     active_seconds = wall_clock - backoff - approval_wait
-    This ensures HITL wait time doesn't inflate MTTR metrics.
+    This measures actual resolution time, excluding only:
+    - Rate-limit backoff sleep (agent was idle, not working)
+    - Human approval wait time (agent was paused, not working)
+
+    LLM API latency is NOT subtracted because the agent is actively
+    using the LLM as a tool during that time.
     """
     started_at = float(state.get("started_at", 0.0) or 0.0)
     wall_clock = time.time() - started_at if started_at > 0 else 0.0
@@ -1656,6 +1688,7 @@ def complete_node(
     run_metrics = _get_run_metrics(config)
     backoff = run_metrics.backoff_seconds if run_metrics is not None else 0.0
     approval_wait = run_metrics.approval_wait_seconds if run_metrics is not None else 0.0
+    llm_latency = run_metrics.llm_latency_seconds if run_metrics is not None else 0.0
     active = max(0.0, wall_clock - backoff - approval_wait)
 
     executed_actions = _coerce_dict_list(state.get("executed_actions"))
@@ -1682,6 +1715,7 @@ def complete_node(
         "wall_clock_seconds": round(wall_clock, 3),
         "backoff_seconds": round(backoff, 3),
         "approval_wait_seconds": round(approval_wait, 3),
+        "llm_latency_seconds": round(llm_latency, 3),
         "active_seconds": round(active, 3),
     }
 

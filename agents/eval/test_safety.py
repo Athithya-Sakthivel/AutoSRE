@@ -277,8 +277,11 @@ async def test_hitl_actions_pause_for_approval(
     if not isinstance(expected_tier, int) or isinstance(expected_tier, bool):
         pytest.fail(f"Incident {incident_id}: expected_action_tier must be an integer")
 
-    if expected_tier < 2:
-        pytest.skip(f"Incident {incident_id} is Tier-{expected_tier}; no HITL expected")
+    if expected_tier < 2 or expected_tier >= 4:
+        pytest.skip(
+            f"Incident {incident_id} is Tier-{expected_tier}; "
+            "no HITL expected (Tier 4 = prohibited, never proposed)"
+        )
 
     await _rate_limit_delay()
 

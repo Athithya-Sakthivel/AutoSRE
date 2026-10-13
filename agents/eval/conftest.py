@@ -542,6 +542,7 @@ def compute_aggregate_metrics() -> dict[str, Any]:
             "avg_wall_clock_seconds": 0.0,
             "avg_backoff_seconds": 0.0,
             "avg_approval_wait_seconds": 0.0,
+            "avg_llm_latency_seconds": 0.0,
             "baseline_mttr_seconds": 0.0,
             "mttr_reduction_pct": 0.0,
             "total_cost_usd": 0.0,
@@ -561,6 +562,7 @@ def compute_aggregate_metrics() -> dict[str, Any]:
     wall_times: list[float] = []
     backoff_times: list[float] = []
     approval_wait_times: list[float] = []
+    llm_latency_times: list[float] = []
     baselines: list[float] = []
 
     total_cost = 0.0
@@ -594,6 +596,7 @@ def compute_aggregate_metrics() -> dict[str, Any]:
         wall = _safe_float(report.get("wall_clock_seconds"), 0.0)
         backoff = _safe_float(report.get("backoff_seconds"), 0.0)
         approval_wait = _safe_float(report.get("approval_wait_seconds"), 0.0)
+        llm_latency = _safe_float(report.get("llm_latency_seconds"), 0.0)
         cost = _safe_float(report.get("cost_usd"), 0.0)
         tokens = _safe_int(report.get("tokens_used"), 0)
 
@@ -606,6 +609,8 @@ def compute_aggregate_metrics() -> dict[str, Any]:
                 backoff_times.append(backoff)
             if approval_wait >= 0:
                 approval_wait_times.append(approval_wait)
+            if llm_latency >= 0:
+                llm_latency_times.append(llm_latency)
 
             baseline = _safe_float(dataset.get("baseline_mttr_seconds"), 0.0)
             if baseline > 0:
@@ -628,6 +633,7 @@ def compute_aggregate_metrics() -> dict[str, Any]:
                 "wall_clock_seconds": wall,
                 "backoff_seconds": backoff,
                 "approval_wait_seconds": approval_wait,
+                "llm_latency_seconds": llm_latency,
                 "cost_usd": cost,
                 "tokens_used": tokens,
             }
@@ -639,6 +645,7 @@ def compute_aggregate_metrics() -> dict[str, Any]:
     avg_approval_wait = (
         sum(approval_wait_times) / len(approval_wait_times) if approval_wait_times else 0.0
     )
+    avg_llm_latency = sum(llm_latency_times) / len(llm_latency_times) if llm_latency_times else 0.0
     avg_baseline = sum(baselines) / len(baselines) if baselines else 0.0
 
     reduction = ((avg_baseline - avg_active) / avg_baseline) * 100.0 if avg_baseline > 0 else 0.0
@@ -655,6 +662,7 @@ def compute_aggregate_metrics() -> dict[str, Any]:
         "avg_wall_clock_seconds": round(avg_wall, 2),
         "avg_backoff_seconds": round(avg_backoff, 2),
         "avg_approval_wait_seconds": round(avg_approval_wait, 2),
+        "avg_llm_latency_seconds": round(avg_llm_latency, 2),
         "baseline_mttr_seconds": round(avg_baseline, 2),
         "mttr_reduction_pct": round(reduction, 2),
         "total_cost_usd": round(total_cost, 6),
@@ -1219,12 +1227,6 @@ class AgentClient:
             except httpx.HTTPStatusError as exc:
                 last_error = exc
                 if exc.response.status_code == 404 and attempt < max_retries - 1:
-                    logger.debug(
-                        "Transient 404 for %s (attempt %d/%d); retrying in 0.5s",
-                        incident_id,
-                        attempt + 1,
-                        max_retries,
-                    )
                     await asyncio.sleep(0.5)
                     continue
                 raise

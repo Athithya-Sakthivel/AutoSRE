@@ -41,8 +41,14 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
 
+      # Pod-level security context. Defaults to empty for maximum compatibility.
+      # Override via .Values.podSecurityContext if you need fsGroup or other pod-level settings.
       securityContext:
+        {{- if .Values.podSecurityContext }}
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- else }}
+        {}
+        {{- end }}
 
       containers:
         - name: collector
@@ -50,8 +56,21 @@ spec:
           image: {{ include "otel-daemonset.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
 
+          # Container-level security context.
+          # IMPORTANT: The filelog receiver needs to read /var/log/pods which is owned by root
+          # with restrictive permissions (typically 0640). Running as root (UID 0) is required
+          # unless your cluster uses a different permission model.
+          # See: https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/33083
           securityContext:
+            {{- if .Values.containerSecurityContext }}
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+            {{- else }}
+            # Default: run as root to read pod logs from /var/log/pods
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            {{- end }}
 
           args:
             # Explicit configuration path used by the collector image.
@@ -147,6 +166,9 @@ spec:
             #
             # This is a read-only hostPath mount. The collector never writes
             # back to the node's Kubernetes log directory.
+            #
+            # IMPORTANT: These files are owned by root with restrictive permissions.
+            # The container must run as root (runAsUser: 0) to read them.
             - name: varlogpods
               mountPath: /var/log/pods
               readOnly: true

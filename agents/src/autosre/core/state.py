@@ -170,6 +170,7 @@ class AgentState(TypedDict, total=False):
     approval_wait_seconds: float  # Time spent waiting for human approval
     started_at: float
     status: str
+    llm_latency_seconds: float
 
 
 # ---------------------------------------------------------------------------
@@ -200,32 +201,11 @@ class SREContext:
 
 @dataclass
 class RunMetrics:
-    """Per-incident counters, mutated by the router and read by complete_node.
-
-    Not part of AgentState. Instantiated once per incident by
-    LangGraphRunner.run_incident and passed to every graph node via
-    config['configurable']['run_metrics'].
-
-    Backoff tracking:
-        record_backoff(seconds) is called by the router every time it
-        sleeps due to a rate-limit or transient error. complete_node
-        subtracts backoff_seconds from wall_clock to compute the honest
-        active_seconds (work time excluding provider waits).
-
-    LLM call tracking:
-        record_llm_call() is called on every physical litellm.acompletion
-        attempt. The router checks llm_call_count against
-        graph_context.max_llm_calls_per_incident and raises
-        LLMBudgetExhaustedError when the budget is exceeded.
-
-    Approval wait tracking:
-        record_approval_wait(seconds) is called by approve_node after
-        resume. complete_node subtracts approval_wait_seconds from
-        active_seconds so HITL wait time doesn't inflate MTTR.
-    """
+    """Per-incident counters, mutated by the router and read by complete_node."""
 
     backoff_seconds: float = 0.0
     approval_wait_seconds: float = 0.0
+    llm_latency_seconds: float = 0.0  # ← ADD THIS
     llm_call_count: int = 0
     llm_retry_count: int = 0
     llm_consecutive_failures: int = 0
@@ -239,6 +219,11 @@ class RunMetrics:
         """Accumulate time spent waiting for human approval."""
         if seconds > 0:
             self.approval_wait_seconds += seconds
+
+    def record_llm_latency(self, seconds: float) -> None:
+        """Accumulate time spent waiting for LLM API responses."""
+        if seconds > 0:
+            self.llm_latency_seconds += seconds
 
     def record_llm_call(self) -> None:
         """Count every LLM dispatch attempt (success or failure)."""
@@ -256,6 +241,7 @@ class RunMetrics:
         """Return the object to its initial state."""
         self.backoff_seconds = 0.0
         self.approval_wait_seconds = 0.0
+        self.llm_latency_seconds = 0.0
         self.llm_call_count = 0
         self.llm_retry_count = 0
         self.llm_consecutive_failures = 0

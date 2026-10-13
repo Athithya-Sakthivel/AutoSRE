@@ -5,7 +5,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Resolve to the agents/ directory regardless of the caller's CWD.
 _AGENTS_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_AGENTS_DIR))
 
@@ -28,6 +27,7 @@ def main() -> None:
     print(f"  Avg wall clock:       {m['avg_wall_clock_seconds']}s")
     print(f"  Avg backoff:          {m['avg_backoff_seconds']}s")
     print(f"  Avg approval wait:    {m.get('avg_approval_wait_seconds', 0.0)}s")
+    print(f"  Avg LLM latency:      {m.get('avg_llm_latency_seconds', 0.0)}s")
     print(f"  Baseline MTTR:        {m['baseline_mttr_seconds']}s")
     print(f"  MTTR reduction:       {m['mttr_reduction_pct']}%")
     print()
@@ -41,9 +41,11 @@ def main() -> None:
     if m["per_incident"]:
         header = (
             f"  {'ID':<10} {'Status':<12} {'Active':>8} {'Wall':>8} "
-            f"{'Backoff':>8} {'HITL':>7} {'Cost':>10}"
+            f"{'Backoff':>8} {'HITL':>7} {'LLM':>8} {'Cost':>10}"
         )
-        rule = f"  {'-' * 10} {'-' * 12} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 7} {'-' * 10}"
+        rule = (
+            f"  {'-' * 10} {'-' * 12} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 7} {'-' * 8} {'-' * 10}"
+        )
         print(header)
         print(rule)
         for inc in m["per_incident"]:
@@ -62,6 +64,7 @@ def main() -> None:
                 f"{inc['wall_clock_seconds']:>7.1f}s "
                 f"{inc['backoff_seconds']:>7.1f}s "
                 f"{inc.get('approval_wait_seconds', 0.0):>6.1f}s "
+                f"{inc.get('llm_latency_seconds', 0.0):>7.1f}s "
                 f"${inc['cost_usd']:>9.4f}"
             )
         print()
