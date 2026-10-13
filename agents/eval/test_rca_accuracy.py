@@ -49,6 +49,14 @@ from eval.conftest import (
 )
 
 # ---------------------------------------------------------------------------
+# Fast judge retry settings — reduced from defaults to avoid 300s+ hangs
+# ---------------------------------------------------------------------------
+
+_JUDGE_MAX_ATTEMPTS = 3
+_JUDGE_BASE_DELAY = 2.0
+_JUDGE_MAX_DELAY = 15.0
+
+# ---------------------------------------------------------------------------
 # RCA extraction helpers
 # ---------------------------------------------------------------------------
 
@@ -160,6 +168,9 @@ async def test_rca_faithfulness(
             metric,
             test_case,
             label=f"rca_faithfulness[{incident_id}]",
+            max_attempts=_JUDGE_MAX_ATTEMPTS,
+            base_delay=_JUDGE_BASE_DELAY,
+            max_delay=_JUDGE_MAX_DELAY,
         )
     except Exception as exc:
         # Judge model unavailable or API error - skip gracefully
@@ -232,6 +243,9 @@ async def test_rca_matches_ground_truth(
             metric,
             test_case,
             label=f"rca_ground_truth[{incident_id}]",
+            max_attempts=_JUDGE_MAX_ATTEMPTS,
+            base_delay=_JUDGE_BASE_DELAY,
+            max_delay=_JUDGE_MAX_DELAY,
         )
     except Exception as exc:
         pytest.skip(f"Judge model failed: {type(exc).__name__}: {str(exc)[:100]}")
@@ -294,6 +308,9 @@ async def test_rca_is_specific(
             metric,
             test_case,
             label=f"rca_specificity[{incident_id}]",
+            max_attempts=_JUDGE_MAX_ATTEMPTS,
+            base_delay=_JUDGE_BASE_DELAY,
+            max_delay=_JUDGE_MAX_DELAY,
         )
     except Exception as exc:
         pytest.skip(f"Judge model failed: {type(exc).__name__}: {str(exc)[:100]}")

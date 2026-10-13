@@ -163,19 +163,24 @@ resources:
     cpu: "${O2_DAEMONSET_CPU_LIMIT:-300m}"
     memory: "${O2_DAEMONSET_MEMORY_LIMIT:-256Mi}"
 
+# CRITICAL: The filelog receiver needs to read /var/log/pods which is owned
+# by root with restrictive permissions (typically 0640). Running as root (UID 0)
+# is required to collect pod logs. See:
+# https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/33083
 podSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 65534
-  runAsGroup: 65534
-  fsGroup: 65534
+  runAsNonRoot: false
+  runAsUser: 0
+  runAsGroup: 0
+  fsGroup: 0
   seccompProfile:
     type: RuntimeDefault
 
 containerSecurityContext:
   allowPrivilegeEscalation: false
   readOnlyRootFilesystem: true
-  runAsNonRoot: true
-  runAsUser: 65534
+  runAsNonRoot: false
+  runAsUser: 0
+  runAsGroup: 0
   capabilities:
     drop: ["ALL"]
 

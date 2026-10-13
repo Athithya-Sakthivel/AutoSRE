@@ -42,6 +42,16 @@ spec:
         - ports:
             - port: "5080"
               protocol: TCP
+    # OTel DaemonSet pushing node-local telemetry (logs + kubelet metrics)
+    # Pairs with egress policy: otel-daemonset-to-openobserve
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+            app.kubernetes.io/name: otel-daemonset
+      toPorts:
+        - ports:
+            - port: "5080"
+              protocol: TCP
     # External users (port-forward or Ingress to OpenObserve UI)
     - fromEntities:
         - host

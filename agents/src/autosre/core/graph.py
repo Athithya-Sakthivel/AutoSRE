@@ -5,6 +5,9 @@ The graph has 8 nodes:
 
 Conditional edges route based on state (hypothesis confidence, risk tier,
 approval result, verification result, and retry limits).
+
+Early exit: triage_node can route directly to complete for no-action
+categories (webhook_dedup, prohibited_action, false_positive).
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from autosre.core.graph_nodes import (
     route_after_approval,
     route_after_hypothesize,
     route_after_propose,
+    route_after_triage,
     route_after_verify,
     route_initial_phase,
     triage_node,
@@ -69,6 +73,7 @@ def compile_graph(
     builder.add_node(PHASE_VERIFY, verify_node)
     builder.add_node(PHASE_COMPLETE, complete_node)
 
+    # Initial routing from START
     builder.add_conditional_edges(
         START,
         route_initial_phase,
@@ -84,7 +89,16 @@ def compile_graph(
         },
     )
 
-    builder.add_edge(PHASE_TRIAGE, PHASE_INVESTIGATE)
+    # Triage can route to investigate (normal) or complete (early exit for no-action)
+    builder.add_conditional_edges(
+        PHASE_TRIAGE,
+        route_after_triage,
+        {
+            PHASE_INVESTIGATE: PHASE_INVESTIGATE,
+            PHASE_COMPLETE: PHASE_COMPLETE,
+        },
+    )
+
     builder.add_edge(PHASE_INVESTIGATE, PHASE_HYPOTHESIZE)
     builder.add_edge(PHASE_EXECUTE, PHASE_VERIFY)
     builder.add_edge(PHASE_COMPLETE, END)
@@ -132,3 +146,6 @@ def compile_graph(
     builder.validate()
 
     return builder.compile(checkpointer=checkpointer)
+
+
+__all__ = ["compile_graph", "CompiledGraph"]

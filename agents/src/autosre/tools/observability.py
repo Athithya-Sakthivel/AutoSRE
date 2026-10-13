@@ -229,8 +229,8 @@ class OpenObserveClient:
             }
         }
 
-        # URL includes the stream name: /api/{org}/{stream}/_search
-        url = f"/api/{self._org_id}/{effective_stream}/_search"
+        # URL includes the stream name: /api/{org}/{stream}/_search?type=logs
+        url = f"/api/{self._org_id}/{effective_stream}/_search?type=logs"
 
         try:
             resp = await session.post(url, json=payload)

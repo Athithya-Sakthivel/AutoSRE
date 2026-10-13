@@ -68,6 +68,7 @@ O2_STREAM_API_LOCAL_PORT="${O2_STREAM_API_LOCAL_PORT:-15081}"
 O2_PVC_SIZE="${O2_PVC_SIZE:-20Gi}"
 O2_DATA_DIR="${O2_DATA_DIR:-/data/openobserve}"
 O2_RETENTION_DAYS="${O2_RETENTION_DAYS:-30}"
+O2_INGEST_ALLOWED_UPTO="${O2_INGEST_ALLOWED_UPTO:-720}"  # 30 days in hours
 
 # Resource configuration.
 O2_CPU_REQUEST="${O2_CPU_REQUEST:-1}"
@@ -300,6 +301,8 @@ secrets:
 
 # OpenObserve local-disk configuration.
 # No S3/Azure storage is configured by this chart.
+# OpenObserve local-disk configuration.
+# No S3/Azure storage is configured by this chart.
 config:
   ZO_LOCAL_MODE: "true"
   ZO_LOCAL_MODE_STORAGE: "disk"
@@ -317,6 +320,13 @@ config:
   ZO_COMPACT_FAST_MODE: "${O2_COMPACT_FAST_MODE}"
   ZO_COMPACT_MAX_FILE_SIZE: "${O2_COMPACT_MAX_FILE_SIZE}"
   ZO_COMPACT_DATA_RETENTION_DAYS: "${O2_RETENTION_DAYS}"
+
+  # Allow ingestion of logs up to 30 days old. The OTel daemonset filelog
+  # receiver with start_at=beginning reads historical logs from pods that
+  # have been running for days. Without this, OpenObserve rejects any log
+  # older than the default 5-hour window with "Too old data" errors.
+  # Value is in hours. 720 hours = 30 days (matches retention).
+  ZO_INGEST_ALLOWED_UPTO: "${O2_INGEST_ALLOWED_UPTO}"
 
   ZO_HEALTH_CHECK_ENABLED: "true"
   ZO_TELEMETRY: "false"

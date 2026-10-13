@@ -1,0 +1,37 @@
+{{- if .Values.networkPolicies.enabled }}
+# =============================================================================
+# otel-daemonset → openobserve (direct telemetry export)
+#
+# The daemonset config exports metrics and logs directly to OpenObserve's
+# OTLP HTTP endpoint (/api/default/v1/logs and /api/default/v1/metrics).
+# This bypasses the otel-gateway to reduce latency for node-local telemetry.
+#
+# Without this policy, the default-deny rule blocks all traffic from the
+# daemonset to openobserve, causing "context deadline exceeded" errors in
+# the exporter retry logs.
+#
+# NOTE: pod uses `app.kubernetes.io/name: open-observe-minimal`
+# =============================================================================
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: otel-daemonset-to-openobserve
+  namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+  labels:
+    app.kubernetes.io/part-of: autosre-cilium
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: otel-daemonset
+  egress:
+    # Direct export to OpenObserve OTLP HTTP API
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicies.openobserveNamespace }}
+            app.kubernetes.io/name: open-observe-minimal
+      toPorts:
+        - ports:
+            - port: "5080"
+              protocol: TCP
+{{- end }}

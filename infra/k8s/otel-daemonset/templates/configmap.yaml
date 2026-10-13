@@ -153,10 +153,10 @@ data:
         include_file_path: true
         include_file_name: false
 
-        # Read existing files on first startup. File offsets are tracked by the
-        # file_storage extension below so normal collector restarts do not need
-        # to replay the same offsets from scratch.
-        start_at: beginning
+        # Start reading new log files from the end to avoid ingesting historical logs.
+        # The file_storage extension below persists file offsets so normal collector
+        # restarts can resume from saved checkpoints without re-ingesting logs.
+        start_at: end
         max_log_size: 1MiB
 
         # Persist reader checkpoints through the collector's storage extension.

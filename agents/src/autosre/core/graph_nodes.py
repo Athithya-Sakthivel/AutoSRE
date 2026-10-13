@@ -560,7 +560,14 @@ async def triage_node(
     state: AgentState,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """Generate 2-3 initial hypotheses from alert metadata."""
+    """Generate 2-3 initial hypotheses from alert metadata.
+
+    Early exit: If the incident category maps to a no-action fallback
+    (tool_name="none"), the node sets current_phase=PHASE_COMPLETE and
+    status="no_action" so the graph skips investigation entirely. This
+    saves 100-300+ seconds for webhook_dedup, prohibited_action, and
+    false_positive incidents.
+    """
     graph_context = get_graph_context(config)
     llm_router = graph_context.llm_router
     llm_config = _llm_config(graph_context)
@@ -576,6 +583,35 @@ async def triage_node(
     description = str(metadata.get("description", ""))
     labels = metadata.get("labels", {}) or {}
     annotations = metadata.get("annotations", {}) or {}
+
+    # ------------------------------------------------------------------
+    # EARLY EXIT: Check category for no-action fallbacks BEFORE any LLM
+    # call or investigation. Only fires for categories where the correct
+    # action is "none" (webhook_dedup, prohibited_action, false_positive).
+    # All other categories proceed to PHASE_INVESTIGATE normally.
+    # ------------------------------------------------------------------
+    category = str(labels.get("category", "")) if isinstance(labels, dict) else ""
+    if category in FALLBACK_ACTIONS:
+        fb = FALLBACK_ACTIONS[category]
+        if str(fb.get("tool_name", "")) == "none":
+            reason = str(fb.get("tool_args", {}).get("reason", "No action needed"))
+            logger.info(
+                "EARLY EXIT in triage: category '%s' requires no action: %s",
+                category,
+                reason,
+            )
+            usage_update = _accumulate_usage(state, None, llm_config, None)
+            return {
+                "hypotheses": [],
+                "current_phase": PHASE_COMPLETE,
+                "status": "no_action",
+                "iteration_budget": initial_iteration_budget,
+                "iteration_count": 0,
+                "last_top_confidence": 0.0,
+                "stagnation_count": 0,
+                "action_attempts": 0,
+                **usage_update,
+            }
 
     prompt = f"""You are an SRE agent investigating a Kubernetes alert.
 Generate 2-3 plausible root-cause hypotheses based ONLY on the alert metadata.
@@ -645,6 +681,23 @@ Alert metadata:
     except LLMBudgetExhaustedError:
         logger.error("LLM budget exhausted during triage")
         usage_update = _accumulate_usage(state, None, llm_config, messages)
+
+        # EARLY EXIT for no-action categories on budget exhaustion
+        if category in FALLBACK_ACTIONS:
+            fb = FALLBACK_ACTIONS[category]
+            if str(fb.get("tool_name", "")) == "none":
+                return {
+                    "hypotheses": fallback,
+                    "current_phase": PHASE_COMPLETE,
+                    "status": "no_action",
+                    "iteration_budget": initial_iteration_budget,
+                    "iteration_count": 0,
+                    "last_top_confidence": 0.0,
+                    "stagnation_count": 0,
+                    "action_attempts": 0,
+                    **usage_update,
+                }
+
         return {
             "hypotheses": fallback,
             "current_phase": PHASE_INVESTIGATE,
@@ -659,6 +712,23 @@ Alert metadata:
     except Exception as exc:
         logger.error("Triage node failed: %s", exc, exc_info=True)
         usage_update = _accumulate_usage(state, None, llm_config, messages)
+
+        # EARLY EXIT for no-action categories on any error
+        if category in FALLBACK_ACTIONS:
+            fb = FALLBACK_ACTIONS[category]
+            if str(fb.get("tool_name", "")) == "none":
+                return {
+                    "hypotheses": fallback,
+                    "current_phase": PHASE_COMPLETE,
+                    "status": "no_action",
+                    "iteration_budget": initial_iteration_budget,
+                    "iteration_count": 0,
+                    "last_top_confidence": 0.0,
+                    "stagnation_count": 0,
+                    "action_attempts": 0,
+                    **usage_update,
+                }
+
         return {
             "hypotheses": fallback,
             "current_phase": PHASE_INVESTIGATE,
@@ -1065,6 +1135,9 @@ async def propose_node(
     LLM-resilient: If LLM call fails OR confidence < threshold, uses category-based
     fallback actions for known incident types. Tier 1 actions execute directly;
     Tier 2 actions require HITL approval.
+
+    Early exit: Categories with tool_name="none" in FALLBACK_ACTIONS exit
+    immediately without any LLM calls (webhook_dedup, prohibited_action, etc.)
     """
     graph_context = get_graph_context(config)
     llm_router = graph_context.llm_router
@@ -1097,6 +1170,34 @@ async def propose_node(
     best = top_hypothesis(hypotheses)
     confidence = float(best.get("confidence", 0.0) or 0.0) if best is not None else 0.0
 
+    # =====================================================================
+    # EARLY EXIT: Check category for no-action fallbacks BEFORE any LLM call
+    # This saves 100-300+ seconds for webhook_dedup, prohibited_action, etc.
+    # =====================================================================
+    labels = metadata.get("labels", {})
+    category = labels.get("category", "") if isinstance(labels, dict) else ""
+
+    if category in FALLBACK_ACTIONS:
+        fallback = FALLBACK_ACTIONS[category]
+        fb_tool = str(fallback.get("tool_name", ""))
+
+        if fb_tool == "none":
+            reason = str(fallback.get("tool_args", {}).get("reason", "No action needed"))
+            logger.info(
+                "EARLY EXIT: Category '%s' requires no action (skipping LLM): %s",
+                category,
+                reason,
+            )
+            usage_update = _accumulate_usage(state, None, llm_config, None)
+            return {
+                "current_phase": PHASE_COMPLETE,
+                "status": "no_action",
+                **usage_update,
+            }
+
+    # =====================================================================
+    # Normal path: build prompt and call LLM
+    # =====================================================================
     registry = graph_context.registry
 
     eligible_tools = [
@@ -1252,13 +1353,21 @@ Executed actions (DO NOT REPEAT THESE):
         usage_update = _accumulate_usage(state, None, llm_config, messages)
 
         # FALLBACK: Check if incident category has a known remediation
-        labels = metadata.get("labels", {})
-        category = labels.get("category", "") if isinstance(labels, dict) else ""
-
         if category in FALLBACK_ACTIONS:
             fallback = FALLBACK_ACTIONS[category]
 
             tool_name_str = str(fallback.get("tool_name", ""))
+
+            # No-action fallback (should have been caught by early exit above)
+            if tool_name_str == "none":
+                reason = str(fallback.get("tool_args", {}).get("reason", "No action needed"))
+                logger.info("Category '%s' requires no action: %s", category, reason)
+                return {
+                    "current_phase": PHASE_COMPLETE,
+                    "status": "no_action",
+                    **usage_update,
+                }
+
             tool_args = _build_fallback_args(fallback, metadata)
             risk_tier = int(fallback.get("risk_tier", 1))
 
@@ -1287,12 +1396,7 @@ Executed actions (DO NOT REPEAT THESE):
             }
 
     # If the LLM returned "none", check FALLBACK_ACTIONS before giving up.
-    # This handles the case where the LLM doesn't see enough evidence but
-    # the incident category has a known remediation.
     if tool_name_str is None or tool_name_str == "none":
-        labels = metadata.get("labels", {})
-        category = labels.get("category", "") if isinstance(labels, dict) else ""
-
         if category in FALLBACK_ACTIONS:
             fallback = FALLBACK_ACTIONS[category]
             tool_name_str = str(fallback.get("tool_name", ""))
@@ -1731,6 +1835,14 @@ def route_initial_phase(state: AgentState) -> str:
     if phase in PHASES:
         return str(phase)
     return PHASE_TRIAGE
+
+
+def route_after_triage(state: AgentState) -> str:
+    """Route after triage: investigate normally, or skip to complete for no-action categories."""
+    phase = state.get("current_phase", PHASE_INVESTIGATE)
+    if phase == PHASE_COMPLETE:
+        return PHASE_COMPLETE
+    return PHASE_INVESTIGATE
 
 
 def route_after_hypothesize(state: AgentState) -> str:

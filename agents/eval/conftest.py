@@ -1,54 +1,44 @@
 """Evaluation harness: dataset loading, agent client, chaos injection, and shared fixtures.
 
 ## Purpose
-
 Drives the AutoSRE agent through every incident in the dataset, captures
 one result per incident, and provides aggregate metrics. Runs as a pytest
 session against a live agent at ``AGENT_BASE_URL``.
 
 ## Incident selection
-
     EVAL_INCIDENT_IDS=INC-001,INC-003,INC-014    Run specific incidents
     (unset)                                      Run every incident
 
 ## Result persistence
-
     Each completed incident saves to ``eval/results/<incident_id>/result.json``.
     Subsequent runs skip incidents with existing results (resume mode).
     ``EVAL_FORCE_RERUN=1`` bypasses disk results but re-triggers each
     incident at most once per pytest session (see session cache below).
 
 ## Session cache
-
     A module-level ``_session_cache`` keyed by incident_id prevents the
     same incident from being triggered multiple times across tests in
     one pytest session. The cache is process-local and safe only for
     sequential pytest runs.
 
 ## Chaos injection
-
     When ``EVAL_APPLY_CHAOS=1`` (default), the harness calls
     ``chaos/incidents.sh`` before each incident to inject real faults
     into the Kubernetes cluster. The chaos script:
-
     1. ``reset`` — cleans all chaos state before each incident
     2. ``trigger`` — injects the specific fault for the incident
-
     Chaos scripts are best-effort: if a script fails, the eval continues
     against the healthy cluster and the agent correctly reports no_action.
 
 ## Evidence injection
-
     Each incident's ``injected_context`` field from the dataset is sent
     as annotations in the webhook payload, providing supplementary
     evidence alongside the real cluster state observed by the agent.
 
 ## Judge
-
     RCA tests use DeepEval with an LLM judge. The judge model uses the
     canonical ``<provider>/<model>`` form and is passed through to
     LiteLLM verbatim. For example: ``gemini/gemini-3.8-flash``.
-
     Retry and backoff settings for the judge are read from
     ``settings.llm`` so the judge and the agent share the same
     transient-error handling policy.
@@ -79,11 +69,7 @@ import pytest
 # ---------------------------------------------------------------------------
 # Pydantic ReadOnly TypedDict warning from DeepEval/LiteLLM internals.
 # PEP 705 ReadOnly is typing-only; no runtime enforcement exists.
-_warnings.filterwarnings(
-    "ignore",
-    message=r".*ReadOnly.*",
-    category=UserWarning,
-)
+_warnings.filterwarnings("ignore", message=r".*ReadOnly.*", category=UserWarning)
 _warnings.filterwarnings(
     "ignore",
     message=r".*will not protect items from any mutation.*",
@@ -95,6 +81,7 @@ _warnings.filterwarnings(
     message=r".*temperature.*top_p.*top_k.*",
     category=DeprecationWarning,
 )
+
 # Drop unsupported parameters globally to prevent hard 400 errors for
 # parameters like temperature, top_p, top_k which Gemini 3+ has deprecated.
 # NOTE: This does NOT fix G-Eval logprobs — G-Eval uses a separate code path
@@ -107,7 +94,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-
 _EVAL_DIR = Path(__file__).parent
 _AGENTS_DIR = _EVAL_DIR.parent
 DATASET_PATH = _EVAL_DIR / "dataset" / "AutoSRE-Dataset-v3.json"
@@ -117,19 +103,15 @@ CHAOS_SCRIPT = _AGENTS_DIR / "chaos" / "incidents.sh"
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-
 AGENT_BASE_URL = os.getenv("AGENT_BASE_URL", "http://localhost:8000")
 AGENT_WEBHOOK_SECRET = os.getenv("ALERT_WEBHOOK_SECRET", "test-secret")
 
-_DEFAULT_DELAY_SECONDS = 8.0
+_DEFAULT_DELAY_SECONDS = 3.0
 _CLIENT_TIMEOUT_SECONDS = 700.0
-_CHAOS_TIMEOUT_SECONDS = 180.0
-
-_MAX_TRIGGER_RETRIES = 4
-_TRIGGER_RETRY_BASE_SECONDS = 10.0
-
+_CHAOS_TIMEOUT_SECONDS = 60.0
+_MAX_TRIGGER_RETRIES = 2
+_TRIGGER_RETRY_BASE_SECONDS = 5.0
 _TERMINAL_STATUSES = frozenset({"resolved", "failed", "no_action", "blocked"})
-
 _PROHIBITED_TOOLS = frozenset({"delete_namespace", "flush_all", "drop_table"})
 
 # Incidents that are webhook-only and need no chaos injection.
@@ -163,7 +145,6 @@ def _parse_delay_seconds() -> float:
 
 
 DELAY_BETWEEN_INCIDENTS = _parse_delay_seconds()
-
 FORCE_RERUN = os.getenv("EVAL_FORCE_RERUN", "0") == "1"
 AUTO_APPROVE = os.getenv("EVAL_AUTO_APPROVE", "1") != "0"
 APPLY_CHAOS = os.getenv("EVAL_APPLY_CHAOS", "1") == "1"
@@ -172,39 +153,28 @@ APPLY_CHAOS = os.getenv("EVAL_APPLY_CHAOS", "1") == "1"
 # ---------------------------------------------------------------------------
 # Dataset loading
 # ---------------------------------------------------------------------------
-
-
 def _load_dataset() -> list[dict[str, Any]]:
     if not DATASET_PATH.is_file():
         raise FileNotFoundError(f"Dataset not found at {DATASET_PATH}")
-
     with DATASET_PATH.open("r", encoding="utf-8") as fh:
         raw = json.load(fh)
-
     if not isinstance(raw, dict):
         raise ValueError(f"Dataset root must be a JSON object, got {type(raw).__name__}")
-
     incidents = raw.get("incidents")
     if not isinstance(incidents, list):
         raise ValueError("Dataset must contain an 'incidents' list")
-
     validated: list[dict[str, Any]] = []
     seen: set[str] = set()
-
     for index, incident in enumerate(incidents):
         if not isinstance(incident, dict):
             raise ValueError(f"Dataset incident at index {index} must be an object")
-
         incident_id = incident.get("id")
         if not isinstance(incident_id, str) or not incident_id.strip():
             raise ValueError(f"Dataset incident at index {index} has an invalid 'id'")
-
         if incident_id in seen:
             raise ValueError(f"Duplicate incident ID in dataset: {incident_id}")
-
         seen.add(incident_id)
         validated.append(incident)
-
     return validated
 
 
@@ -232,8 +202,6 @@ def incident_by_id(incident_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Result persistence
 # ---------------------------------------------------------------------------
-
-
 def _result_path(incident_id: str) -> Path:
     return RESULTS_DIR / incident_id / "result.json"
 
@@ -250,13 +218,11 @@ def save_result(
 ) -> Path:
     result_dir = RESULTS_DIR / incident_id
     result_dir.mkdir(parents=True, exist_ok=True)
-
     output: dict[str, Any] = {
         "incident_id": incident_id,
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "result": result,
     }
-
     if dataset_incident is not None:
         output["dataset"] = {
             "alert_name": dataset_incident.get("alert_name", ""),
@@ -270,11 +236,9 @@ def save_result(
             "ground_truth": dataset_incident.get("ground_truth", {}),
             "evaluation_criteria": dataset_incident.get("evaluation_criteria", {}),
         }
-
     result_file = result_dir / "result.json"
     with result_file.open("w", encoding="utf-8") as fh:
         json.dump(output, fh, indent=2, ensure_ascii=False, default=str)
-
     logger.info("Saved result for %s to %s", incident_id, result_file)
     return result_file
 
@@ -283,14 +247,12 @@ def load_result(incident_id: str) -> dict[str, Any] | None:
     result_file = _result_path(incident_id)
     if not result_file.is_file():
         return None
-
     try:
         with result_file.open("r", encoding="utf-8") as fh:
             data = json.load(fh)
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("Failed to load result %s: %s", result_file, exc)
         return None
-
     if not isinstance(data, dict):
         logger.warning(
             "Result file %s is not a JSON object (got %s)",
@@ -298,42 +260,33 @@ def load_result(incident_id: str) -> dict[str, Any] | None:
             type(data).__name__,
         )
         return None
-
     return data
 
 
 def load_all_results() -> list[dict[str, Any]]:
     if not RESULTS_DIR.is_dir():
         return []
-
     results: list[dict[str, Any]] = []
-
     for incident_dir in sorted(RESULTS_DIR.iterdir()):
         if not incident_dir.is_dir():
             continue
-
         result_file = incident_dir / "result.json"
         if not result_file.is_file():
             continue
-
         try:
             with result_file.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Failed to load %s: %s", result_file, exc)
             continue
-
         if isinstance(data, dict):
             results.append(data)
-
     return results
 
 
 # ---------------------------------------------------------------------------
 # Incident selection
 # ---------------------------------------------------------------------------
-
-
 def _selected_ids() -> list[str] | None:
     raw = os.getenv("EVAL_INCIDENT_IDS", "").strip()
     if not raw:
@@ -345,7 +298,6 @@ def _selected_ids() -> list[str] | None:
 def _runnable_ids() -> list[str]:
     selected = _selected_ids()
     all_ids = all_incident_ids()
-
     if selected is None:
         candidates = all_ids
     else:
@@ -356,7 +308,6 @@ def _runnable_ids() -> list[str]:
                 f"Available: {', '.join(all_ids)}"
             )
         candidates = selected
-
     if FORCE_RERUN:
         runnable = list(candidates)
     else:
@@ -367,14 +318,12 @@ def _runnable_ids() -> list[str]:
                 "Skipping %d incident(s) with existing results (set EVAL_FORCE_RERUN=1 to re-run)",
                 skipped,
             )
-
     if not runnable and candidates:
         raise RuntimeError(
             "No incidents to run: every selected incident already has a "
             "result. Set EVAL_FORCE_RERUN=1 to force re-execution, or "
             "delete eval/results/<INCIDENT_ID>/ to re-run specific cases."
         )
-
     return runnable
 
 
@@ -385,7 +334,6 @@ def incident_ids() -> list[str]:
 # ---------------------------------------------------------------------------
 # Session cache
 # ---------------------------------------------------------------------------
-
 _session_cache: dict[str, dict[str, Any]] = {}
 _session_cache_lock = threading.Lock()
 
@@ -408,23 +356,22 @@ def _cache_clear() -> None:
 # ---------------------------------------------------------------------------
 # Chaos injection — calls agents/chaos/incidents.sh
 # ---------------------------------------------------------------------------
-
-
 async def _run_chaos(incident_id: str, action: str) -> bool:
     """Run chaos/incidents.sh <INCIDENT_ID> <action>.
 
     Returns True on exit code 0. Never raises: chaos failures are logged
     and return False so the eval can continue against a healthy cluster.
     """
+    label = incident_id or "global"
+    print(f"  [chaos] {action} {label}...", end="", flush=True)
     if not CHAOS_SCRIPT.is_file():
+        print(" SKIP (no script)", flush=True)
         logger.debug("Chaos script not found: %s", CHAOS_SCRIPT)
         return False
-
     args = ["bash", str(CHAOS_SCRIPT)]
     if incident_id:
         args.append(incident_id)
     args.append(action)
-
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -432,15 +379,16 @@ async def _run_chaos(incident_id: str, action: str) -> bool:
             stderr=asyncio.subprocess.PIPE,
         )
     except Exception as exc:
+        print(f" FAIL ({exc})", flush=True)
         logger.warning("Failed to spawn chaos script: %s", exc)
         return False
-
     try:
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(),
             timeout=_CHAOS_TIMEOUT_SECONDS,
         )
     except TimeoutError:
+        print(f" TIMEOUT ({_CHAOS_TIMEOUT_SECONDS}s)", flush=True)
         logger.warning(
             "Chaos script timed out after %ds: %s %s",
             _CHAOS_TIMEOUT_SECONDS,
@@ -449,10 +397,9 @@ async def _run_chaos(incident_id: str, action: str) -> bool:
         )
         proc.kill()
         return False
-
     stderr_text = stderr.decode("utf-8", errors="replace").strip()
-
     if proc.returncode != 0:
+        print(f" FAIL (exit {proc.returncode})", flush=True)
         logger.warning(
             "Chaos %s %s failed (exit %d): %s",
             incident_id or "(global)",
@@ -461,11 +408,10 @@ async def _run_chaos(incident_id: str, action: str) -> bool:
             stderr_text,
         )
         return False
-
     if stderr_text:
         for line in stderr_text.splitlines():
             logger.info("chaos: %s", line)
-
+    print(" OK", flush=True)
     return True
 
 
@@ -478,12 +424,10 @@ async def _apply_chaos_trigger(incident: dict[str, Any]) -> None:
     if not APPLY_CHAOS:
         logger.debug("Chaos injection disabled (EVAL_APPLY_CHAOS=0)")
         return
-
     incident_id = incident["id"]
     if incident_id in _NO_CHAOS_INCIDENTS:
         logger.debug("Skipping chaos for webhook-only incident %s", incident_id)
         return
-
     ok = await _run_chaos(incident_id, "trigger")
     if not ok:
         logger.warning(
@@ -507,8 +451,6 @@ async def _reset_chaos() -> None:
 # ---------------------------------------------------------------------------
 # Aggregate metrics
 # ---------------------------------------------------------------------------
-
-
 def _safe_float(value: Any, default: float = 0.0) -> float:
     if value is None:
         return default
@@ -530,7 +472,6 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 def compute_aggregate_metrics() -> dict[str, Any]:
     results = load_all_results()
-
     if not results:
         return {
             "total_incidents": 0,
@@ -557,14 +498,12 @@ def compute_aggregate_metrics() -> dict[str, Any]:
     failed = 0
     no_action = 0
     blocked = 0
-
     active_times: list[float] = []
     wall_times: list[float] = []
     backoff_times: list[float] = []
     approval_wait_times: list[float] = []
     llm_latency_times: list[float] = []
     baselines: list[float] = []
-
     total_cost = 0.0
     total_tokens = 0
     safety_violations = 0
@@ -574,12 +513,9 @@ def compute_aggregate_metrics() -> dict[str, Any]:
         incident_id = entry.get("incident_id", "unknown")
         report = entry.get("result") or {}
         dataset = entry.get("dataset") or {}
-
         if not isinstance(report, dict):
             report = {}
-
         status = str(report.get("status", "unknown"))
-
         if status == "resolved":
             resolved += 1
         elif status == "failed":
@@ -611,7 +547,6 @@ def compute_aggregate_metrics() -> dict[str, Any]:
                 approval_wait_times.append(approval_wait)
             if llm_latency >= 0:
                 llm_latency_times.append(llm_latency)
-
             baseline = _safe_float(dataset.get("baseline_mttr_seconds"), 0.0)
             if baseline > 0:
                 baselines.append(baseline)
@@ -647,9 +582,7 @@ def compute_aggregate_metrics() -> dict[str, Any]:
     )
     avg_llm_latency = sum(llm_latency_times) / len(llm_latency_times) if llm_latency_times else 0.0
     avg_baseline = sum(baselines) / len(baselines) if baselines else 0.0
-
     reduction = ((avg_baseline - avg_active) / avg_baseline) * 100.0 if avg_baseline > 0 else 0.0
-
     total = len(results)
 
     return {
@@ -677,35 +610,22 @@ def compute_aggregate_metrics() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Incident context for the RCA judge
 # ---------------------------------------------------------------------------
-
-
 def build_incident_context(incident: dict[str, Any]) -> list[str]:
     context: list[str] = []
-
-    for field in (
-        "alert_name",
-        "service",
-        "namespace",
-        "severity",
-        "category",
-    ):
+    for field in ("alert_name", "service", "namespace", "severity", "category"):
         value = incident.get(field)
         if value not in (None, ""):
             context.append(f"{field}: {value}")
-
     for field in ("labels", "injected_context"):
         value = incident.get(field)
         if value not in (None, "", {}, []):
             context.append(f"{field}: {json.dumps(value, ensure_ascii=False, sort_keys=True)}")
-
     return context
 
 
 # ---------------------------------------------------------------------------
 # Judge
 # ---------------------------------------------------------------------------
-
-
 def _judge_config() -> tuple[str, str | None, str]:
     """Return (model, base_url_or_None, api_key) for the DeepEval judge.
 
@@ -721,18 +641,14 @@ def _judge_config() -> tuple[str, str | None, str]:
 
     settings = get_settings()
     judge = settings.eval
-
     model = judge.judge_model or "gemini/gemini-3.5-flash-lite"
-
     key_secret = judge.judge_api_key or settings.llm.api_key
     api_key = (
         key_secret.get_secret_value()
         if key_secret is not None
         else os.getenv("AUTOSRE_LLM__API_KEY", "")
     )
-
     base_url = judge.judge_base_url
-
     return model, base_url, api_key
 
 
@@ -752,17 +668,14 @@ def build_judge() -> Any:
     except Exception as exc:
         logger.warning("Judge config unavailable: %s", exc)
         return None
-
     if not api_key:
         logger.warning("Judge disabled: no API key resolved")
         return None
-
     try:
         from deepeval.models import LiteLLMModel
     except ImportError:
         logger.warning("deepeval is not installed; RCA tests will skip")
         return None
-
     kwargs: dict[str, Any] = {
         "model": model,
         "api_key": api_key,
@@ -773,7 +686,6 @@ def build_judge() -> Any:
     }
     if base_url is not None:
         kwargs["base_url"] = base_url
-
     try:
         return LiteLLMModel(**kwargs)
     except Exception as exc:
@@ -784,14 +696,9 @@ def build_judge() -> Any:
 # ---------------------------------------------------------------------------
 # Server availability
 # ---------------------------------------------------------------------------
-
-
 def check_server_available() -> bool:
     try:
-        response = httpx.get(
-            f"{AGENT_BASE_URL.rstrip('/')}/healthz",
-            timeout=2.0,
-        )
+        response = httpx.get(f"{AGENT_BASE_URL.rstrip('/')}/healthz", timeout=2.0)
         return response.status_code == 200
     except Exception:
         return False
@@ -807,13 +714,11 @@ def _extract_status_code(exc: BaseException) -> int | None:
     status_code = getattr(exc, "status_code", None)
     if isinstance(status_code, int):
         return status_code
-
     response = getattr(exc, "response", None)
     if response is not None:
         response_status = getattr(response, "status_code", None)
         if isinstance(response_status, int):
             return response_status
-
     return None
 
 
@@ -829,11 +734,9 @@ def is_retryable_error(exc: BaseException) -> bool:
     """
     if is_daily_quota_error(exc):
         return False
-
     status_code = _extract_status_code(exc)
     if status_code is not None and status_code in _RETRYABLE_STATUS_CODES:
         return True
-
     error_text = str(exc).lower()
     return (
         "rate limit" in error_text
@@ -859,11 +762,7 @@ def is_daily_quota_error(exc: BaseException) -> bool:
 # ``is_rate_limit_error`` from earlier versions continue to work.
 is_rate_limit_error = is_retryable_error
 
-
-_RETRY_AFTER_RE = re.compile(
-    r"try again in ([\d.]+)\s*s",
-    re.IGNORECASE,
-)
+_RETRY_AFTER_RE = re.compile(r"try again in ([\d.]+)\s*s", re.IGNORECASE)
 
 
 def parse_retry_after(error_text: str) -> float | None:
@@ -875,7 +774,6 @@ def parse_retry_after(error_text: str) -> float | None:
     match = _RETRY_AFTER_RE.search(error_text)
     if not match:
         return None
-
     try:
         return float(match.group(1))
     except TypeError, ValueError:
@@ -944,7 +842,6 @@ async def measure_metric_with_retry(
         Exception: Any non-retryable error, propagated unchanged.
     """
     settings_initial, settings_max, settings_retries = _resolve_backoff_settings()
-
     effective_initial = base_delay if base_delay is not None else settings_initial
     effective_max = max_delay if max_delay is not None else settings_max
     effective_attempts = max_attempts if max_attempts is not None else (settings_retries + 1)
@@ -957,7 +854,6 @@ async def measure_metric_with_retry(
         raise ValueError("max_delay must be > 0")
 
     last_error: BaseException | None = None
-
     for attempt in range(effective_attempts):
         try:
             score = await metric.a_measure(test_case)
@@ -967,27 +863,21 @@ async def measure_metric_with_retry(
             return numeric
         except Exception as exc:
             last_error = exc
-
             # Daily quota exhausted: fast-fail.
             if is_daily_quota_error(exc):
                 raise RateLimitError(f"{label}: daily quota exhausted: {exc}") from exc
-
             # Non-retryable error: propagate immediately.
             if not is_retryable_error(exc):
                 raise
-
             # Last attempt failed: budget exhausted.
             if attempt == effective_attempts - 1:
                 break
-
             exp_delay = effective_initial * (2**attempt)
-
             hint = parse_retry_after(str(exc))
             if hint is not None:
                 delay = min(max(exp_delay, hint + 1.0), effective_max)
             else:
                 delay = min(exp_delay, effective_max)
-
             logger.warning(
                 "%s transient error (attempt %d/%d); waiting %.1fs: %s",
                 label,
@@ -1007,17 +897,14 @@ async def measure_metric_with_retry(
 # ---------------------------------------------------------------------------
 # Rate-limit delay
 # ---------------------------------------------------------------------------
-
 _last_trigger_time: float = 0.0
 _last_trigger_lock = threading.Lock()
 
 
 async def _rate_limit_delay() -> None:
     global _last_trigger_time
-
     if DELAY_BETWEEN_INCIDENTS <= 0:
         return
-
     with _last_trigger_lock:
         now = time.monotonic()
         elapsed = now - _last_trigger_time
@@ -1026,7 +913,6 @@ async def _rate_limit_delay() -> None:
         else:
             sleep_time = 0.0
         _last_trigger_time = now + sleep_time
-
     if sleep_time > 0:
         logger.info("Rate-limit delay: sleeping %.1fs", sleep_time)
         await asyncio.sleep(sleep_time)
@@ -1035,8 +921,6 @@ async def _rate_limit_delay() -> None:
 # ---------------------------------------------------------------------------
 # Agent client
 # ---------------------------------------------------------------------------
-
-
 class AgentClient:
     """HTTP client for the AutoSRE agent with HMAC-signed webhook calls."""
 
@@ -1048,7 +932,6 @@ class AgentClient:
     ) -> None:
         if timeout <= 0:
             raise ValueError("timeout must be greater than zero")
-
         self.base_url = base_url.rstrip("/")
         self.webhook_secret = webhook_secret
         self.timeout = timeout
@@ -1080,7 +963,6 @@ class AgentClient:
         request_timeout = self.timeout if timeout is None else timeout
         if request_timeout <= 0:
             raise TimeoutError("No request time remaining")
-
         async with httpx.AsyncClient(timeout=request_timeout) as client:
             response = await client.request(
                 method,
@@ -1088,12 +970,10 @@ class AgentClient:
                 content=payload,
                 headers=headers,
             )
-
         if response.status_code == 429:
             retry_after = response.headers.get("retry-after")
             suffix = f"; retry-after={retry_after}s" if retry_after else ""
             raise RateLimitError(f"AutoSRE rate-limited {method} {path}{suffix}")
-
         if response.status_code == 422:
             try:
                 body = response.json()
@@ -1104,13 +984,7 @@ class AgentClient:
                     json.dumps(body, indent=2, default=str),
                 )
             except Exception:
-                logger.error(
-                    "Validation error %s %s: %s",
-                    method,
-                    path,
-                    response.text,
-                )
-
+                logger.error("Validation error %s %s: %s", method, path, response.text)
         response.raise_for_status()
         return self._json_object(response)
 
@@ -1122,24 +996,20 @@ class AgentClient:
         real cluster state observed by its investigation tools.
         """
         incident_id = incident["id"]
-
         description = (
             incident.get("description")
             or incident.get("alert_description")
             or incident.get("summary")
             or ""
         )
-
         injected_context = incident.get("injected_context") or {}
         if not isinstance(injected_context, dict):
             injected_context = {"context": str(injected_context)}
-
         annotations = {str(k): str(v) for k, v in injected_context.items()}
 
         raw_labels = incident.get("labels") or {}
         if not isinstance(raw_labels, dict):
             raw_labels = {}
-
         labels: dict[str, str] = {str(k): str(v) for k, v in raw_labels.items()}
         labels["eval_id"] = incident_id
         labels["category"] = str(incident.get("category") or "unknown")
@@ -1159,14 +1029,12 @@ class AgentClient:
             "labels": labels,
             "annotations": annotations,
         }
-
         payload = json.dumps(
             alert_payload,
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
-
         signature = self._sign(payload)
         headers = {
             "Content-Type": "application/json",
@@ -1174,7 +1042,6 @@ class AgentClient:
         }
 
         last_error: BaseException | None = None
-
         for attempt in range(_MAX_TRIGGER_RETRIES):
             try:
                 data = await self._request_json(
@@ -1187,7 +1054,6 @@ class AgentClient:
                 if not isinstance(returned_id, str) or not returned_id:
                     raise KeyError("AutoSRE alert response missing 'incident_id'")
                 return returned_id
-
             except RateLimitError as exc:
                 last_error = exc
                 if attempt == _MAX_TRIGGER_RETRIES - 1:
@@ -1201,7 +1067,6 @@ class AgentClient:
                     wait,
                 )
                 await asyncio.sleep(wait)
-
         assert last_error is not None
         raise last_error
 
@@ -1212,11 +1077,8 @@ class AgentClient:
         timeout: float | None = None,
     ) -> dict[str, Any]:
         """Fetch incident status with retry on transient 404s."""
-        import httpx
-
         max_retries = 3
         last_error: BaseException | None = None
-
         for attempt in range(max_retries):
             try:
                 return await self._request_json(
@@ -1230,7 +1092,6 @@ class AgentClient:
                     await asyncio.sleep(0.5)
                     continue
                 raise
-
         assert last_error is not None
         raise last_error
 
@@ -1245,9 +1106,7 @@ class AgentClient:
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
-
         signature = self._sign(payload)
-
         return await self._request_json(
             "POST",
             f"/incidents/{incident_id}/approve",
@@ -1264,31 +1123,64 @@ class AgentClient:
         poll_interval: float = 3.0,
         auto_approve: bool = AUTO_APPROVE,
     ) -> dict[str, Any]:
+        """Poll until the incident reaches a terminal state with progress logging."""
         if poll_interval <= 0:
             raise ValueError("poll_interval must be greater than zero")
-
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.timeout
         approval_attempted = False
+        poll_count = 0
+        last_phase = ""
+        last_status = ""
+        start_time = loop.time()
+        print(f"  [{incident_id}] Waiting for completion (timeout={self.timeout:.0f}s)", flush=True)
 
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
+                print(f"  [{incident_id}] TIMEOUT after {self.timeout:.0f}s", flush=True)
                 break
-
             request_timeout = min(self.timeout, remaining)
-
-            status = await self.get_incident_status(
-                incident_id,
-                timeout=request_timeout,
-            )
+            poll_count += 1
+            try:
+                status = await self.get_incident_status(incident_id, timeout=request_timeout)
+            except Exception as exc:
+                print(
+                    f"  [{incident_id}] Poll #{poll_count} error: {type(exc).__name__}", flush=True
+                )
+                raise
 
             phase = str(status.get("phase", "unknown"))
             incident_status = str(status.get("status", "running"))
             requires_approval = bool(status.get("requires_human_approval", False))
             approval_granted = status.get("approval_granted")
 
+            # Log phase/status changes
+            if phase != last_phase or incident_status != last_status:
+                elapsed = loop.time() - start_time
+                print(
+                    f"  [{incident_id}] t={elapsed:.0f}s phase={phase} status={incident_status}",
+                    flush=True,
+                )
+                last_phase = phase
+                last_status = incident_status
+
+            # Periodic heartbeat every 10 polls (~30s)
+            if poll_count % 10 == 0:
+                elapsed = loop.time() - start_time
+                print(
+                    f"  [{incident_id}] heartbeat: t={elapsed:.0f}s polls={poll_count} "
+                    f"phase={phase} status={incident_status}",
+                    flush=True,
+                )
+
             if incident_status in _TERMINAL_STATUSES or phase == "complete":
+                elapsed = loop.time() - start_time
+                print(
+                    f"  [{incident_id}] DONE in {elapsed:.1f}s "
+                    f"(polls={poll_count}, status={incident_status})",
+                    flush=True,
+                )
                 return status
 
             if (
@@ -1298,17 +1190,11 @@ class AgentClient:
                 and not approval_attempted
             ):
                 approval_attempted = True
-                logger.info(
-                    "Auto-approving incident %s (Tier-2+ action)",
-                    incident_id,
-                )
+                print(f"  [{incident_id}] Auto-approving Tier-2+ action", flush=True)
                 try:
                     await self.approve_incident(incident_id, True)
                 except RateLimitError:
-                    logger.warning(
-                        "Approval for %s rate-limited; will retry",
-                        incident_id,
-                    )
+                    print(f"  [{incident_id}] Approval rate-limited; will retry", flush=True)
                     approval_attempted = False
 
             sleep_for = min(poll_interval, max(0.0, deadline - loop.time()))
@@ -1319,151 +1205,114 @@ class AgentClient:
 
 
 # ---------------------------------------------------------------------------
-# Result validation helpers
-# ---------------------------------------------------------------------------
-
-
-def required_nonnegative_number(
-    result: dict[str, Any],
-    field: str,
-) -> float:
-    if field not in result:
-        raise AssertionError(f"Result is missing required field {field!r}")
-
-    value = result[field]
-
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise AssertionError(f"Result field {field!r} must be a number, got {type(value).__name__}")
-
-    numeric = float(value)
-    if not math.isfinite(numeric) or numeric < 0:
-        raise AssertionError(f"Result field {field!r} must be finite and >= 0, got {value!r}")
-
-    return numeric
-
-
-def required_nonnegative_int(
-    result: dict[str, Any],
-    field: str,
-) -> int:
-    if field not in result:
-        raise AssertionError(f"Result is missing required field {field!r}")
-
-    value = result[field]
-
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise AssertionError(
-            f"Result field {field!r} must be an integer, got {type(value).__name__}"
-        )
-
-    if value < 0:
-        raise AssertionError(f"Result field {field!r} must be >= 0, got {value}")
-
-    return value
-
-
-def required_list_of_dicts(
-    result: dict[str, Any],
-    field: str,
-) -> list[dict[str, Any]]:
-    if field not in result:
-        raise AssertionError(f"Result is missing required field {field!r}")
-
-    value = result[field]
-
-    if not isinstance(value, list):
-        raise AssertionError(f"Result field {field!r} must be a list, got {type(value).__name__}")
-
-    for index, item in enumerate(value):
-        if not isinstance(item, dict):
-            raise AssertionError(
-                f"Result field {field!r}[{index}] must be an object, got {type(item).__name__}"
-            )
-
-    return list(value)
-
-
-# ---------------------------------------------------------------------------
 # Incident runner with chaos injection and caching
 # ---------------------------------------------------------------------------
-
-
 async def run_incident(
     agent_client: AgentClient,
     incident: dict[str, Any],
     *,
     auto_approve: bool = AUTO_APPROVE,
 ) -> dict[str, Any]:
-    """Reset chaos, inject fault, trigger, wait, persist, and cache.
-
-    Order of operations:
-        1. Session cache (skip all if hit)
-        2. Disk cache (skip all if hit, unless FORCE_RERUN)
-        3. Reset chaos — clean all faults from previous incident
-        4. Apply chaos trigger — inject the specific fault
-        5. Rate-limit delay — respect provider RPM limits
-        6. Trigger webhook — send alert to the agent
-        7. Poll for completion — wait for terminal status
-        8. Save result + populate session cache
-
-    Chaos steps 3 and 4 are best-effort. If the chaos toolkit is absent
-    or a trigger fails, the eval runs against the cluster as-is and the
-    agent will honestly report what it observes.
-    """
+    """Reset chaos, inject fault, trigger, wait, persist, and cache."""
     incident_id = incident["id"]
+    category = incident.get("category", "unknown")
 
-    # 1. Session cache
+    print(f"\n{'=' * 60}", flush=True)
+    print(f"  INCIDENT {incident_id} [{category}]", flush=True)
+    print(f"{'=' * 60}", flush=True)
+
     cached = _cache_get(incident_id)
     if cached is not None:
-        logger.debug("Session cache hit for %s", incident_id)
+        print(f"  [{incident_id}] Session cache hit — skipping", flush=True)
         return cached
 
-    # 2. Disk cache
     if not FORCE_RERUN:
         disk_entry = load_result(incident_id)
         if disk_entry is not None:
             report = disk_entry.get("result")
             if isinstance(report, dict):
                 _cache_put(incident_id, report)
-                logger.debug("Disk cache hit for %s", incident_id)
+                print(f"  [{incident_id}] Disk cache hit — skipping", flush=True)
                 return report
 
-    # 3. Reset chaos — clean all faults from previous incident
+    print(f"  [{incident_id}] Step 1/5: Resetting chaos...", flush=True)
     await _reset_chaos()
 
-    # 4. Apply chaos trigger — inject the specific fault
+    print(f"  [{incident_id}] Step 2/5: Injecting chaos...", flush=True)
     await _apply_chaos_trigger(incident)
 
-    # 5. Rate-limit delay
+    print(f"  [{incident_id}] Step 3/5: Rate-limit delay...", flush=True)
     await _rate_limit_delay()
 
-    # 6-8. Trigger, poll, persist
     try:
+        print(f"  [{incident_id}] Step 4/5: Triggering webhook...", flush=True)
         triggered_id = await agent_client.trigger_incident(incident)
+        print(f"  [{incident_id}] Triggered: {triggered_id[:12]}...", flush=True)
 
-        result = await agent_client.wait_for_completion(
-            triggered_id,
-            auto_approve=auto_approve,
-        )
+        print(f"  [{incident_id}] Step 5/5: Polling for completion...", flush=True)
+        result = await agent_client.wait_for_completion(triggered_id, auto_approve=auto_approve)
 
         save_result(incident_id, result, dataset_incident=incident)
         _cache_put(incident_id, result)
         return result
 
     except RateLimitError as exc:
+        print(f"  [{incident_id}] RATE LIMITED: {exc}", flush=True)
         pytest.skip(str(exc))
 
     except Exception as exc:
         if is_retryable_error(exc):
+            print(f"  [{incident_id}] TRANSIENT ERROR: {exc}", flush=True)
             pytest.skip(f"Transient error while evaluating {incident_id}: {exc}")
+        print(f"  [{incident_id}] FATAL ERROR: {type(exc).__name__}: {exc}", flush=True)
         raise
+
+
+# ---------------------------------------------------------------------------
+# Result validation helpers
+# ---------------------------------------------------------------------------
+def required_nonnegative_number(result: dict[str, Any], field: str) -> float:
+    if field not in result:
+        raise AssertionError(f"Result is missing required field {field!r}")
+    value = result[field]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AssertionError(f"Result field {field!r} must be a number, got {type(value).__name__}")
+    numeric = float(value)
+    if not math.isfinite(numeric) or numeric < 0:
+        raise AssertionError(f"Result field {field!r} must be finite and >= 0, got {value!r}")
+    return numeric
+
+
+def required_nonnegative_int(result: dict[str, Any], field: str) -> int:
+    if field not in result:
+        raise AssertionError(f"Result is missing required field {field!r}")
+    value = result[field]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise AssertionError(
+            f"Result field {field!r} must be an integer, got {type(value).__name__}"
+        )
+    if value < 0:
+        raise AssertionError(f"Result field {field!r} must be >= 0, got {value}")
+    return value
+
+
+def required_list_of_dicts(result: dict[str, Any], field: str) -> list[dict[str, Any]]:
+    if field not in result:
+        raise AssertionError(f"Result is missing required field {field!r}")
+    value = result[field]
+    if not isinstance(value, list):
+        raise AssertionError(f"Result field {field!r} must be a list, got {type(value).__name__}")
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise AssertionError(
+                f"Result field {field!r}[{index}] must be an object, got {type(item).__name__}"
+            )
+    return list(value)
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
 @pytest.fixture(scope="session")
 def dataset() -> list[dict[str, Any]]:
     return _get_dataset()
@@ -1476,11 +1325,7 @@ def agent_client() -> AgentClient:
             f"AutoSRE agent not available at {AGENT_BASE_URL}. "
             "Start the agent before running eval tests."
         )
-
-    return AgentClient(
-        base_url=AGENT_BASE_URL,
-        webhook_secret=AGENT_WEBHOOK_SECRET,
-    )
+    return AgentClient(base_url=AGENT_BASE_URL, webhook_secret=AGENT_WEBHOOK_SECRET)
 
 
 @pytest.fixture(scope="session")
@@ -1491,22 +1336,18 @@ def judge() -> Any:
 # ---------------------------------------------------------------------------
 # Collection hook
 # ---------------------------------------------------------------------------
-
-
 def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
     if check_server_available():
         return
-
     skip_marker = pytest.mark.skip(
         reason=(
             f"AutoSRE agent not available at {AGENT_BASE_URL}. "
             "Start the agent before running eval tests."
         )
     )
-
     for item in items:
         if "eval" in str(item.fspath):
             item.add_marker(skip_marker)

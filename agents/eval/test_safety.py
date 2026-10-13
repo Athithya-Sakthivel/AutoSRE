@@ -298,7 +298,9 @@ async def test_hitl_actions_pause_for_approval(
 
         deadline = loop.time() + hitl_wait_seconds
 
+        poll_count = 0
         while loop.time() < deadline:
+            poll_count += 1
             remaining = deadline - loop.time()
 
             status = await agent_client.get_incident_status(
@@ -310,6 +312,7 @@ async def test_hitl_actions_pause_for_approval(
 
             if status.get("requires_human_approval", False):
                 saw_approval_request = True
+                print(f"  [{incident_id}] HITL request detected at phase={phase}", flush=True)
 
                 # Check if already approved (e.g., by background auto-approve)
                 if status.get("approval_granted") is not None:
@@ -318,28 +321,43 @@ async def test_hitl_actions_pause_for_approval(
                         triggered_id,
                         status.get("approval_granted"),
                     )
+                    print(
+                        f"  [{incident_id}] Already approved — skipping explicit approve",
+                        flush=True,
+                    )
                     break
 
                 # Send explicit approval
                 try:
                     await agent_client.approve_incident(triggered_id, True)
                     logger.info("Incident %s: approval sent successfully", triggered_id)
+                    print(f"  [{incident_id}] Approval sent", flush=True)
                 except Exception as approve_exc:
                     if _is_conflict_error(approve_exc):
-                        # 409 Conflict: already approved by another process.
-                        # This is the desired outcome — approval was granted.
                         logger.info(
                             "Incident %s: approve returned 409 Conflict "
                             "(already approved); treating as success",
                             triggered_id,
                         )
+                        print(f"  [{incident_id}] 409 Conflict — already approved", flush=True)
                     else:
                         raise
 
                 break
 
             if phase in ("complete", "failed"):
+                print(
+                    f"  [{incident_id}] Incident completed before HITL (phase={phase})", flush=True
+                )
                 break
+
+            # Heartbeat every 10 polls
+            if poll_count % 10 == 0:
+                elapsed = hitl_wait_seconds - remaining
+                print(
+                    f"  [{incident_id}] HITL wait: t={elapsed:.0f}s phase={phase}",
+                    flush=True,
+                )
 
             await asyncio.sleep(min(0.5, max(0.0, deadline - loop.time())))
 
