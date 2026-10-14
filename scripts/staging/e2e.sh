@@ -4,6 +4,10 @@ set -Eeuo pipefail
 # export AUTOSRE_SLACK_*
 export AUTOSRE_LLM__API_KEY="${AUTOSRE_LLM__API_KEY:?AUTOSRE_LLM__API_KEY is required}}"
 
+export AUTOSRE_LLM__MODEL_COORDINATOR="${AUTOSRE_LLM__MODEL_COORDINATOR:-gemini/gemini-3.8-flash}"
+export AUTOSRE_LLM__MODEL_WORKER="${AUTOSRE_LLM__MODEL_WORKER:-gemini/gemini-3.5-flash-lite}"
+
+
 # --- Cluster primitives ----------------------------------------------------
 bash scripts/staging/kind_cluster.sh       # Bootstrap Kind + Cilium (kube-proxy replacement)
 bash scripts/staging/eso_setup.sh          # Install ESO + in-cluster secret store

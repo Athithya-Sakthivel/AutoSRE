@@ -47,17 +47,26 @@ async def test_token_usage_is_tracked(
     incident_id: str,
     agent_client: AgentClient,
 ) -> None:
-    """Verify positive token usage and a sane cost/token relationship."""
+    """Verify positive token usage and a sane cost/token relationship.
+
+    No-action incidents that exit early (e.g., webhook_dedup, prohibited_action)
+    legitimately use 0 tokens because they never call the LLM.
+    """
     incident = incident_by_id(incident_id)
     result = await run_incident(
         agent_client,
         incident,
     )
 
+    status = str(result.get("status", "unknown"))
     tokens_used = required_nonnegative_int(
         result,
         "tokens_used",
     )
+
+    # No-action incidents that exit early legitimately use 0 tokens
+    if status == "no_action" and tokens_used == 0:
+        return
 
     assert tokens_used > 0, f"Incident {incident_id}: agent should have used some tokens"
 

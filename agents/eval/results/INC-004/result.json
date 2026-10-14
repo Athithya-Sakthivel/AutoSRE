@@ -1,46 +1,40 @@
 {
   "incident_id": "INC-004",
-  "completed_at": "2026-10-12T02:07:37Z",
+  "completed_at": "2026-10-14T13:09:19Z",
   "result": {
-    "incident_id": "ea6669f9-afb9-4c3a-ba2f-86fddf16de3e",
+    "incident_id": "e0e4ad1d-004f-490e-8c53-d01f9cbbed2f",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "CachePoisonKey",
     "service": "api-gateway",
     "namespace": "rivulet",
     "severity": "sev2",
-    "started_at": "2026-10-12T02:07:09Z",
+    "started_at": "2026-10-14T13:09:08Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "The api-gateway service in namespace rivulet is experiencing a high error rate due to malformed cached data causing JSONDecodeError when reading the cache key 'poison:session:abc123'.",
-        "confidence": 0.5,
+        "description": "Malformed cached data associated with poison_key 'poison:session:abc123' is causing a JSONDecodeError across requests handled by the api-gateway service.",
+        "confidence": 0.4,
         "evidence": [
-          "error_rate_pct: 34.2",
+          "Alert: CachePoisonKey",
           "error_signature: JSONDecodeError reading cache key",
           "poison_key: poison:session:abc123",
-          "Tool query_openobserve({\"query\": \"SELECT * FROM logs WHERE message LIKE '%JSONDecodeError%' OR message LIKE '%poison:session:%'\", \"stream\": \"logs\", \"time_range_minutes\": 30, \"limit\": 50}) status=succeeded output={\"error\": \"Client error '400 Bad Request' for url 'http://127.0.0.1:15080/api/default/_search'\\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400\", \"rows\": [], \"total\": 0, \"truncated\": false}",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 1568.15, \"name\": \"api-gateway-7d7b8df54f-fcmc6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1538.15, \"name\": \"api-gateway-7d7b8df54f-fl2rd\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3425.15, \"name\": \"api-gateway-7d7b8df54f-h5wns\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1538.15, \"name\": \"api-gateway-7d7b8df54f-klvpw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3425.15, \"name\": \"api-gateway-7d7b8df54f-wxmsk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1568.15, \"name\": \"api-gateway-7d7b8df54f-xr6hb\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 267670.15, \"name\": \"frontend-557cbdb47c-kzpvs\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 267670.15, \"name\": \"frontend-557cbdb47c-tfxtn\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 267657.15, \"name\": \"ingestion-worker-5d869cc8bb-4mhjg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 3, \"status\": \"Terminating\"}, {\"age_seconds\": 88098.15, \"name\": \"ingestion-worker-5d869cc8bb-glpz8\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 1024.15, \"name\": \"ingestion-worker-7cf67d78fb-9wsxl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1027.15, \"name\": \"ingestion-worker-7cf67d78fb-pgznq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 267875.15, \"name\": \"postgres-6b4c959c9-jq25k\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 267804.15,",
-          "Tool get_pod_logs({\"namespace\": \"rivulet\", \"pod_name\": \"api-gateway-7d7b8df54f-fcmc6\", \"tail_lines\": 100}) status=succeeded output={\"logs\": \"Picked up JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70 -XX:InitialRAMPercentage=40 -XX:+ExitOnOutOfMemoryError -XX:+UseSerialGC -Djava.security.egd=file:/dev/urandom\\n\\n  .   ____          _            __ _ _\\n /\\\\\\\\ / ___'_ __ _ _(_)_ __  __ _ \\\\ \\\\ \\\\ \\\\\\n( ( )\\\\___ | '_ | '_| | '_ \\\\/ _` | \\\\ \\\\ \\\\ \\\\\\n \\\\\\\\/  ___)| |_)| | | | | || (_| |  ) ) ) )\\n  '  |____| .__|_| |_|_| |_\\\\__, | / / / /\\n =========|_|==============|___/=/_/_/_/\\n\\n :: Spring Boot ::                (v4.1.1)\\n\\n2026-10-12T01:41:15.148Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : Starting ApiGatewayApplication v1.0.0 using Java 25.0.4 with PID 1 (/app/app.jar started by appuser in /app)\\n2026-10-12T01:41:15.164Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : The following 1 profile is active: \\\"production\\\"\\n2026-10-12T01:41:20.882Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode\\n2026-10-12T01:41:20.890Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data Redis repositories in DEFAULT mode.\\n2026-10-12T01:41:21.148Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 90 ms. Found 0 Redis repository interfaces.\\n2026-10-12T01:41:24.882Z  INFO 1 --- [api-gateway] [           main] [                                                 ] o.s.boot.tomcat.TomcatWebServer          : Tomcat initialized with port 8080 (http)\\n2026-10-12T01:41:24.956Z  INFO 1 --- [api-gateway] [           main] [             ",
-          "Tool get_valkey_stats({}) status=succeeded output={\"stats\": {\"connected_clients\": 10, \"evicted_keys\": 0, \"hit_rate_pct\": 100.0, \"maxmemory_mb\": 0.0, \"memory_usage_pct\": 0.0, \"total_keys\": 1, \"used_memory_mb\": 1.2}}",
-          "Tool get_pod_logs({\"namespace\": \"rivulet\", \"pod_name\": \"api-gateway-7d7b8df54f-fcmc6\", \"tail_lines\": 500}) status=succeeded output={\"logs\": \"Picked up JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70 -XX:InitialRAMPercentage=40 -XX:+ExitOnOutOfMemoryError -XX:+UseSerialGC -Djava.security.egd=file:/dev/urandom\\n\\n  .   ____          _            __ _ _\\n /\\\\\\\\ / ___'_ __ _ _(_)_ __  __ _ \\\\ \\\\ \\\\ \\\\\\n( ( )\\\\___ | '_ | '_| | '_ \\\\/ _` | \\\\ \\\\ \\\\ \\\\\\n \\\\\\\\/  ___)| |_)| | | | | || (_| |  ) ) ) )\\n  '  |____| .__|_| |_|_| |_\\\\__, | / / / /\\n =========|_|==============|___/=/_/_/_/\\n\\n :: Spring Boot ::                (v4.1.1)\\n\\n2026-10-12T01:41:15.148Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : Starting ApiGatewayApplication v1.0.0 using Java 25.0.4 with PID 1 (/app/app.jar started by appuser in /app)\\n2026-10-12T01:41:15.164Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : The following 1 profile is active: \\\"production\\\"\\n2026-10-12T01:41:20.882Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode\\n2026-10-12T01:41:20.890Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data Redis repositories in DEFAULT mode.\\n2026-10-12T01:41:21.148Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 90 ms. Found 0 Redis repository interfaces.\\n2026-10-12T01:41:24.882Z  INFO 1 --- [api-gateway] [           main] [                                                 ] o.s.boot.tomcat.TomcatWebServer          : Tomcat initialized with port 8080 (http)\\n2026-10-12T01:41:24.956Z  INFO 1 --- [api-gateway] [           main] [             ",
-          "Tool get_valkey_stream_info({\"stream_key\": \"poison:session:abc123\"}) status=succeeded output={\"groups\": [], \"stream_key\": \"poison:session:abc123\", \"stream_length\": 0}"
+          "Tool query_openobserve({\"query\": \"SELECT * FROM app_logs WHERE level = 'error' LIMIT 50\", \"time_range_minutes\": 30}) status=succeeded output={\"error\": null, \"rows\": [], \"total\": 0, \"truncated\": false}",
+          "Tool get_valkey_stats({}) status=succeeded output={\"stats\": {\"connected_clients\": 10, \"evicted_keys\": 0, \"hit_rate_pct\": 100.0, \"maxmemory_mb\": 0.0, \"memory_usage_pct\": 0.0, \"total_keys\": 1, \"used_memory_mb\": 1.18}}"
         ],
         "status": "proposed"
       },
       {
         "id": "H2",
-        "description": "Upstream client requests are injecting malformed JSON structures into the caching layer for specific session keys, leading to parsing failures in the api-gateway service.",
-        "confidence": 0.3,
+        "description": "Upstream service or client has injected malformed JSON into the caching layer under the key 'poison:session:abc123', leading to a 34.2% error rate in the api-gateway service.",
+        "confidence": 0.4,
         "evidence": [
-          "category: cache_poison_key",
+          "Alert: CachePoisonKey",
+          "error_rate_pct: 34.2",
           "error_signature: JSONDecodeError reading cache key",
-          "Tool query_openobserve({\"query\": \"SELECT * FROM logs WHERE message LIKE '%JSONDecodeError%' OR message LIKE '%poison:session:%'\", \"stream\": \"logs\", \"time_range_minutes\": 30, \"limit\": 50}) status=succeeded output={\"error\": \"Client error '400 Bad Request' for url 'http://127.0.0.1:15080/api/default/_search'\\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400\", \"rows\": [], \"total\": 0, \"truncated\": false}",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 1568.15, \"name\": \"api-gateway-7d7b8df54f-fcmc6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1538.15, \"name\": \"api-gateway-7d7b8df54f-fl2rd\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3425.15, \"name\": \"api-gateway-7d7b8df54f-h5wns\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1538.15, \"name\": \"api-gateway-7d7b8df54f-klvpw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3425.15, \"name\": \"api-gateway-7d7b8df54f-wxmsk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1568.15, \"name\": \"api-gateway-7d7b8df54f-xr6hb\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 267670.15, \"name\": \"frontend-557cbdb47c-kzpvs\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 267670.15, \"name\": \"frontend-557cbdb47c-tfxtn\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 267657.15, \"name\": \"ingestion-worker-5d869cc8bb-4mhjg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 3, \"status\": \"Terminating\"}, {\"age_seconds\": 88098.15, \"name\": \"ingestion-worker-5d869cc8bb-glpz8\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 1024.15, \"name\": \"ingestion-worker-7cf67d78fb-9wsxl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1027.15, \"name\": \"ingestion-worker-7cf67d78fb-pgznq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 267875.15, \"name\": \"postgres-6b4c959c9-jq25k\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 6, \"status\": \"Running\"}, {\"age_seconds\": 267804.15,",
-          "Tool get_pod_logs({\"namespace\": \"rivulet\", \"pod_name\": \"api-gateway-7d7b8df54f-fcmc6\", \"tail_lines\": 100}) status=succeeded output={\"logs\": \"Picked up JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70 -XX:InitialRAMPercentage=40 -XX:+ExitOnOutOfMemoryError -XX:+UseSerialGC -Djava.security.egd=file:/dev/urandom\\n\\n  .   ____          _            __ _ _\\n /\\\\\\\\ / ___'_ __ _ _(_)_ __  __ _ \\\\ \\\\ \\\\ \\\\\\n( ( )\\\\___ | '_ | '_| | '_ \\\\/ _` | \\\\ \\\\ \\\\ \\\\\\n \\\\\\\\/  ___)| |_)| | | | | || (_| |  ) ) ) )\\n  '  |____| .__|_| |_|_| |_\\\\__, | / / / /\\n =========|_|==============|___/=/_/_/_/\\n\\n :: Spring Boot ::                (v4.1.1)\\n\\n2026-10-12T01:41:15.148Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : Starting ApiGatewayApplication v1.0.0 using Java 25.0.4 with PID 1 (/app/app.jar started by appuser in /app)\\n2026-10-12T01:41:15.164Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : The following 1 profile is active: \\\"production\\\"\\n2026-10-12T01:41:20.882Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode\\n2026-10-12T01:41:20.890Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data Redis repositories in DEFAULT mode.\\n2026-10-12T01:41:21.148Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 90 ms. Found 0 Redis repository interfaces.\\n2026-10-12T01:41:24.882Z  INFO 1 --- [api-gateway] [           main] [                                                 ] o.s.boot.tomcat.TomcatWebServer          : Tomcat initialized with port 8080 (http)\\n2026-10-12T01:41:24.956Z  INFO 1 --- [api-gateway] [           main] [             ",
-          "Tool get_valkey_stats({}) status=succeeded output={\"stats\": {\"connected_clients\": 10, \"evicted_keys\": 0, \"hit_rate_pct\": 100.0, \"maxmemory_mb\": 0.0, \"memory_usage_pct\": 0.0, \"total_keys\": 1, \"used_memory_mb\": 1.2}}",
-          "Tool get_pod_logs({\"namespace\": \"rivulet\", \"pod_name\": \"api-gateway-7d7b8df54f-fcmc6\", \"tail_lines\": 500}) status=succeeded output={\"logs\": \"Picked up JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70 -XX:InitialRAMPercentage=40 -XX:+ExitOnOutOfMemoryError -XX:+UseSerialGC -Djava.security.egd=file:/dev/urandom\\n\\n  .   ____          _            __ _ _\\n /\\\\\\\\ / ___'_ __ _ _(_)_ __  __ _ \\\\ \\\\ \\\\ \\\\\\n( ( )\\\\___ | '_ | '_| | '_ \\\\/ _` | \\\\ \\\\ \\\\ \\\\\\n \\\\\\\\/  ___)| |_)| | | | | || (_| |  ) ) ) )\\n  '  |____| .__|_| |_|_| |_\\\\__, | / / / /\\n =========|_|==============|___/=/_/_/_/\\n\\n :: Spring Boot ::                (v4.1.1)\\n\\n2026-10-12T01:41:15.148Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : Starting ApiGatewayApplication v1.0.0 using Java 25.0.4 with PID 1 (/app/app.jar started by appuser in /app)\\n2026-10-12T01:41:15.164Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : The following 1 profile is active: \\\"production\\\"\\n2026-10-12T01:41:20.882Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode\\n2026-10-12T01:41:20.890Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data Redis repositories in DEFAULT mode.\\n2026-10-12T01:41:21.148Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 90 ms. Found 0 Redis repository interfaces.\\n2026-10-12T01:41:24.882Z  INFO 1 --- [api-gateway] [           main] [                                                 ] o.s.boot.tomcat.TomcatWebServer          : Tomcat initialized with port 8080 (http)\\n2026-10-12T01:41:24.956Z  INFO 1 --- [api-gateway] [           main] [             ",
-          "Tool get_valkey_stream_info({\"stream_key\": \"poison:session:abc123\"}) status=succeeded output={\"groups\": [], \"stream_key\": \"poison:session:abc123\", \"stream_length\": 0}"
+          "poison_key: poison:session:abc123",
+          "Tool query_openobserve({\"query\": \"SELECT * FROM app_logs WHERE level = 'error' LIMIT 50\", \"time_range_minutes\": 30}) status=succeeded output={\"error\": null, \"rows\": [], \"total\": 0, \"truncated\": false}",
+          "Tool get_valkey_stats({}) status=succeeded output={\"stats\": {\"connected_clients\": 10, \"evicted_keys\": 0, \"hit_rate_pct\": 100.0, \"maxmemory_mb\": 0.0, \"memory_usage_pct\": 0.0, \"total_keys\": 1, \"used_memory_mb\": 1.18}}"
         ],
         "status": "proposed"
       }
@@ -53,7 +47,7 @@
           "reason": "Cache poisoning detected; delete corrupted key"
         },
         "risk_tier": 1,
-        "rationale": "Fallback action for category 'cache_poison_key' (LLM unavailable or low confidence). Top hypothesis: The api-gateway service in namespace rivulet is experiencing a high error rate due to malformed cach",
+        "rationale": "Fallback action for category 'cache_poison_key' (LLM unavailable or low confidence). Top hypothesis: Malformed cached data associated with poison_key 'poison:session:abc123' is causing a JSONDecodeErro",
         "requires_approval": false
       }
     ],
@@ -64,7 +58,7 @@
           "key": "poison:session:abc123",
           "reason": "Cache poisoning detected; delete corrupted key"
         },
-        "tool_call_id": "call_1791770854880",
+        "tool_call_id": "call_1791983357977",
         "result": {
           "key": "poison:session:abc123",
           "deleted": false,
@@ -73,26 +67,26 @@
           "verification_passed": true
         },
         "success": true,
-        "executed_at": "2026-10-12T02:07:34Z",
+        "executed_at": "2026-10-14T13:09:17Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 32224,
-    "prompt_tokens": 24846,
-    "completion_tokens": 7378,
-    "cost_usd": 0.023916700000000003,
-    "estimated_paid_cost_usd": 0.027971700000000002,
+    "tokens_used": 11025,
+    "prompt_tokens": 9341,
+    "completion_tokens": 1684,
+    "cost_usd": 0.006021100000000001,
+    "estimated_paid_cost_usd": 0.0080491,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
-        "calls": 7,
-        "tokens": 33031
+        "calls": 6,
+        "tokens": 11257
       }
     },
-    "wall_clock_seconds": 25.636,
-    "active_seconds": 25.636,
+    "wall_clock_seconds": 8.907,
+    "active_seconds": 8.907,
     "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
-    "iterations": 3,
+    "iterations": 2,
     "requires_human_approval": false,
     "approval_granted": null
   },

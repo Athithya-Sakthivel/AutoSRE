@@ -1,44 +1,58 @@
 {
   "incident_id": "INC-003",
-  "completed_at": "2026-10-11T03:18:46Z",
+  "completed_at": "2026-10-14T14:12:17Z",
   "result": {
-    "incident_id": "c4520199-ec6a-426f-8f36-827e82524d99",
+    "incident_id": "919ac37a-6e90-427f-872b-38fd67c40354",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "IdleInTransactionBacklog",
     "service": "api-gateway",
     "namespace": "rivulet",
     "severity": "sev1",
-    "started_at": "2026-10-11T03:18:30Z",
+    "started_at": "2026-10-14T14:12:04Z",
     "hypotheses": [
       {
         "id": "H1",
-        "confidence": 0.4,
-        "status": "proposed",
+        "description": "Database connection exhaustion caused by API gateway holding idle connections in transaction.",
+        "confidence": 0.2,
         "evidence": [
-          "Tool get_connection_stats({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_connection_stats' failed: 1 validation error for GetConnectionStatsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
-          "Tool get_active_queries({\"min_duration_seconds\": 5, \"exclude_idle\": true, \"namespace\": \"rivulet\"}) status=failed error=Tool 'get_active_queries' failed: 1 validation error for GetActiveQueriesInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
-          "Tool get_lock_waits({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_lock_waits' failed: 1 validation error for GetLockWaitsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
-          "Tool get_connection_stats({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_connection_stats' failed: 1 validation error for GetConnectionStatsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
-          "Tool get_active_queries({\"min_duration_seconds\": 5, \"exclude_idle\": true, \"namespace\": \"rivulet\"}) status=failed error=Tool 'get_active_queries' failed: 1 validation error for GetActiveQueriesInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
-          "Tool get_lock_waits({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_lock_waits' failed: 1 validation error for GetLockWaitsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden"
-        ]
+          "Alert: IdleInTransactionBacklog",
+          "active_connections: 12",
+          "idle_in_transaction: 5",
+          "max_connections: 20",
+          "category: db_connection_exhaustion",
+          "Tool get_connection_stats({}) status=succeeded output={\"stats\": {\"active\": 6, \"idle\": 6, \"idle_in_transaction\": 0, \"max_connections\": 100, \"total_connections\": 12, \"utilisation_pct\": 12.0}}",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 1703.2, \"name\": \"api-gateway-6c97b95599-6jprl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1734.2, \"name\": \"api-gateway-6c97b95599-thfdz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2889.2, \"name\": \"frontend-7746b58c64-5pgbg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2883.2, \"name\": \"frontend-7746b58c64-hp6zq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 483954.2, \"name\": \"ingestion-worker-5d869cc8bb-4mhjg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 3, \"status\": \"Terminating\"}, {\"age_seconds\": 304395.2, \"name\": \"ingestion-worker-5d869cc8bb-glpz8\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 2462.2, \"name\": \"ingestion-worker-755f59df79-4l5zh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2459.2, \"name\": \"ingestion-worker-755f59df79-9zvrt\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 484172.2, \"name\": \"postgres-6b4c959c9-jq25k\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 12, \"status\": \"Running\"}, {\"age_seconds\": 484101.2, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 12, \"status\": \"Running\"}], \"total\": 10}"
+        ],
+        "status": "refuted"
       },
       {
         "id": "H2",
-        "confidence": 0.3,
-        "status": "proposed",
+        "description": "Application logic in the API gateway is failing to properly commit or rollback database transactions, leading to connection pool saturation.",
+        "confidence": 0.2,
         "evidence": [
-          "Tool get_connection_stats({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_connection_stats' failed: 1 validation error for GetConnectionStatsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
-          "Tool get_active_queries({\"min_duration_seconds\": 5, \"exclude_idle\": true, \"namespace\": \"rivulet\"}) status=failed error=Tool 'get_active_queries' failed: 1 validation error for GetActiveQueriesInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
-          "Tool get_lock_waits({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_lock_waits' failed: 1 validation error for GetLockWaitsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
-          "Tool get_connection_stats({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_connection_stats' failed: 1 validation error for GetConnectionStatsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
-          "Tool get_active_queries({\"min_duration_seconds\": 5, \"exclude_idle\": true, \"namespace\": \"rivulet\"}) status=failed error=Tool 'get_active_queries' failed: 1 validation error for GetActiveQueriesInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden",
-          "Tool get_lock_waits({\"namespace\": \"rivulet\"}) status=failed error=Tool 'get_lock_waits' failed: 1 validation error for GetLockWaitsInput\nnamespace\n  Extra inputs are not permitted [type=extra_forbidden, input_value='rivulet', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/extra_forbidden"
-        ]
+          "Alert: IdleInTransactionBacklog",
+          "idle_in_transaction: 5",
+          "max_connections: 20",
+          "Tool get_connection_stats({}) status=succeeded output={\"stats\": {\"active\": 6, \"idle\": 6, \"idle_in_transaction\": 0, \"max_connections\": 100, \"total_connections\": 12, \"utilisation_pct\": 12.0}}",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 1703.2, \"name\": \"api-gateway-6c97b95599-6jprl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1734.2, \"name\": \"api-gateway-6c97b95599-thfdz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2889.2, \"name\": \"frontend-7746b58c64-5pgbg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2883.2, \"name\": \"frontend-7746b58c64-hp6zq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 483954.2, \"name\": \"ingestion-worker-5d869cc8bb-4mhjg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 3, \"status\": \"Terminating\"}, {\"age_seconds\": 304395.2, \"name\": \"ingestion-worker-5d869cc8bb-glpz8\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 2462.2, \"name\": \"ingestion-worker-755f59df79-4l5zh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2459.2, \"name\": \"ingestion-worker-755f59df79-9zvrt\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 484172.2, \"name\": \"postgres-6b4c959c9-jq25k\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 12, \"status\": \"Running\"}, {\"age_seconds\": 484101.2, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 12, \"status\": \"Running\"}], \"total\": 10}"
+        ],
+        "status": "refuted"
       }
     ],
-    "proposed_actions": [],
+    "proposed_actions": [
+      {
+        "tool_name": "restart_deployment",
+        "tool_args": {
+          "reason": "Connection pool exhaustion; restart to release stuck connections",
+          "name": "api-gateway",
+          "namespace": "rivulet"
+        },
+        "risk_tier": 1,
+        "rationale": "Fallback action for category 'db_connection_exhaustion' (LLM unavailable or low confidence). Top hypothesis: Database connection exhaustion caused by API gateway holding idle connections in transaction.",
+        "requires_approval": false
+      }
+    ],
     "executed_actions": [
       {
         "tool_name": "restart_deployment",
@@ -47,7 +61,7 @@
           "name": "api-gateway",
           "namespace": "rivulet"
         },
-        "tool_call_id": "call_1791688723475",
+        "tool_call_id": "call_1791987136803",
         "result": {
           "name": "api-gateway",
           "namespace": "rivulet",
@@ -57,25 +71,26 @@
           "verification_passed": null
         },
         "success": true,
-        "executed_at": "2026-10-11T03:18:43Z",
+        "executed_at": "2026-10-14T14:12:16Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 14415,
-    "prompt_tokens": 12823,
-    "completion_tokens": 1592,
-    "cost_usd": 0.006759899999999999,
-    "estimated_paid_cost_usd": 0.0089419,
+    "tokens_used": 13595,
+    "prompt_tokens": 10729,
+    "completion_tokens": 2866,
+    "cost_usd": 0.0091835,
+    "estimated_paid_cost_usd": 0.0116395,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
-        "calls": 7,
-        "tokens": 14615
+        "calls": 6,
+        "tokens": 14008
       }
     },
-    "wall_clock_seconds": 12.687,
-    "active_seconds": 12.687,
+    "wall_clock_seconds": 11.861,
+    "active_seconds": 11.861,
     "backoff_seconds": 0.0,
-    "iterations": 3,
+    "approval_wait_seconds": 0.0,
+    "iterations": 2,
     "requires_human_approval": false,
     "approval_granted": null
   },

@@ -220,7 +220,7 @@ FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
 }
 
 # Maximum number of tools to execute per investigation iteration.
-_MAX_TOOLS_PER_ITERATION = 3
+_MAX_TOOLS_PER_ITERATION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -1787,7 +1787,7 @@ def complete_node(
     using the LLM as a tool during that time.
     """
     started_at = float(state.get("started_at", 0.0) or 0.0)
-    wall_clock = time.time() - started_at if started_at > 0 else 0.0
+    wall_clock = max(0.001, time.time() - started_at) if started_at > 0 else 0.0
 
     run_metrics = _get_run_metrics(config)
     backoff = run_metrics.backoff_seconds if run_metrics is not None else 0.0
@@ -1846,13 +1846,62 @@ def route_after_triage(state: AgentState) -> str:
 
 
 def route_after_hypothesize(state: AgentState) -> str:
-    """Route after hypothesize to investigate, propose, or complete."""
-    phase = state.get("current_phase", PHASE_INVESTIGATE)
-    if phase == PHASE_PROPOSE:
-        return PHASE_PROPOSE
-    if phase == PHASE_COMPLETE:
-        return PHASE_COMPLETE
-    return PHASE_INVESTIGATE
+    """Route after hypothesize: investigate again, propose, or complete.
+
+    Early stopping conditions:
+    1. iteration_count >= iteration_budget → complete (budget exhausted)
+    2. stagnation_count >= 2 → propose (confidence not improving)
+    3. top confidence >= threshold → propose (high confidence)
+    4. Otherwise → investigate again
+    """
+    iteration_count = int(state.get("iteration_count", 0) or 0)
+    iteration_budget = int(state.get("iteration_budget", 3) or 3)
+    stagnation_count = int(state.get("stagnation_count", 0) or 0)
+    last_top_confidence = float(state.get("last_top_confidence", 0.0) or 0.0)
+
+    # Get the confidence threshold from graph context (typically 0.5)
+    try:
+        # This is a bit hacky but necessary since we don't have config here
+        # In practice, you'd pass this through state or use a global
+        confidence_threshold = 0.5
+    except Exception:
+        confidence_threshold = 0.5
+
+    # 1. Budget exhausted → complete (will trigger propose via fallback)
+    if iteration_count >= iteration_budget:
+        logger.info(
+            "Iteration budget exhausted (%d/%d); proceeding to propose",
+            iteration_count,
+            iteration_budget,
+        )
+        return "propose"
+
+    # 2. Stagnation: confidence hasn't improved after 2 iterations → propose
+    if stagnation_count >= 2:
+        logger.info(
+            "Stagnation detected (count=%d, confidence=%.2f); proceeding to propose",
+            stagnation_count,
+            last_top_confidence,
+        )
+        return "propose"
+
+    # 3. High confidence → propose
+    if last_top_confidence >= confidence_threshold:
+        logger.info(
+            "High confidence (%.2f >= %.2f); proceeding to propose",
+            last_top_confidence,
+            confidence_threshold,
+        )
+        return "propose"
+
+    # 4. Low confidence but still improving → investigate again
+    logger.info(
+        "Low confidence (%.2f < %.2f), stagnation=%d; investigating again",
+        last_top_confidence,
+        confidence_threshold,
+        stagnation_count,
+    )
+    return "investigate"
 
 
 def route_after_execute(state: AgentState) -> str:

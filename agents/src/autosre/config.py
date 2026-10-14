@@ -77,8 +77,6 @@ class LLMConfig(BaseSettings):
     fallback_models: list[str] = Field(
         default_factory=lambda: [
             "gemini/gemini-3.5-flash-lite",
-            "gemini/gemini-2.0-flash",
-            "gemini/gemini-1.5-flash",
         ],
         description=(
             "Ordered list of fallback models. Router tries these when "
@@ -313,11 +311,11 @@ class SafetyConfig(BaseSettings):
     max_risk_tier_autonomous: int = Field(default=1, ge=0, le=4)
     max_actions_per_incident: int = Field(default=10, ge=1, lt=100)
     max_wall_clock_seconds: int = Field(default=600, ge=60, le=3600)
-    initial_iteration_budget: int = Field(default=3, ge=1, le=10)
-    stagnation_limit: int = Field(default=2, ge=1, le=5)
-    max_action_attempts: int = Field(default=2, ge=1, le=5)
+    initial_iteration_budget: int = Field(default=2, ge=1, le=10)
+    stagnation_limit: int = Field(default=1, ge=1, le=5)
+    max_action_attempts: int = Field(default=1, ge=1, le=5)
     confidence_propose: float = Field(default=0.55, ge=0.0, le=1.0)
-    confidence_fast_path: float = Field(default=0.80, ge=0.0, le=1.0)
+    confidence_fast_path: float = Field(default=0.5, ge=0.0, le=1.0)
     confidence_give_up: float = Field(default=0.40, ge=0.0, le=1.0)
     min_confidence_improvement: float = Field(default=0.05, ge=0.0, le=0.5)
     max_llm_calls_per_incident: int = Field(default=15, ge=1, le=100)

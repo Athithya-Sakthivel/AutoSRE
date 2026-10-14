@@ -165,18 +165,21 @@ class OpenObserveClient:
     ) -> dict[str, Any]:
         """Execute a bounded SQL query against an OpenObserve stream.
 
-        Constructs the payload shape required by OpenObserve's ``_search``
-        endpoint::
+        Constructs the payload shape required by OpenObserve 1.0+:
 
-            {
+            URL: POST /api/{org}/_search?type=logs
+            Body: {
               "query": {
-                "sql": "<SQL>",
+                "sql": "SELECT ... FROM <stream> ...",
                 "start_time": <epoch_microseconds>,
                 "end_time": <epoch_microseconds>,
                 "from": 0,
                 "size": <limit>
               }
             }
+
+        NOTE: The stream name goes in the SQL FROM clause, NOT in the URL.
+        OpenObserve 1.0+ uses an org-level search endpoint.
 
         Args:
             query: SQL-compatible query string
@@ -206,18 +209,22 @@ class OpenObserveClient:
         now_us = int(time.time() * 1_000_000)
         start_us = now_us - (time_range_minutes * 60 * 1_000_000)
 
-        # Ensure SQL has a LIMIT clause
-        sql = query.strip().rstrip(";")
-        if "LIMIT" not in sql.upper():
-            sql = f"{sql} LIMIT {limit}"
-
         # Normalise stream name — the LLM sometimes emits "logs" out of
-        # habit. Map it to the real stream name so queries succeed.
+        # habit. Map it to the real stream name.
         effective_stream = stream or self.DEFAULT_STREAM
         if effective_stream == "logs":
             effective_stream = self.DEFAULT_STREAM
 
-        # Build the REQUIRED OpenObserve payload shape.
+        # Inject the correct stream name into the SQL FROM clause if missing.
+        # This ensures the SQL is valid even if the LLM omitted FROM.
+        sql = query.strip().rstrip(";")
+        upper_sql = sql.upper()
+        if "FROM" not in upper_sql:
+            sql = f"{sql} FROM {effective_stream}"
+        if "LIMIT" not in upper_sql:
+            sql = f"{sql} LIMIT {limit}"
+
+        # Build the REQUIRED OpenObserve 1.0+ payload shape.
         # The "query" field MUST be a struct, not a bare SQL string.
         payload = {
             "query": {
@@ -229,8 +236,10 @@ class OpenObserveClient:
             }
         }
 
-        # URL includes the stream name: /api/{org}/{stream}/_search?type=logs
-        url = f"/api/{self._org_id}/{effective_stream}/_search?type=logs"
+        # OpenObserve 1.0+ uses ORG-LEVEL search endpoint.
+        # The stream name is in the SQL FROM clause, NOT in the URL.
+        # The ?type=logs parameter is optional but helps with routing.
+        url = f"/api/{self._org_id}/_search?type=logs"
 
         try:
             resp = await session.post(url, json=payload)
@@ -271,13 +280,17 @@ class OpenObserveClient:
             data = resp.json()
 
         finally:
-            # httpx response objects don't need explicit closing for non-streaming
-            # responses, but be defensive.
             with contextlib.suppress(Exception):
                 await resp.aclose()
 
-        # OpenObserve returns {"hits": [...], "total": N} on success.
-        # Some query shapes return {"hits": [...], "agg": {...}}.
+        # OpenObserve 1.0+ returns:
+        #   {
+        #     "hits": [...],
+        #     "total": N,
+        #     "took": <ms>,
+        #     "scan_size": <bytes>,
+        #     ...
+        #   }
         hits = data.get("hits", []) if isinstance(data, Mapping) else []
         total = data.get("total", len(hits)) if isinstance(data, Mapping) else 0
 

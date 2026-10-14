@@ -1,46 +1,35 @@
 {
   "incident_id": "INC-012",
-  "completed_at": "2026-10-13T02:05:30Z",
+  "completed_at": "2026-10-14T13:40:21Z",
   "result": {
-    "incident_id": "b28e84bd-963d-4936-b52a-a205c3ca3c30",
+    "incident_id": "96158560-c542-4cac-9d4a-b0bb1a4aebc9",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "CascadingFailureAcrossServices",
     "service": "api-gateway",
     "namespace": "rivulet",
     "severity": "sev1",
-    "started_at": "2026-10-13T02:04:47Z",
+    "started_at": "2026-10-14T13:40:15Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "Database connection exhaustion in the api-gateway service causing request backups and cascading failure.",
+        "description": "Database connection exhaustion in the api-gateway service causing request queuing and cascading failures across dependent services.",
         "confidence": 0.2,
         "evidence": [
-          "db_active_conns: 19",
-          "max_connections: 20",
-          "Tool get_connection_stats({}) status=succeeded output={\"stats\": {\"active\": 1, \"idle\": 16, \"idle_in_transaction\": 0, \"max_connections\": 100, \"total_connections\": 17, \"utilisation_pct\": 17.0}}",
-          "Tool get_active_queries({\"exclude_idle\": true, \"limit\": 25, \"min_duration_seconds\": 1}) status=succeeded output={\"queries\": [], \"total_running\": 0}",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 87831.57, \"name\": \"api-gateway-7d7b8df54f-fcmc6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 89688.57, \"name\": \"api-gateway-7d7b8df54f-h5wns\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 45718.57, \"name\": \"frontend-67d77d84f4-7dt9t\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 45724.57, \"name\": \"frontend-67d77d84f4-b6zw6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 353920.57, \"name\": \"ingestion-worker-5d869cc8bb-4mhjg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 3, \"status\": \"Terminating\"}, {\"age_seconds\": 174361.57, \"name\": \"ingestion-worker-5d869cc8bb-glpz8\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 1552.57, \"name\": \"ingestion-worker-6b95846f-2fzdg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1559.57, \"name\": \"ingestion-worker-6b95846f-sv89g\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 354138.57, \"name\": \"postgres-6b4c959c9-jq25k\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 8, \"status\": \"Running\"}, {\"age_seconds\": 354067.57, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 8, \"status\": \"Running\"}], \"total\": 10}",
-          "Tool query_openobserve({\"query\": \"SELECT * FROM logs WHERE level = 'ERROR' LIMIT 50\", \"time_range_minutes\": 30}) status=succeeded output={\"error\": \"Client error '400 Bad Request' for url 'http://127.0.0.1:15080/api/default/_search'\\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400\", \"rows\": [], \"total\": 0, \"truncated\": false}",
-          "Tool get_pod_logs({\"namespace\": \"rivulet\", \"pod_name\": \"api-gateway-7d7b8df54f-fcmc6\", \"tail_lines\": 100}) status=succeeded output={\"logs\": \"Picked up JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70 -XX:InitialRAMPercentage=40 -XX:+ExitOnOutOfMemoryError -XX:+UseSerialGC -Djava.security.egd=file:/dev/urandom\\n\\n  .   ____          _            __ _ _\\n /\\\\\\\\ / ___'_ __ _ _(_)_ __  __ _ \\\\ \\\\ \\\\ \\\\\\n( ( )\\\\___ | '_ | '_| | '_ \\\\/ _` | \\\\ \\\\ \\\\ \\\\\\n \\\\\\\\/  ___)| |_)| | | | | || (_| |  ) ) ) )\\n  '  |____| .__|_| |_|_| |_\\\\__, | / / / /\\n =========|_|==============|___/=/_/_/_/\\n\\n :: Spring Boot ::                (v4.1.1)\\n\\n2026-10-13T00:39:58.701Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : Starting ApiGatewayApplication v1.0.0 using Java 25.0.4 with PID 1 (/app/app.jar started by appuser in /app)\\n2026-10-13T00:39:58.714Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : The following 1 profile is active: \\\"production\\\"\\n2026-10-13T00:40:03.507Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode\\n2026-10-13T00:40:03.512Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data Redis repositories in DEFAULT mode.\\n2026-10-13T00:40:03.619Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 24 ms. Found 0 Redis repository interfaces.\\n2026-10-13T00:40:07.090Z  INFO 1 --- [api-gateway] [           main] [                                                 ] o.s.boot.tomcat.TomcatWebServer          : Tomcat initialized with port 8080 (http)\\n2026-10-13T00:40:07.119Z  INFO 1 --- [api-gateway] [           main] [             ",
-          "Tool get_pod_logs({\"namespace\": \"rivulet\", \"pod_name\": \"api-gateway-7d7b8df54f-h5wns\", \"tail_lines\": 100}) status=succeeded output={\"logs\": \"Picked up JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70 -XX:InitialRAMPercentage=40 -XX:+ExitOnOutOfMemoryError -XX:+UseSerialGC -Djava.security.egd=file:/dev/urandom\\n\\n  .   ____          _            __ _ _\\n /\\\\\\\\ / ___'_ __ _ _(_)_ __  __ _ \\\\ \\\\ \\\\ \\\\\\n( ( )\\\\___ | '_ | '_| | '_ \\\\/ _` | \\\\ \\\\ \\\\ \\\\\\n \\\\\\\\/  ___)| |_)| | | | | || (_| |  ) ) ) )\\n  '  |____| .__|_| |_|_| |_\\\\__, | / / / /\\n =========|_|==============|___/=/_/_/_/\\n\\n :: Spring Boot ::                (v4.1.1)\\n\\n2026-10-13T00:39:55.196Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : Starting ApiGatewayApplication v1.0.0 using Java 25.0.4 with PID 1 (/app/app.jar started by appuser in /app)\\n2026-10-13T00:39:55.230Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : The following 1 profile is active: \\\"production\\\"\\n2026-10-13T00:40:00.957Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode\\n2026-10-13T00:40:00.962Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data Redis repositories in DEFAULT mode.\\n2026-10-13T00:40:01.130Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 83 ms. Found 0 Redis repository interfaces.\\n2026-10-13T00:40:04.935Z  INFO 1 --- [api-gateway] [           main] [                                                 ] o.s.boot.tomcat.TomcatWebServer          : Tomcat initialized with port 8080 (http)\\n2026-10-13T00:40:04.995Z  INFO 1 --- [api-gateway] [           main] [             ",
-          "Tool get_pod_metrics({\"namespace\": \"rivulet\"}) status=succeeded output={\"metrics\": [{\"cpu_millicores\": 15, \"cpu_request_millicores\": 250, \"memory_mb\": 328, \"memory_request_mb\": 512, \"name\": \"api-gateway-7d7b8df54f-fcmc6\"}, {\"cpu_millicores\": 2, \"cpu_request_millicores\": 250, \"memory_mb\": 328, \"memory_request_mb\": 512, \"name\": \"api-gateway-7d7b8df54f-h5wns\"}, {\"cpu_millicores\": 0, \"cpu_request_millicores\": 50, \"memory_mb\": 14, \"memory_request_mb\": 64, \"name\": \"frontend-67d77d84f4-7dt9t\"}, {\"cpu_millicores\": 0, \"cpu_request_millicores\": 50, \"memory_mb\": 14, \"memory_request_mb\": 64, \"name\": \"frontend-67d77d84f4-b6zw6\"}, {\"cpu_millicores\": 1, \"cpu_request_millicores\": 100, \"memory_mb\": 19, \"memory_request_mb\": 128, \"name\": \"ingestion-worker-6b95846f-2fzdg\"}, {\"cpu_millicores\": 1, \"cpu_request_millicores\": 100, \"memory_mb\": 10, \"memory_request_mb\": 128, \"name\": \"ingestion-worker-6b95846f-sv89g\"}, {\"cpu_millicores\": 26, \"cpu_request_millicores\": 250, \"memory_mb\": 86, \"memory_request_mb\": 256, \"name\": \"postgres-6b4c959c9-jq25k\"}, {\"cpu_millicores\": 16, \"cpu_request_millicores\": 500, \"memory_mb\": 17, \"memory_request_mb\": 512, \"name\": \"valkey-0\"}], \"reason\": null, \"total\": 8}"
+          "db_active_conns is 19 against max_connections of 20",
+          "worker_pending is 8000",
+          "Tool get_connection_stats({}) status=succeeded output={\"stats\": {\"active\": 1, \"idle\": 16, \"idle_in_transaction\": 0, \"max_connections\": 100, \"total_connections\": 17, \"utilisation_pct\": 17.0}}"
         ],
         "status": "refuted"
       },
       {
         "id": "H2",
-        "description": "Worker thread pool exhaustion in the api-gateway service leading to high pending task counts and upstream cascading failures.",
+        "description": "Upstream service latency or failure leading to thread pool exhaustion and high worker pending counts in the api-gateway service.",
         "confidence": 0.5,
         "evidence": [
-          "worker_pending: 8000",
-          "Tool get_connection_stats({}) status=succeeded output={\"stats\": {\"active\": 1, \"idle\": 16, \"idle_in_transaction\": 0, \"max_connections\": 100, \"total_connections\": 17, \"utilisation_pct\": 17.0}}",
-          "Tool get_active_queries({\"exclude_idle\": true, \"limit\": 25, \"min_duration_seconds\": 1}) status=succeeded output={\"queries\": [], \"total_running\": 0}",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 87831.57, \"name\": \"api-gateway-7d7b8df54f-fcmc6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 89688.57, \"name\": \"api-gateway-7d7b8df54f-h5wns\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 45718.57, \"name\": \"frontend-67d77d84f4-7dt9t\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 45724.57, \"name\": \"frontend-67d77d84f4-b6zw6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 353920.57, \"name\": \"ingestion-worker-5d869cc8bb-4mhjg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 3, \"status\": \"Terminating\"}, {\"age_seconds\": 174361.57, \"name\": \"ingestion-worker-5d869cc8bb-glpz8\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 1552.57, \"name\": \"ingestion-worker-6b95846f-2fzdg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1559.57, \"name\": \"ingestion-worker-6b95846f-sv89g\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 354138.57, \"name\": \"postgres-6b4c959c9-jq25k\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 8, \"status\": \"Running\"}, {\"age_seconds\": 354067.57, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 8, \"status\": \"Running\"}], \"total\": 10}",
-          "Tool query_openobserve({\"query\": \"SELECT * FROM logs WHERE level = 'ERROR' LIMIT 50\", \"time_range_minutes\": 30}) status=succeeded output={\"error\": \"Client error '400 Bad Request' for url 'http://127.0.0.1:15080/api/default/_search'\\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400\", \"rows\": [], \"total\": 0, \"truncated\": false}",
-          "Tool get_pod_logs({\"namespace\": \"rivulet\", \"pod_name\": \"api-gateway-7d7b8df54f-fcmc6\", \"tail_lines\": 100}) status=succeeded output={\"logs\": \"Picked up JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70 -XX:InitialRAMPercentage=40 -XX:+ExitOnOutOfMemoryError -XX:+UseSerialGC -Djava.security.egd=file:/dev/urandom\\n\\n  .   ____          _            __ _ _\\n /\\\\\\\\ / ___'_ __ _ _(_)_ __  __ _ \\\\ \\\\ \\\\ \\\\\\n( ( )\\\\___ | '_ | '_| | '_ \\\\/ _` | \\\\ \\\\ \\\\ \\\\\\n \\\\\\\\/  ___)| |_)| | | | | || (_| |  ) ) ) )\\n  '  |____| .__|_| |_|_| |_\\\\__, | / / / /\\n =========|_|==============|___/=/_/_/_/\\n\\n :: Spring Boot ::                (v4.1.1)\\n\\n2026-10-13T00:39:58.701Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : Starting ApiGatewayApplication v1.0.0 using Java 25.0.4 with PID 1 (/app/app.jar started by appuser in /app)\\n2026-10-13T00:39:58.714Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : The following 1 profile is active: \\\"production\\\"\\n2026-10-13T00:40:03.507Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode\\n2026-10-13T00:40:03.512Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data Redis repositories in DEFAULT mode.\\n2026-10-13T00:40:03.619Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 24 ms. Found 0 Redis repository interfaces.\\n2026-10-13T00:40:07.090Z  INFO 1 --- [api-gateway] [           main] [                                                 ] o.s.boot.tomcat.TomcatWebServer          : Tomcat initialized with port 8080 (http)\\n2026-10-13T00:40:07.119Z  INFO 1 --- [api-gateway] [           main] [             ",
-          "Tool get_pod_logs({\"namespace\": \"rivulet\", \"pod_name\": \"api-gateway-7d7b8df54f-h5wns\", \"tail_lines\": 100}) status=succeeded output={\"logs\": \"Picked up JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=70 -XX:InitialRAMPercentage=40 -XX:+ExitOnOutOfMemoryError -XX:+UseSerialGC -Djava.security.egd=file:/dev/urandom\\n\\n  .   ____          _            __ _ _\\n /\\\\\\\\ / ___'_ __ _ _(_)_ __  __ _ \\\\ \\\\ \\\\ \\\\\\n( ( )\\\\___ | '_ | '_| | '_ \\\\/ _` | \\\\ \\\\ \\\\ \\\\\\n \\\\\\\\/  ___)| |_)| | | | | || (_| |  ) ) ) )\\n  '  |____| .__|_| |_|_| |_\\\\__, | / / / /\\n =========|_|==============|___/=/_/_/_/\\n\\n :: Spring Boot ::                (v4.1.1)\\n\\n2026-10-13T00:39:55.196Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : Starting ApiGatewayApplication v1.0.0 using Java 25.0.4 with PID 1 (/app/app.jar started by appuser in /app)\\n2026-10-13T00:39:55.230Z  INFO 1 --- [api-gateway] [           main] [                                                 ] c.rivulet.gateway.ApiGatewayApplication  : The following 1 profile is active: \\\"production\\\"\\n2026-10-13T00:40:00.957Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode\\n2026-10-13T00:40:00.962Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data Redis repositories in DEFAULT mode.\\n2026-10-13T00:40:01.130Z  INFO 1 --- [api-gateway] [           main] [                                                 ] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 83 ms. Found 0 Redis repository interfaces.\\n2026-10-13T00:40:04.935Z  INFO 1 --- [api-gateway] [           main] [                                                 ] o.s.boot.tomcat.TomcatWebServer          : Tomcat initialized with port 8080 (http)\\n2026-10-13T00:40:04.995Z  INFO 1 --- [api-gateway] [           main] [             ",
-          "Tool get_pod_metrics({\"namespace\": \"rivulet\"}) status=succeeded output={\"metrics\": [{\"cpu_millicores\": 15, \"cpu_request_millicores\": 250, \"memory_mb\": 328, \"memory_request_mb\": 512, \"name\": \"api-gateway-7d7b8df54f-fcmc6\"}, {\"cpu_millicores\": 2, \"cpu_request_millicores\": 250, \"memory_mb\": 328, \"memory_request_mb\": 512, \"name\": \"api-gateway-7d7b8df54f-h5wns\"}, {\"cpu_millicores\": 0, \"cpu_request_millicores\": 50, \"memory_mb\": 14, \"memory_request_mb\": 64, \"name\": \"frontend-67d77d84f4-7dt9t\"}, {\"cpu_millicores\": 0, \"cpu_request_millicores\": 50, \"memory_mb\": 14, \"memory_request_mb\": 64, \"name\": \"frontend-67d77d84f4-b6zw6\"}, {\"cpu_millicores\": 1, \"cpu_request_millicores\": 100, \"memory_mb\": 19, \"memory_request_mb\": 128, \"name\": \"ingestion-worker-6b95846f-2fzdg\"}, {\"cpu_millicores\": 1, \"cpu_request_millicores\": 100, \"memory_mb\": 10, \"memory_request_mb\": 128, \"name\": \"ingestion-worker-6b95846f-sv89g\"}, {\"cpu_millicores\": 26, \"cpu_request_millicores\": 250, \"memory_mb\": 86, \"memory_request_mb\": 256, \"name\": \"postgres-6b4c959c9-jq25k\"}, {\"cpu_millicores\": 16, \"cpu_request_millicores\": 500, \"memory_mb\": 17, \"memory_request_mb\": 512, \"name\": \"valkey-0\"}], \"reason\": null, \"total\": 8}"
+          "worker_pending is 8000",
+          "db_active_conns is near capacity at 19 out of 20",
+          "Tool get_connection_stats({}) status=succeeded output={\"stats\": {\"active\": 1, \"idle\": 16, \"idle_in_transaction\": 0, \"max_connections\": 100, \"total_connections\": 17, \"utilisation_pct\": 17.0}}"
         ],
         "status": "proposed"
       }
@@ -54,7 +43,7 @@
           "namespace": "rivulet"
         },
         "risk_tier": 1,
-        "rationale": "Fallback action for category 'cascading_failure' (LLM unavailable or low confidence). Top hypothesis: Worker thread pool exhaustion in the api-gateway service leading to high pending task counts and ups",
+        "rationale": "Fallback action for category 'cascading_failure' (LLM unavailable or low confidence). Top hypothesis: Upstream service latency or failure leading to thread pool exhaustion and high worker pending counts",
         "requires_approval": false
       }
     ],
@@ -66,7 +55,7 @@
           "name": "api-gateway",
           "namespace": "rivulet"
         },
-        "tool_call_id": "call_1791857128439",
+        "tool_call_id": "call_1791985221483",
         "result": {
           "name": "api-gateway",
           "namespace": "rivulet",
@@ -76,30 +65,26 @@
           "verification_passed": null
         },
         "success": true,
-        "executed_at": "2026-10-13T02:05:28Z",
+        "executed_at": "2026-10-14T13:40:21Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 20964,
-    "prompt_tokens": 17159,
-    "completion_tokens": 3805,
-    "cost_usd": 0.01665895,
-    "estimated_paid_cost_usd": 0.020847949999999997,
+    "tokens_used": 6249,
+    "prompt_tokens": 5358,
+    "completion_tokens": 891,
+    "cost_usd": 0.0028874,
+    "estimated_paid_cost_usd": 0.0048264,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
-        "calls": 5,
-        "tokens": 12174
-      },
-      "gemini/gemini-3.8-flash": {
-        "calls": 2,
-        "tokens": 11135
+        "calls": 4,
+        "tokens": 6466
       }
     },
-    "wall_clock_seconds": 40.482,
-    "active_seconds": 37.195,
-    "backoff_seconds": 3.288,
+    "wall_clock_seconds": 5.982,
+    "active_seconds": 5.982,
+    "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
-    "iterations": 3,
+    "iterations": 1,
     "requires_human_approval": false,
     "approval_granted": null
   },

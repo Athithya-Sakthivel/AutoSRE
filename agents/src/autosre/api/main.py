@@ -61,6 +61,18 @@ from autosre.tools.observability import OpenObserveClient
 if TYPE_CHECKING:
     pass
 
+# Configure root logger BEFORE any other imports that create loggers.
+# Without this, application logger.info() calls are suppressed (default=WARNING).
+logging.basicConfig(
+    level=getattr(logging, os.getenv("AUTOSRE_LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+    force=True,
+)
+logging.getLogger("autosre").setLevel(
+    getattr(logging, os.getenv("AUTOSRE_LOG_LEVEL", "INFO").upper(), logging.INFO)
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------

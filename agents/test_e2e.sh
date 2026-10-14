@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# test_e2e.sh — AutoSRE unified harness
+# test_e2e.sh -- AutoSRE unified harness
 # =============================================================================
 #
 # Modes
@@ -139,7 +139,7 @@ mkdir -p "$PF_LOG_DIR"
 
 
 # -----------------------------------------------------------------------------
-# LLM provider configuration — Google Gemini via LiteLLM
+# LLM provider configuration -- Google Gemini via LiteLLM
 # -----------------------------------------------------------------------------
 #
 # Model IDs use the LiteLLM canonical form: gemini/<google-model-id>.
@@ -157,13 +157,13 @@ mkdir -p "$PF_LOG_DIR"
 # Model selection. Override to test alternative Gemini models:
 #   gemini/gemini-3.5-flash-lite   (higher RPD on free tier)
 #   gemini/gemini-3.7-flash        (same pricing as 3.8)
-export AUTOSRE_LLM__MODEL_COORDINATOR="${AUTOSRE_LLM__MODEL_COORDINATOR:-gemini/gemini-3.8-flash}"
+export AUTOSRE_LLM__MODEL_COORDINATOR="${AUTOSRE_LLM__MODEL_COORDINATOR:-gemini/gemini-3.5-flash-lite}"
 export AUTOSRE_LLM__MODEL_WORKER="${AUTOSRE_LLM__MODEL_WORKER:-gemini/gemini-3.5-flash-lite}"
 
 # API key. Accepts either LLM_API_KEY (legacy) or AUTOSRE_LLM__API_KEY.
 export AUTOSRE_LLM__API_KEY="${AUTOSRE_LLM__API_KEY:-${LLM_API_KEY:-}}"
 
-# Token pricing (USD / 1K tokens) — Gemini 3.x Standard tier.
+# Token pricing (USD / 1K tokens) -- Gemini 3.x Standard tier.
 # Free tier bills $0.00, but the eval harness uses these rates to
 # project production costs and validate cost-efficiency constraints.
 # Google raises prices on Jan 1, 2027: update to $0.0015 / $0.0075.
@@ -347,7 +347,7 @@ echo "============================================================"
 echo ""
 
 # =============================================================================
-# PHASE 1 — Setup
+# PHASE 1 -- Setup
 # =============================================================================
 
 header "PHASE 1: Setup"
@@ -373,7 +373,7 @@ if [[ "$MODE" != "ci" ]]; then
     pass "Admin secret configured"
 
     if [[ ! -f "$SCRIPT_DIR/ui/node_modules/vite/dist/node/cli.js" ]]; then
-        log "UI dependencies missing or incomplete — running npm ci…"
+        log "UI dependencies missing or incomplete -- running npm ci…"
         (cd "$SCRIPT_DIR/ui" && npm ci --no-audit --no-fund) \
             || fail "npm ci failed (check disk space and npm cache)" 1
         [[ -f "$SCRIPT_DIR/ui/node_modules/vite/dist/node/cli.js" ]] \
@@ -401,7 +401,7 @@ log "Slack:          removed"
 
 
 # =============================================================================
-# PHASE 2 — Infrastructure + port-forwards (NOT in --ci)
+# PHASE 2 -- Infrastructure + port-forwards (NOT in --ci)
 # =============================================================================
 
 if [[ "$MODE" != "ci" ]]; then
@@ -454,15 +454,15 @@ PODS
     for entry in "${PORT_FORWARDS[@]}"; do
         IFS=':' read -r local_port _ _ _ <<< "$entry"
         wait_for_port "$AGENT_HOST" "$local_port" 30 \
-            || fail "Port-forward failed on :$local_port — see $PF_LOG_DIR/*.log" 2
+            || fail "Port-forward failed on :$local_port -- see $PF_LOG_DIR/*.log" 2
     done
     pass "Port-forwards established"
 else
-    header "PHASE 2: Infrastructure (skipped — ci mode)"
+    header "PHASE 2: Infrastructure (skipped -- ci mode)"
 fi
 
 # =============================================================================
-# PHASE 3 — Static checks (all modes except --run)
+# PHASE 3 -- Static checks (all modes except --run)
 # =============================================================================
 
 log "mypy (eval)…"
@@ -484,11 +484,11 @@ if [[ "$MODE" != "run" ]]; then
     mypy eval/ || fail "mypy eval/ failed" 3
     pass "eval/ type checking clean"
 else
-    header "PHASE 3: Static Checks (skipped — run mode)"
+    header "PHASE 3: Static Checks (skipped -- run mode)"
 fi
 
 # =============================================================================
-# PHASE 3b — Eval static checks (all modes except --run)
+# PHASE 3b -- Eval static checks (all modes except --run)
 # =============================================================================
 
 if [[ "$MODE" != "run" ]]; then
@@ -573,11 +573,11 @@ print("Eval imports OK")
 PY
     pass "Eval imports valid"
 else
-    header "PHASE 3b: Eval Static Checks (skipped — run mode)"
+    header "PHASE 3b: Eval Static Checks (skipped -- run mode)"
 fi
 
 # =============================================================================
-# PHASE 4 — Unit & integration tests (all modes except --run)
+# PHASE 4 -- Unit & integration tests (all modes except --run)
 # =============================================================================
 
 if [[ "$MODE" != "run" ]]; then
@@ -595,11 +595,11 @@ if [[ "$MODE" != "run" ]]; then
         || fail "Unit/integration tests failed" 4
     pass "Unit/integration tests passed"
 else
-    header "PHASE 4: Unit & Integration Tests (skipped — run mode)"
+    header "PHASE 4: Unit & Integration Tests (skipped -- run mode)"
 fi
 
 # =============================================================================
-# PHASE 5 — Start AutoSRE agent (interactive + test-locally)
+# PHASE 5 -- Start AutoSRE agent (interactive + test-locally)
 # =============================================================================
 
 if [[ "$MODE" != "ci" ]]; then
@@ -608,7 +608,7 @@ if [[ "$MODE" != "ci" ]]; then
     for entry in "${PORT_FORWARDS[@]}"; do
         IFS=':' read -r local_port _ _ _ <<< "$entry"
         if ! (echo >/dev/tcp/"$AGENT_HOST"/"$local_port") 2>/dev/null; then
-            warn "Port-forward on :$local_port died — restarting"
+            warn "Port-forward on :$local_port died -- restarting"
             pkill -f "kubectl port-forward.*:${local_port}" 2>/dev/null || true
             sleep 1
             for e2 in "${PORT_FORWARDS[@]}"; do
@@ -702,18 +702,18 @@ if [[ "$MODE" != "ci" ]]; then
             fail "Agent startup failed" 5 ;;
     esac
 else
-    header "PHASE 5: Start AutoSRE agent (skipped — ci mode)"
+    header "PHASE 5: Start AutoSRE agent (skipped -- ci mode)"
 fi
 
 # =============================================================================
-# PHASE 6 — Start UI (interactive + test-locally)
+# PHASE 6 -- Start UI (interactive + test-locally)
 # =============================================================================
 
 if [[ "$MODE" != "ci" ]]; then
     header "PHASE 6: Start UI"
 
     if (ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null) | grep -q ":$UI_PORT "; then
-        warn "Port $UI_PORT in use — killing previous holder"
+        warn "Port $UI_PORT in use -- killing previous holder"
         pkill -f "vite.*--port $UI_PORT" 2>/dev/null || true
         sleep 1
     fi
@@ -746,13 +746,13 @@ if [[ "$MODE" != "ci" ]]; then
             fail "UI startup failed" 6 ;;
     esac
 else
-    header "PHASE 6: Start UI (skipped — ci mode)"
+    header "PHASE 6: Start UI (skipped -- ci mode)"
 fi
 
 
 
 # =============================================================================
-# PHASE 7 — Eval suite (test-locally only)
+# PHASE 7 -- Eval suite (test-locally only)
 # =============================================================================
 
 if [[ "$MODE" == "test-locally" ]]; then
@@ -877,11 +877,11 @@ PY
         esac
     fi
 else
-    header "PHASE 7: Eval Suite (skipped — $MODE mode)"
+    header "PHASE 7: Eval Suite (skipped -- $MODE mode)"
 fi
 
 # =============================================================================
-# PHASE 8 — Aggregate metrics (test-locally only)
+# PHASE 8 -- Aggregate metrics (test-locally only)
 # =============================================================================
 if [[ "$MODE" == "test-locally" && -z "${SKIP_REMAINING_EVAL:-}" ]]; then
     header "PHASE 8: Aggregate Metrics"
@@ -892,7 +892,7 @@ else
 fi
 
 # =============================================================================
-# PHASE 9 — Contract verification (test-locally only)
+# PHASE 9 -- Contract verification (test-locally only)
 # =============================================================================
 
 if [[ "$MODE" == "test-locally" && -z "${SKIP_REMAINING_EVAL:-}" ]]; then
@@ -966,7 +966,7 @@ PY
 )
 
     if [[ -z "$INCIDENTS_WITH_RESULTS" ]]; then
-        fail "No incident results found — eval suite produced no output" 9
+        fail "No incident results found -- eval suite produced no output" 9
     fi
 
     while IFS= read -r iid; do
@@ -1080,13 +1080,13 @@ PY
     pass "Dataset baselines valid"
 
     echo ""
-    pass "${C_BOLD}GATE PASSED — all contracts verified${C_RESET}"
+    pass "${C_BOLD}GATE PASSED -- all contracts verified${C_RESET}"
 else
     header "PHASE 9: Contract Verification (skipped)"
 fi
 
 # =============================================================================
-# PHASE 10 — Interactive banner (run mode only)
+# PHASE 10 -- Interactive banner (run mode only)
 # =============================================================================
 
 if [[ "$MODE" == "run" ]]; then
