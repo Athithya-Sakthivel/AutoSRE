@@ -3,6 +3,7 @@ package com.rivulet.gateway.chaos;
 import jakarta.annotation.PreDestroy;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -15,8 +16,10 @@ import org.springframework.stereotype.Service;
 /**
  * Manages the state of injected faults for the SRE evaluation harness.
  *
- * <p>The service intentionally holds database connections open when the leak fault is enabled and
- * runs a CPU-consuming virtual thread when the CPU fault is enabled.
+ * <p>The service intentionally holds database connections open in an active transaction when the
+ * leak fault is enabled, causing them to appear as {@code idle in transaction} in PostgreSQL's
+ * {@code pg_stat_activity}. It also runs a CPU-consuming virtual thread when the CPU fault is
+ * enabled.
  *
  * <p>The {@code pause-consumer} fault from the Go worker is intentionally omitted because this Java
  * Gateway is not a queue consumer.
@@ -33,13 +36,18 @@ public class ChaosService {
     private final List<Connection> leakedConnections = new ArrayList<>();
     private final AtomicReference<Thread> cpuSpinner = new AtomicReference<>();
     private final AtomicBoolean latencyEnabled = new AtomicBoolean(false);
+    private final AtomicBoolean unhealthyEnabled = new AtomicBoolean(false);
 
     public ChaosService(DataSource dataSource) {
         this.dataSource = dataSource;
     }
 
     /**
-     * Intentionally borrows and retains database connections.
+     * Intentionally borrows and retains database connections inside an open transaction.
+     *
+     * <p>Each connection has {@code autoCommit} disabled and executes {@code SELECT 1}, which
+     * places it in the {@code idle in transaction} state visible via {@code pg_stat_activity}. The
+     * connection remains borrowed until {@link #reset()} or JVM shutdown.
      *
      * @return JSON response describing the resulting leak state
      */
@@ -52,11 +60,20 @@ public class ChaosService {
 
         for (int i = 0; i < LEAK_COUNT; i++) {
             try {
-                /*
-                 * Intentionally do not close the connection here.
-                 * The connection remains borrowed until reset() or shutdown.
-                 */
-                leakedConnections.add(dataSource.getConnection());
+                Connection conn = dataSource.getConnection();
+
+                try {
+                    conn.setAutoCommit(false);
+                    try (Statement stmt = conn.createStatement()) {
+                        stmt.execute("SELECT 1");
+                    }
+                } catch (SQLException txEx) {
+                    // Transaction setup failed, but the connection is still borrowed
+                    // from the pool. Add it so reset() can close it properly.
+                    log.warn("Failed to begin transaction on leaked connection {}", i + 1, txEx);
+                }
+
+                leakedConnections.add(conn);
                 acquired++;
             } catch (SQLException ex) {
                 log.warn(
@@ -92,11 +109,6 @@ public class ChaosService {
 
                                     try {
                                         while (!Thread.currentThread().isInterrupted()) {
-                                            /*
-                                             * Keep the computation observable enough that the
-                                             * loop remains a real CPU workload rather than being
-                                             * trivially reducible to an empty loop.
-                                             */
                                             value =
                                                     Long.rotateLeft(
                                                             value + 0x9E3779B97F4A7C15L, 13);
@@ -130,6 +142,21 @@ public class ChaosService {
     }
 
     /**
+     * Enables the unhealthy fault. When active, the health endpoint returns HTTP 503, causing the
+     * Kubernetes readiness probe to fail and the pod to show as 0/1 Ready.
+     *
+     * @return JSON response describing the resulting unhealthy state
+     */
+    public String unhealthy() {
+        unhealthyEnabled.set(true);
+        return "{\"status\":\"unhealthy\"}";
+    }
+
+    public boolean isUnhealthy() {
+        return unhealthyEnabled.get();
+    }
+
+    /**
      * Resets every injected fault.
      *
      * @return JSON response describing reset completion
@@ -138,6 +165,7 @@ public class ChaosService {
         releaseLeakedConnections();
         stopCpuSpinner();
         latencyEnabled.set(false);
+        unhealthyEnabled.set(false);
 
         return "{\"status\":\"reset complete\"}";
     }
@@ -162,6 +190,16 @@ public class ChaosService {
 
             try {
                 if (!connection.isClosed()) {
+                    // Roll back the open transaction before returning to the pool.
+                    // If the connection is in an error state, rollback may throw;
+                    // we ignore that and proceed to close.
+                    try {
+                        connection.rollback();
+                    } catch (SQLException rollbackEx) {
+                        log.debug(
+                                "Rollback failed on chaos-leaked connection (proceeding to close)",
+                                rollbackEx);
+                    }
                     connection.close();
                 }
             } catch (SQLException ex) {

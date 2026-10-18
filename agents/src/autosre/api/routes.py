@@ -806,6 +806,103 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+# ---------------------------------------------------------------------------
+# OpenObserve webhook enrichment
+# ---------------------------------------------------------------------------
+
+# Cache the dataset lookup so we don't re-read the JSON file on every webhook.
+_dataset_cache: dict[str, dict[str, Any]] | None = None
+
+
+def _load_dataset_index() -> dict[str, dict[str, Any]]:
+    """Load the dataset and index by alert_name. Cached after first call."""
+    global _dataset_cache
+
+    if _dataset_cache is not None:
+        return _dataset_cache
+
+    from pathlib import Path
+
+    _dataset_cache = {}
+
+    # Try v4 first, then v3
+    for version in ("v4", "v3"):
+        dataset_path = (
+            Path(__file__).parent.parent.parent
+            / "eval"
+            / "dataset"
+            / f"AutoSRE-Dataset-{version}.json"
+        )
+
+        if dataset_path.is_file():
+            try:
+                data = json.loads(dataset_path.read_text())
+                for inc in data.get("incidents", []):
+                    name = inc.get("alert_name", "")
+                    if name:
+                        _dataset_cache[name] = inc
+                logger.info(
+                    "Loaded dataset index: %d alerts from %s",
+                    len(_dataset_cache),
+                    dataset_path.name,
+                )
+                return _dataset_cache
+            except Exception as exc:
+                logger.warning("Failed to load dataset %s: %s", dataset_path, exc)
+
+    logger.warning("No dataset file found — OpenObserve enrichment will fail")
+    return _dataset_cache
+
+
+def _enrich_openobserve_alert(
+    alert_name: str,
+    raw_o2: dict[str, Any],
+) -> AlertPayload | None:
+    """Map an OpenObserve webhook to an AlertPayload using dataset metadata.
+
+    OpenObserve sends a minimal payload:
+        {alert_name, alert_url, stream_name, stream_type, org_name,
+         started_at, ended_at, rows, alert_count, alert_agg_value,
+         alert_threshold, alert_operator}
+
+    We enrich it with service, namespace, severity, category, and fingerprint
+    from the dataset definition.
+    """
+    index = _load_dataset_index()
+    inc = index.get(alert_name)
+
+    if inc is None:
+        return None
+
+    # Build fingerprint from alert_name + namespace (stable identity for dedup)
+    namespace = inc.get("namespace", "rivulet")
+    fingerprint = f"o2:{alert_name}:{namespace}"
+
+    return AlertPayload(
+        alert_name=alert_name,
+        service=inc.get("service", "unknown"),
+        namespace=namespace,
+        severity=inc.get("severity", "sev2"),
+        started_at=_as_str(raw_o2.get("started_at", "")),
+        fingerprint=fingerprint,
+        description=f"OpenObserve alert: {alert_name}",
+        labels={
+            "category": inc.get("category", "unknown"),
+            "eval_id": inc.get("id", ""),
+            "baseline_mttr_seconds": str(inc.get("baseline_mttr_seconds", 0)),
+            "triggered_by": "openobserve",
+        },
+        annotations={
+            "alert_count": _as_str(raw_o2.get("alert_count", "")),
+            "alert_agg_value": _as_str(raw_o2.get("alert_agg_value", "")),
+            "alert_threshold": _as_str(raw_o2.get("alert_threshold", "")),
+            "alert_operator": _as_str(raw_o2.get("alert_operator", "")),
+            "stream_name": _as_str(raw_o2.get("stream_name", "")),
+            "alert_url": _as_str(raw_o2.get("alert_url", "")),
+        },
+    )
+
+
 @webhook_router.post(
     "/alerts",
     status_code=status.HTTP_202_ACCEPTED,
@@ -815,20 +912,13 @@ async def trigger_incident(
     runner: Runner,
     settings: AppSettings,
 ) -> dict[str, Any]:
-    """Trigger an incident via signed webhook.
+    """Trigger an incident via signed webhook or O2 alert.
 
-    Order of checks:
-        1. Rate limit
-        2. Pause flag
-        3. HMAC signature over raw body
-        4. Payload validation
-        5. Fingerprint dedup
-        6. Schedule in background
-        7. Return 202
+    Two ingress paths:
+        1. HMAC-signed webhooks from the eval harness (X-Webhook-Signature header)
+        2. OpenObserve alerts (X-Source: openobserve header, no HMAC)
 
-    Returns within milliseconds. The graph runs in a background task
-    tracked by the runner. OpenObserve's webhook timeout is not consumed
-    by the graph's runtime.
+    O2 webhooks are enriched from the dataset to fill missing fields.
     """
     # 1. Rate limit first so abusive clients can't burn signature checks.
     client = _client_ip(request)
@@ -848,50 +938,79 @@ async def trigger_incident(
             detail="Agent is paused",
         )
 
-    # 3. Read body once, verify signature over raw bytes.
+    # 3. Read body once.
     try:
         payload = await request.body()
     except Exception as exc:
-        logger.error(
-            "Failed to read /alerts body: %s",
-            exc,
-        )
+        logger.error("Failed to read /alerts body: %s", exc)
         raise HTTPException(
             status_code=400,
             detail="Failed to read request body",
         ) from exc
 
-    signature = request.headers.get(
-        "X-Webhook-Signature",
-        "",
-    )
+    # 4. Determine ingress source and verify accordingly.
+    source = request.headers.get("X-Source", "")
+    is_openobserve = source == "openobserve"
 
-    if not _verify_signature(
-        payload,
-        signature,
-        settings.alert.webhook_secret,
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid webhook signature",
-        )
+    if is_openobserve:
+        # OpenObserve webhooks: no HMAC, trust X-Source header from cluster network
+        logger.info("Received OpenObserve webhook (X-Source: openobserve)")
 
-    # 4. Validate payload.
-    try:
-        alert = AlertPayload.model_validate_json(payload)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Invalid alert payload: {exc}",
-        ) from exc
+        try:
+            raw_o2 = json.loads(payload)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid JSON from OpenObserve: {exc}",
+            ) from exc
+
+        alert_name = _as_str(raw_o2.get("alert_name", ""))
+
+        if not alert_name:
+            raise HTTPException(
+                status_code=422,
+                detail="OpenObserve webhook missing alert_name",
+            )
+
+        # Look up dataset metadata to enrich the payload
+        alert = _enrich_openobserve_alert(alert_name, raw_o2)
+
+        if alert is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown alert_name from OpenObserve: {alert_name}",
+            )
+
+    else:
+        # Eval harness / external webhooks: require HMAC signature
+        signature = request.headers.get("X-Webhook-Signature", "")
+
+        if not _verify_signature(
+            payload,
+            signature,
+            settings.alert.webhook_secret,
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid webhook signature",
+            )
+
+        try:
+            alert = AlertPayload.model_validate_json(payload)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid alert payload: {exc}",
+            ) from exc
 
     logger.info(
-        "Alert received: %s on %s/%s (severity=%s fingerprint=%s)",
+        "Alert received: %s on %s/%s (severity=%s fingerprint=%s source=%s)",
         alert.alert_name,
         alert.namespace,
         alert.service,
         alert.severity,
         alert.fingerprint or "<empty>",
+        "openobserve" if is_openobserve else "webhook",
     )
 
     # 5. Fingerprint dedup.
@@ -913,18 +1032,13 @@ async def trigger_incident(
     try:
         incident_id = await runner.schedule_incident(alert.model_dump())
     except TimeoutError as exc:
-        logger.error(
-            "Incident scheduling timed out for alert %s",
-            alert.alert_name,
-        )
-
+        logger.error("Incident scheduling timed out for alert %s", alert.alert_name)
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail="Incident scheduling exceeded budget",
         ) from exc
     except LLMBudgetExhaustedError as exc:
         logger.error("Incident scheduling aborted: provider budget exhausted")
-
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="LLM provider budget exhausted",
@@ -935,23 +1049,14 @@ async def trigger_incident(
             exc,
             traceback.format_exc(),
         )
-
         raise HTTPException(
             status_code=500,
             detail=f"Internal error: {exc!s}",
         ) from exc
 
-    # Reserve the fingerprint. Subsequent deliveries within TTL receive
-    # the same incident_id without scheduling a duplicate graph.
-    await _fingerprint_index.reserve(
-        alert.fingerprint,
-        incident_id,
-    )
+    await _fingerprint_index.reserve(alert.fingerprint, incident_id)
 
-    logger.info(
-        "Incident %s scheduled",
-        incident_id,
-    )
+    logger.info("Incident %s scheduled", incident_id)
 
     return {
         "incident_id": incident_id,

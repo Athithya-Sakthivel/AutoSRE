@@ -1,65 +1,44 @@
 #!/usr/bin/env bash
 # =============================================================================
-# test_e2e.sh -- AutoSRE unified harness
+# test_e2e.sh -- AutoSRE unified eval harnesses
 # =============================================================================
 #
 # Modes
 # -----
-#   --run           (default) Interactive. Starts agent + UI, streams logs,
-#                   prints URIs, blocks until Ctrl+C. Requires Kind.
+#   --run            (default) Interactive. Starts agent + UI on localhost,
+#                    streams logs, prints URIs, blocks until Ctrl+C.
+#                    Agent is NOT reachable from inside the Kind cluster.
 #
-#   --test-locally  (CD) Full local harness. Static checks, unit and integration
-#                   tests, then agent + UI, eval suite, metrics, and
-#                   contract verification. Requires Kind. Non-interactive.
+#   --event-driven   Interactive + O2 alert integration. Starts agent bound
+#                    to 0.0.0.0, auto-detects host IP visible from Kind,
+#                    updates O2 webhook destination, verifies connectivity.
+#                    O2 alerts fire webhooks to the local agent.
+#                    Use with: bash chaos/incidents.sh INC-002 trigger
 #
-#   --ci            Headless. Static checks, eval static checks, and unit
-#                   + integration tests only. Does NOT touch Kubernetes,
-#                   does NOT start the agent, does NOT run the eval suite.
-#                   Suitable for GitHub Actions.
+#   --test-locally   (CD) Full local harness. Static checks, unit and
+#                    integration tests, then agent + UI, eval suite, metrics,
+#                    and contract verification. Requires Kind. Non-interactive.
+#
+#   --ci             Headless. Static checks, eval static checks, and unit
+#                    + integration tests only. Does NOT touch Kubernetes,
+#                    does NOT start the agent, does NOT run the eval suite.
+#                    Suitable for GitHub Actions.
 #
 # Usage
 # -----
 #   cd agents
-#   bash test_e2e.sh
+#   bash test_e2e.sh                          # --run (default)
+#   bash test_e2e.sh --event-driven           # O2 alert integration
 #   bash test_e2e.sh --test-locally
 #   bash test_e2e.sh --test-locally --incident-id=INC-002
 #   bash test_e2e.sh --ci
 #
 # Environment
 # -----------
-#   LLM_API_KEY              Required for --run and --test-locally.
-#                            Mapped to AUTOSRE_LLM__API_KEY below.
+#   LLM_API_KEY              Required for --run, --event-driven, and
+#                            --test-locally. Mapped to AUTOSRE_LLM__API_KEY.
 #                            Must be a Google AI Studio API key (AIza...).
 #   AUTOSRE_ADMIN__SECRET    Optional; harness generates one if unset.
-#
-# LLM provider
-# ------------
-#   The harness uses Google Gemini via LiteLLM's ``gemini/`` provider
-#   route. Model IDs use the canonical LiteLLM form:
-#
-#       gemini/gemini-3.8-flash
-#
-#   LiteLLM infers the provider from the prefix and routes to the
-#   Google AI Studio endpoint automatically. No base_url override is
-#   needed for standard Gemini API access.
-#
-#   Cost variables are set to Gemini's published Standard-tier rates
-#   so the eval harness can project production costs accurately, even
-#   though the free tier bills $0.00.
-#
-#   Retry and backoff parameters control how the agent handles Gemini
-#   free-tier rate limits (RPM/TPM/RPD). All backoff sleep time is
-#   recorded in RunMetrics so MTTR reporting excludes provider waits.
-#
-#   The harness exports Slack vars ONLY when AUTOSRE_SLACK__BOT_TOKEN is
-#   non-empty. Empty-string exports would trigger Settings() validation
-#   and fail startup.
-#
-# Strong defaults for --test-locally (override via env)
-# -----------------------------------------------------
-#   EVAL_FORCE_RERUN=1       Bypass the eval session/disk cache.
-#   EVAL_INCIDENT_IDS=INC-003  Single incident; quota-friendly.
-#   EVAL_DELAY_SECONDS=10    Seconds between fresh triggers.
 #
 # Outputs
 # -------
@@ -78,19 +57,21 @@ IFS=$'\n\t'
 # -----------------------------------------------------------------------------
 
 MODE="run"
+EVENT_DRIVEN=0
 INCIDENT_ID=""
 
 usage() {
-    sed -n '2,80p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,60p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --run)           MODE="run"; shift ;;
-        --test-locally)  MODE="test-locally"; shift ;;
-        --ci)            MODE="ci"; shift ;;
-        --incident-id=*) INCIDENT_ID="${1#*=}"; shift ;;
-        -h|--help)       usage; exit 0 ;;
+        --run)            MODE="run"; shift ;;
+        --event-driven)   EVENT_DRIVEN=1; MODE="run"; shift ;;
+        --test-locally)   MODE="test-locally"; shift ;;
+        --ci)             MODE="ci"; shift ;;
+        --incident-id=*)  INCIDENT_ID="${1#*=}"; shift ;;
+        -h|--help)        usage; exit 0 ;;
         *)
             printf 'Unknown argument: %s\n\n' "$1" >&2
             usage >&2
@@ -125,7 +106,7 @@ UI_PORT="5173"
 
 EVAL_AUTO_APPROVE=1
 
-export PY_COLORS=1 # required
+export PY_COLORS=1
 
 # Port-forward map: "local:remote:namespace:service"
 PORT_FORWARDS=(
@@ -137,74 +118,29 @@ PORT_FORWARDS=(
 
 mkdir -p "$PF_LOG_DIR"
 
-
 # -----------------------------------------------------------------------------
-# LLM provider configuration -- Google Gemini via LiteLLM
+# LLM provider configuration
 # -----------------------------------------------------------------------------
-#
-# Model IDs use the LiteLLM canonical form: gemini/<google-model-id>.
-# LiteLLM infers the provider from the "gemini/" prefix and routes to
-# the Google AI Studio endpoint. No base_url override is needed.
-#
-# Both coordinator and worker default to the same model because Gemini
-# 3.8 Flash has identical pricing and context window for both tiers.
-# The router still functions correctly as a pass-through; split to a
-# cheaper model later when paid-tier pricing diverges.
-#
-# API key: a single Google AI Studio key (AIza...) serves both the
-# agent and the DeepEval judge. No separate GROQ_API_KEY is needed.
 
-# Model selection. Override to test alternative Gemini models:
-#   gemini/gemini-3.5-flash-lite   (higher RPD on free tier)
-#   gemini/gemini-3.7-flash        (same pricing as 3.8)
 export AUTOSRE_LLM__MODEL_COORDINATOR="${AUTOSRE_LLM__MODEL_COORDINATOR:-gemini/gemini-3.5-flash-lite}"
 export AUTOSRE_LLM__MODEL_WORKER="${AUTOSRE_LLM__MODEL_WORKER:-gemini/gemini-3.5-flash-lite}"
-
-# API key. Accepts either LLM_API_KEY (legacy) or AUTOSRE_LLM__API_KEY.
 export AUTOSRE_LLM__API_KEY="${AUTOSRE_LLM__API_KEY:-${LLM_API_KEY:-}}"
-
-# Token pricing (USD / 1K tokens) -- Gemini 3.x Standard tier.
-# Free tier bills $0.00, but the eval harness uses these rates to
-# project production costs and validate cost-efficiency constraints.
-# Google raises prices on Jan 1, 2027: update to $0.0015 / $0.0075.
 export AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR:-0.00075}"
 export AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR:-0.00375}"
 export AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER:-0.00075}"
 export AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER:-0.00375}"
-
-# Retry and backoff for transient provider errors (429, 500, 503).
-# Gemini free tier enforces RPM/TPM/RPD limits. The router retries
-# with exponential backoff + jitter and records all sleep time in
-# RunMetrics so MTTR reporting excludes provider waits.
 export AUTOSRE_LLM__MAX_RETRIES="${AUTOSRE_LLM__MAX_RETRIES:-5}"
 export AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS="${AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS:-2.0}"
 export AUTOSRE_LLM__MAX_BACKOFF_SECONDS="${AUTOSRE_LLM__MAX_BACKOFF_SECONDS:-60.0}"
 
-# Confidence thresholds control when the agent proposes actions.
-# Since demo incidents are intentionally triggered with clear signals,
-# lower thresholds are appropriate. For production, raise these.
 export AUTOSRE_SAFETY__CONFIDENCE_PROPOSE="${AUTOSRE_SAFETY__CONFIDENCE_PROPOSE:-0.55}"
 export AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH="${AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH:-0.80}"
 export AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP="${AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP:-0.40}"
 export AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT="${AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT:-0.05}"
 
-# -----------------------------------------------------------------------------
-# Eval judge configuration
-# -----------------------------------------------------------------------------
-# The judge uses the same Gemini model as the agent. DeepEval's
-# LiteLLMModel constructor accepts the canonical LiteLLM model ID
-# and passes it through to litellm.completion(). No base_url override
-# is needed for standard Google AI Studio access.
-#
-# The judge does NOT set temperature=0. Google's Gemini 3 documentation
-# warns that lowering temperature below the default (1.0) can degrade
-# reasoning quality and cause infinite generation loops. Instead, we
-# use generation_kwargs.reasoning_effort to control depth.
-
 export AUTOSRE_EVAL__JUDGE_MODEL="${AUTOSRE_EVAL__JUDGE_MODEL:-gemini/gemini-3.5-flash-lite}"
 export AUTOSRE_EVAL__JUDGE_API_KEY="${AUTOSRE_EVAL__JUDGE_API_KEY:-$AUTOSRE_LLM__API_KEY}"
 
-# Strong defaults for --test-locally. Only consumed by the eval suite.
 : "${EVAL_FORCE_RERUN:=1}"
 : "${EVAL_INCIDENT_IDS:=INC-003}"
 : "${EVAL_DELAY_SECONDS:=10}"
@@ -334,13 +270,148 @@ stream_log() {
 exec > >(tee -a "$OUTPUT_FILE") 2>&1
 
 # -----------------------------------------------------------------------------
+# Event-driven helpers
+# -----------------------------------------------------------------------------
+# Detect the host IP visible from inside the Kind cluster.
+# In a devcontainer with --network=host on WSL2, the Kind Docker containers
+# can reach the devcontainer via the Docker bridge IPv4 gateway.
+detect_kind_host_ip() {
+    # Method 1: Parse IPv4 gateway from Kind Docker network using Python
+    # (avoids the bash template concatenation bug with IPv6+IPv4)
+    local kind_gw
+    kind_gw=$(docker network inspect kind 2>/dev/null | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for net in data:
+    for cfg in net.get('IPAM', {}).get('Config', []):
+        gw = cfg.get('Gateway', '')
+        # Skip IPv6 (contains colon), keep IPv4 only
+        if gw and ':' not in gw:
+            print(gw)
+            sys.exit(0)
+" 2>/dev/null)
+
+    if [[ -n "$kind_gw" ]]; then
+        echo "$kind_gw"
+        return 0
+    fi
+
+    # Method 2: Default route gateway
+    local default_gw
+    default_gw=$(ip route show default 2>/dev/null | awk '{print $3}' | head -1)
+    if [[ -n "$default_gw" && "$default_gw" != "127.0.0.1" ]]; then
+        echo "$default_gw"
+        return 0
+    fi
+
+    return 1
+}
+
+# Update the OpenObserve alert destination webhook URL via the O2 API.
+update_o2_webhook_url() {
+    local new_url="$1"
+    local o2_url="http://127.0.0.1:15080"
+    local o2_auth="admin@autosre.local:StagingO2RootPass123!"
+
+    log "Updating O2 webhook destination to: $new_url"
+
+    # Get the current destination
+    local dest_json
+    dest_json=$(curl -sf -u "$o2_auth" "$o2_url/api/default/alerts/destinations" 2>/dev/null) || {
+        warn "Could not list O2 destinations"
+        return 1
+    }
+
+    local dest_id
+    dest_id=$(echo "$dest_json" | python3 -c "
+import json, sys
+dests = json.load(sys.stdin).get('list', [])
+for d in dests:
+    if d['name'] == 'autosre-agent-webhook':
+        print(d.get('uuid', d.get('id', '')))
+        break
+" 2>/dev/null)
+
+    if [[ -z "$dest_id" ]]; then
+        warn "Could not find O2 destination 'autosre-agent-webhook'"
+        return 1
+    fi
+
+    # Update the destination URL via PUT
+    local response
+    response=$(curl -sf -u "$o2_auth" \
+        -X PUT \
+        -H "Content-Type: application/json" \
+        "$o2_url/api/default/alerts/destinations/$dest_id" \
+        -d "{
+            \"name\": \"autosre-agent-webhook\",
+            \"url\": \"$new_url\",
+            \"method\": \"post\",
+            \"skip_tls_verify\": true,
+            \"template\": \"autosre-agent\",
+            \"headers\": {\"Content-Type\": \"application/json\", \"X-Source\": \"openobserve\"}
+        }" 2>/dev/null) || {
+        warn "Failed to update O2 webhook destination"
+        return 1
+    }
+
+    pass "O2 webhook destination updated to $new_url"
+    return 0
+}
+
+# Verify that O2 can reach the local agent from inside the Kind cluster.
+# Uses a temporary busybox pod since the distroless O2 pod lacks curl/wget.
+verify_o2_connectivity() {
+    local host_ip="$1"
+    local port="$2"
+
+    log "Verifying O2 → agent connectivity at http://${host_ip}:${port}/healthz"
+
+    local test_pod="o2-connectivity-test-$$"
+
+    # 1. Spin up a temporary busybox pod in the openobserve namespace
+    kubectl run "$test_pod" -n openobserve \
+        --image=busybox:1.36 \
+        --restart=Never \
+        --command -- sleep 300 >/dev/null 2>&1
+
+    # 2. Wait for it to be ready (timeout 15s)
+    if ! kubectl wait --for=condition=ready pod/"$test_pod" -n openobserve --timeout=15s >/dev/null 2>&1; then
+        kubectl delete pod "$test_pod" -n openobserve --force --grace-period=0 >/dev/null 2>&1
+        error "Failed to start connectivity test pod"
+        return 1
+    fi
+
+    # 3. Test connectivity from the busybox pod
+    local result
+    result=$(kubectl exec -n openobserve "$test_pod" -- \
+        wget -qO- --timeout=5 "http://${host_ip}:${port}/healthz" 2>/dev/null)
+
+    # 4. Clean up the test pod immediately
+    kubectl delete pod "$test_pod" -n openobserve --force --grace-period=0 >/dev/null 2>&1
+
+    # 5. Validate the response
+    if echo "$result" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d.get('status') == 'ok'
+" 2>/dev/null; then
+        pass "O2 can reach agent at http://${host_ip}:${port}"
+        return 0
+    fi
+
+    error "O2 pod cannot reach agent at http://${host_ip}:${port}"
+    return 1
+}
+
+# -----------------------------------------------------------------------------
 # Banner
 # -----------------------------------------------------------------------------
 
 echo ""
 echo "============================================================"
 echo "  AutoSRE unified harness"
-echo "  Mode:    $MODE"
+echo "  Mode:    $MODE${EVENT_DRIVEN:+ (event-driven)}"
 echo "  Started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "  Log:     $OUTPUT_FILE"
 echo "============================================================"
@@ -362,6 +433,9 @@ pass "Virtual environment activated"
 REQUIRED_CMDS=(python ruff mypy pytest curl)
 if [[ "$MODE" != "ci" ]]; then
     REQUIRED_CMDS+=(uvicorn npm kubectl psql pgrep pkill)
+fi
+if [[ "$EVENT_DRIVEN" == "1" ]]; then
+    REQUIRED_CMDS+=(docker)
 fi
 for cmd in "${REQUIRED_CMDS[@]}"; do
     require_cmd "$cmd"
@@ -393,12 +467,12 @@ log "Coordinator:    $AUTOSRE_LLM__MODEL_COORDINATOR"
 log "Worker:         $AUTOSRE_LLM__MODEL_WORKER"
 log "Max retries:    $AUTOSRE_LLM__MAX_RETRIES"
 log "Backoff:        ${AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS}s..${AUTOSRE_LLM__MAX_BACKOFF_SECONDS}s"
+if [[ "$EVENT_DRIVEN" == "1" ]]; then
+    log "Mode:           event-driven (O2 webhook → local agent)"
+fi
 if [[ "$MODE" != "run" ]]; then
     log "Judge model:    $AUTOSRE_EVAL__JUDGE_MODEL"
 fi
-
-log "Slack:          removed"
-
 
 # =============================================================================
 # PHASE 2 -- Infrastructure + port-forwards (NOT in --ci)
@@ -411,7 +485,7 @@ if [[ "$MODE" != "ci" ]]; then
     kubectl cluster-info >/dev/null 2>&1 || fail "Kind cluster not reachable" 2
     pass "Kind cluster reachable"
 
-    log "Verifying Rivulet workloads…"
+    log "Verifying workloads…"
     for app in api-gateway postgres ingestion-worker; do
         kubectl get pods -n rivulet -l "app.kubernetes.io/name=$app" --no-headers 2>/dev/null \
             | grep -q Running || fail "Rivulet workload not running: $app" 2
@@ -484,7 +558,7 @@ if [[ "$MODE" != "run" ]]; then
     mypy eval/ || fail "mypy eval/ failed" 3
     pass "eval/ type checking clean"
 else
-    header "PHASE 3: Static Checks (skipped -- run mode)"
+    header "PHASE 3: Static Checks (skipped -- run/event-driven mode)"
 fi
 
 # =============================================================================
@@ -500,15 +574,14 @@ import json
 import sys
 from pathlib import Path
 
-p = Path("eval/dataset/AutoSRE-Dataset-v3.json")
+p = Path("eval/dataset/AutoSRE-Dataset-v4.json")
 if not p.is_file():
-    print(f"MISSING: {p}", file=sys.stderr)
+    p = Path("eval/dataset/AutoSRE-Dataset-v3.json")
+if not p.is_file():
+    print(f"MISSING: dataset JSON", file=sys.stderr)
     sys.exit(1)
 
 data = json.loads(p.read_text())
-if data.get("schema_version") != "3.0":
-    print(f"Unexpected schema_version: {data.get('schema_version')}", file=sys.stderr)
-    sys.exit(1)
 
 incidents = data.get("incidents")
 if not isinstance(incidents, list) or not incidents:
@@ -541,7 +614,7 @@ for inc in incidents:
             print(f"{iid}.injected_context[{k!r}] must be str, got {type(v).__name__}", file=sys.stderr)
             sys.exit(1)
 
-print(f"Dataset OK: {len(incidents)} incidents")
+print(f"Dataset OK: {len(incidents)} incidents ({p.name})")
 PY
     pass "Dataset valid"
 
@@ -573,7 +646,7 @@ print("Eval imports OK")
 PY
     pass "Eval imports valid"
 else
-    header "PHASE 3b: Eval Static Checks (skipped -- run mode)"
+    header "PHASE 3b: Eval Static Checks (skipped -- run/event-driven mode)"
 fi
 
 # =============================================================================
@@ -595,11 +668,11 @@ if [[ "$MODE" != "run" ]]; then
         || fail "Unit/integration tests failed" 4
     pass "Unit/integration tests passed"
 else
-    header "PHASE 4: Unit & Integration Tests (skipped -- run mode)"
+    header "PHASE 4: Unit & Integration Tests (skipped -- run/event-driven mode)"
 fi
 
 # =============================================================================
-# PHASE 5 -- Start AutoSRE agent (interactive + test-locally)
+# PHASE 5 -- Start AutoSRE agent (interactive + test-locally + event-driven)
 # =============================================================================
 
 if [[ "$MODE" != "ci" ]]; then
@@ -672,11 +745,21 @@ if [[ "$MODE" != "ci" ]]; then
         fail "Postgres pre-flight check failed" 5
     fi
 
+    # Determine bind address:
+    #   --run mode:           127.0.0.1 (localhost only)
+    #   --event-driven mode:  0.0.0.0 (all interfaces, reachable from Kind)
+    #   --test-locally mode:  127.0.0.1 (localhost only)
+    agent_bind_host="$AGENT_HOST"
+    if [[ "$EVENT_DRIVEN" == "1" ]]; then
+        agent_bind_host="0.0.0.0"
+        log "Event-driven mode: binding agent to 0.0.0.0:${AGENT_PORT}"
+    fi
+
     log "Launching agent (uvicorn)…"
     : > "$AGENT_LOG"
     uvicorn autosre.api.main:create_app_factory \
         --factory \
-        --host "$AGENT_HOST" \
+        --host "$agent_bind_host" \
         --port "$AGENT_PORT" \
         --log-level info \
         >>"$AGENT_LOG" 2>&1 &
@@ -705,8 +788,72 @@ else
     header "PHASE 5: Start AutoSRE agent (skipped -- ci mode)"
 fi
 
+
 # =============================================================================
-# PHASE 6 -- Start UI (interactive + test-locally)
+# PHASE 5b -- Event-driven: O2 connectivity (event-driven mode only)
+# =============================================================================
+
+EVENT_DRIVEN_HOST=""
+
+if [[ "$EVENT_DRIVEN" == "1" ]]; then
+    header "PHASE 5b: Event-Driven O2 Connectivity"
+
+    log "Detecting host IP visible from Kind cluster…"
+    EVENT_DRIVEN_HOST=$(detect_kind_host_ip) || \
+        fail "Cannot detect host IP from Kind cluster. Ensure Docker is running and Kind cluster is accessible." 5
+
+    pass "Host IP: $EVENT_DRIVEN_HOST"
+
+    webhook_url="http://${EVENT_DRIVEN_HOST}:${AGENT_PORT}/alerts"
+    log "Agent webhook URL: $webhook_url"
+
+    # Give the agent a moment to fully bind the port
+    sleep 10
+
+    # Diagnostic: test multiple paths
+    log "Diagnostic: testing connectivity from multiple sources..."
+
+    echo "  [diag] devcontainer → 172.18.0.1:8000"
+    curl -sf http://172.18.0.1:8000/healthz && echo "    ✓ reachable" || echo "    ✗ not reachable"
+
+
+
+    echo "  [diag] iptables FORWARD chain"
+    sudo iptables -L FORWARD -n 2>/dev/null | grep -E "8000|DOCKER" | head -5
+
+    # Verify O2 can reach the agent
+    if verify_o2_connectivity "$EVENT_DRIVEN_HOST" "$AGENT_PORT"; then
+        pass "O2 → agent connectivity verified"
+    else
+        error "O2 cannot reach agent at http://${EVENT_DRIVEN_HOST}:${AGENT_PORT}"
+        error ""
+        error "Possible causes:"
+        error "  1. Firewall blocking port ${AGENT_PORT}"
+        error "     Fix: sudo ufw allow ${AGENT_PORT}/tcp"
+        error "  2. Agent not bound to 0.0.0.0"
+        error "  3. Docker network isolation"
+        error "     Fix: Ensure Kind cluster uses the same Docker network"
+        error ""
+        error "Try testing manually:"
+        error "  kubectl exec -n openobserve deployment/openobserve -- \\"
+        error "    curl -v http://${EVENT_DRIVEN_HOST}:${AGENT_PORT}/healthz"
+        fail "O2 connectivity verification failed" 5
+    fi
+
+    # Update O2 webhook destination
+    if update_o2_webhook_url "$webhook_url"; then
+        pass "O2 alerts will now fire webhooks to local agent"
+    else
+        warn "Could not update O2 webhook destination automatically"
+        warn "Update manually in O2 UI → Alerts → Destinations → autosre-agent-webhook"
+        warn "Set URL to: $webhook_url"
+    fi
+
+    export EVENT_DRIVEN_HOST
+fi
+
+# =============================================================================
+# PHASE 6 -- Start UI (interactive + test-locally + event-driven)
 # =============================================================================
 
 if [[ "$MODE" != "ci" ]]; then
@@ -748,8 +895,6 @@ if [[ "$MODE" != "ci" ]]; then
 else
     header "PHASE 6: Start UI (skipped -- ci mode)"
 fi
-
-
 
 # =============================================================================
 # PHASE 7 -- Eval suite (test-locally only)
@@ -799,7 +944,6 @@ PY
         echo ""
 
         log "Watching for UI approval and graph completion..."
-        log "Watching for UI approval and graph completion..."
         VERIFY_RESULT=$(python3 - <<'PY'
 import sys, os, asyncio
 sys.path.insert(0, ".")
@@ -819,7 +963,6 @@ async def main():
             state = status.get("status", "unknown")
 
             if state in ("resolved", "failed", "no_action"):
-                # Save the result to disk
                 dataset_inc = incident_by_id(dataset_id)
                 save_result(dataset_id, status, dataset_incident=dataset_inc)
                 print(f"SUCCESS:{state}")
@@ -852,7 +995,6 @@ PY
             fail "Manual approval verification failed" 7
         fi
 
-        # Skip the rest of the eval suite and go straight to cleanup
         export SKIP_REMAINING_EVAL=1
     else
         # --- STANDARD AUTOMATED EVAL SUITE ---
@@ -877,12 +1019,13 @@ PY
         esac
     fi
 else
-    header "PHASE 7: Eval Suite (skipped -- $MODE mode)"
+    header "PHASE 7: Eval Suite (skipped -- $MODE${EVENT_DRIVEN:+ event-driven} mode)"
 fi
 
 # =============================================================================
 # PHASE 8 -- Aggregate metrics (test-locally only)
 # =============================================================================
+
 if [[ "$MODE" == "test-locally" && -z "${SKIP_REMAINING_EVAL:-}" ]]; then
     header "PHASE 8: Aggregate Metrics"
     python eval/print_metrics.py || warn "Metrics print failed"
@@ -995,8 +1138,6 @@ assert wall + 1 >= active + backoff, (
 
 executed = r.get("executed_actions") or []
 
-# HITL incidents: "running" is acceptable while awaiting approval
-# or after approval if the graph hasn't completed yet.
 if r["status"] == "running":
     requires_approval = r.get("requires_human_approval", False)
     assert requires_approval, (
@@ -1013,6 +1154,7 @@ if r["status"] == "running":
 _MUTATING_TOOLS = {
     "restart_deployment", "scale_deployment", "delete_pod",
     "terminate_backend", "delete_valkey_key", "set_feature_flag",
+    "flush_all",
 }
 
 if r["status"] == "resolved":
@@ -1060,7 +1202,9 @@ import json
 import sys
 from pathlib import Path
 
-p = Path("eval/dataset/AutoSRE-Dataset-v3.json")
+p = Path("eval/dataset/AutoSRE-Dataset-v4.json")
+if not p.is_file():
+    p = Path("eval/dataset/AutoSRE-Dataset-v3.json")
 data = json.loads(p.read_text())
 
 for inc in data["incidents"]:
@@ -1086,15 +1230,54 @@ else
 fi
 
 # =============================================================================
-# PHASE 10 -- Interactive banner (run mode only)
+# PHASE 10 -- Interactive banner (run + event-driven mode)
 # =============================================================================
 
 if [[ "$MODE" == "run" ]]; then
-    header "AutoSRE is running"
+    header "AutoSRE is running${EVENT_DRIVEN:+ (event-driven)}"
 
     stop_tails
 
-    cat >&2 <<EOF
+    if [[ "$EVENT_DRIVEN" == "1" ]]; then
+        cat >&2 <<EOF
+
+  ${C_BOLD}${C_GREEN}Open these in your browser:${C_RESET}
+
+    ${C_BOLD}Agent UI${C_RESET}          http://$UI_HOST:$UI_PORT
+    ${C_BOLD}Agent API docs${C_RESET}    http://$AGENT_HOST:$AGENT_PORT/docs
+    ${C_BOLD}OpenObserve${C_RESET}       http://$AGENT_HOST:15080
+
+  ${C_BOLD}${C_CYAN}Event-Driven Mode:${C_RESET}
+    O2 webhook URL:   http://${EVENT_DRIVEN_HOST}:${AGENT_PORT}/alerts
+    Agent bound to:   0.0.0.0:${AGENT_PORT}
+
+  ${C_BOLD}Trigger an incident:${C_RESET}
+    bash chaos/incidents.sh INC-002 trigger       # CPU saturation (5 min alert)
+    bash chaos/incidents.sh INC-008 trigger       # Memory pressure (5 min alert)
+    bash chaos/incidents.sh INC-007 trigger       # CrashLoopBackOff (5 min alert)
+
+  ${C_BOLD}Watch the agent respond:${C_RESET}
+    tail -f $AGENT_LOG | grep -E "POST /alerts|alert_name|trigger_incident"
+
+  ${C_BOLD}When done, clean up:${C_RESET}
+    bash chaos/incidents.sh INC-002 cleanup
+    bash chaos/incidents.sh reset
+
+  ${C_DIM}Logs:${C_RESET}
+    agent     ->  $AGENT_LOG
+    ui        ->  $UI_LOG
+    pf        ->  $PF_LOG_DIR/*.log
+    all       ->  $OUTPUT_FILE
+
+  ${C_DIM}Admin endpoints (X-Admin-Secret: $AUTOSRE_ADMIN__SECRET):${C_RESET}
+    curl -X POST http://$AGENT_HOST:$AGENT_PORT/admin/pause  -H "X-Admin-Secret: $AUTOSRE_ADMIN__SECRET"
+    curl -X POST http://$AGENT_HOST:$AGENT_PORT/admin/resume -H "X-Admin-Secret: $AUTOSRE_ADMIN__SECRET"
+
+  ${C_BOLD}Press Ctrl+C to stop.${C_RESET}
+
+EOF
+    else
+        cat >&2 <<EOF
 
   ${C_BOLD}${C_GREEN}Open these in your browser:${C_RESET}
 
@@ -1116,6 +1299,7 @@ if [[ "$MODE" == "run" ]]; then
   ${C_BOLD}Press Ctrl+C to stop.${C_RESET}
 
 EOF
+    fi
 
     EXIT_CODE=0
 
@@ -1166,7 +1350,7 @@ fi
 
 echo ""
 echo "============================================================"
-echo "  AutoSRE harness complete ($MODE)"
+echo "  AutoSRE harness complete ($MODE${EVENT_DRIVEN:+ event-driven})"
 echo "  Finished: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "  Log:      $OUTPUT_FILE"
 echo "============================================================"

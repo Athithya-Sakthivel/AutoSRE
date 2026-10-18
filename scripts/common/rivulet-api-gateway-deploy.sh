@@ -52,7 +52,7 @@ umask 0077
 NAMESPACE="${NAMESPACE:-rivulet}"
 APP_NAME="${APP_NAME:-api-gateway}"
 IMAGE_REPO="${IMAGE_REPO:-ghcr.io/athithya-sakthivel/rivulet-api-gateway}"
-IMAGE_TAG="${IMAGE_TAG:-2026-10-08-12-33-37--4fdf232}"
+IMAGE_TAG="${IMAGE_TAG:-2026-10-16-20-11-44--db58e79}"
 
 SPRING_PROFILES_ACTIVE="${SPRING_PROFILES_ACTIVE:-production}"
 

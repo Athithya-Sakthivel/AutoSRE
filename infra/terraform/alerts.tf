@@ -1,5 +1,5 @@
 # ==============================================================================
-# alerts.tf — AutoSRE OpenObserve alert rules
+# alerts.tf — AutoSRE OpenObserve alert rules (Dataset v4 — 14 incidents)
 #
 # Stream ownership:
 #   OpenObserve streams are external to Terraform/OpenTofu.
@@ -58,12 +58,12 @@ locals {
 
   alerts = {
     # --------------------------------------------------------------------------
-    # INC-001 — PostgreSQL error volume
+    # INC-001 — PostgreSQL error volume (db_connection_exhaustion)
     # --------------------------------------------------------------------------
     INC-001 = {
       name        = "DatabaseConnectionPoolExhausted"
       folder      = "reliability"
-      description = "INC-001: PostgreSQL error volume"
+      description = "INC-001: PostgreSQL error volume indicating connection pool exhaustion"
       stream_type = "logs"
       stream_name = "postgres_logs"
       enabled     = true
@@ -98,12 +98,8 @@ locals {
       promql_multi_alert = false
       promql_condition   = null
       promql_warning     = null
-
-      # This is the aggregate critical threshold.
-      # It belongs in aggregation.having, NOT trigger_condition.threshold.
-      threshold = 18
-
-      silence = 30
+      threshold          = 18
+      silence            = 30
 
       fingerprint = [
         "k8s_namespace_name",
@@ -112,7 +108,7 @@ locals {
     }
 
     # --------------------------------------------------------------------------
-    # INC-002 — API gateway CPU utilization
+    # INC-002 — API gateway CPU utilization (cpu_saturation)
     # --------------------------------------------------------------------------
     INC-002 = {
       name        = "HighCPUUtilization"
@@ -139,13 +135,8 @@ locals {
       }
 
       promql_warning = 80
-
-      # The PromQL critical value lives in promql_condition.
-      # Do NOT put 90 into trigger_condition.threshold because with
-      # promql_multi_alert that would become a group-count threshold.
-      threshold = null
-
-      silence = 30
+      threshold      = null
+      silence        = 30
 
       fingerprint = [
         "k8s_namespace_name",
@@ -154,12 +145,12 @@ locals {
     }
 
     # --------------------------------------------------------------------------
-    # INC-003 — Idle-in-transaction PostgreSQL backlog
+    # INC-003 — Idle-in-transaction PostgreSQL backlog (db_connection_exhaustion)
     # --------------------------------------------------------------------------
     INC-003 = {
       name        = "IdleInTransactionBacklog"
       folder      = "reliability"
-      description = "INC-003: idle-in-transaction PostgreSQL sessions"
+      description = "INC-003: idle-in-transaction PostgreSQL sessions holding connections"
       stream_type = "logs"
       stream_name = "postgres_logs"
       enabled     = true
@@ -204,12 +195,12 @@ locals {
     }
 
     # --------------------------------------------------------------------------
-    # INC-004 — Cache poison / JSON decoding failures
+    # INC-004 — Cache poison / JSON decoding failures (cache_poison_key)
     # --------------------------------------------------------------------------
     INC-004 = {
       name        = "CachePoisonKey"
       folder      = "reliability"
-      description = "INC-004: JSONDecodeError spikes"
+      description = "INC-004: JSONDecodeError spikes from poisoned cache key"
       stream_type = "logs"
       stream_name = "app_logs"
       enabled     = true
@@ -254,12 +245,12 @@ locals {
     }
 
     # --------------------------------------------------------------------------
-    # INC-005 — Valkey consumer backlog
+    # INC-005 — Valkey consumer backlog (consumer_lag)
     # --------------------------------------------------------------------------
     INC-005 = {
       name        = "ConsumerLagSpike"
       folder      = "reliability"
-      description = "INC-005: Valkey pending-message volume"
+      description = "INC-005: Valkey pending-message volume indicating consumer stall"
       stream_type = "logs"
       stream_name = "valkey_logs"
       enabled     = true
@@ -304,49 +295,12 @@ locals {
     }
 
     # --------------------------------------------------------------------------
-    # INC-006 — API gateway memory utilization
+    # INC-006 — Stale pod stuck terminating (stale_pod)
     # --------------------------------------------------------------------------
     INC-006 = {
-      name        = "ApiGatewayMemoryPressure"
+      name        = "StalePodStuckTerminating"
       folder      = "reliability"
-      description = "INC-006: api-gateway memory utilization above 90% of pod limits"
-      stream_type = "metrics"
-      stream_name = "k8s_pod_memory_limit_utilization"
-      enabled     = true
-      query_type  = "promql"
-
-      conditions  = null
-      aggregation = null
-      sql         = null
-
-      promql = "k8s_pod_memory_limit_utilization{k8s_namespace_name=\"rivulet\",k8s_pod_name=~\"api-gateway.*\"}"
-
-      promql_multi_alert = true
-
-      promql_condition = {
-        column      = "value"
-        ignore_case = false
-        operator    = ">="
-        value       = "90"
-      }
-
-      promql_warning = 80
-      threshold     = null
-      silence       = 60
-
-      fingerprint = [
-        "k8s_namespace_name",
-        "k8s_pod_name",
-      ]
-    }
-
-    # --------------------------------------------------------------------------
-    # INC-007 — Upstream timeout cascade
-    # --------------------------------------------------------------------------
-    INC-007 = {
-      name        = "UpstreamTimeoutCascade"
-      folder      = "reliability"
-      description = "INC-007: frontend upstream timeout volume"
+      description = "INC-006: Pod stuck in Terminating phase due to finalizer"
       stream_type = "logs"
       stream_name = "app_logs"
       enabled     = true
@@ -356,23 +310,23 @@ locals {
         and = [
           {
             column      = "body"
-            ignore_case = false
+            ignore_case = true
             operator    = "Contains"
-            value       = "upstream timeout"
+            value       = "Terminating"
           }
         ]
       })
 
       aggregation = {
-        group_by      = ["service", "upstream"]
+        group_by      = ["k8s_namespace_name", "k8s_pod_name"]
         function      = "count"
         multi_alert   = true
-        warning_value = 25
+        warning_value = 1
 
         having = {
           column   = "_timestamp"
           operator = ">="
-          value    = "50"
+          value    = "3"
         }
       }
 
@@ -381,17 +335,67 @@ locals {
       promql_multi_alert = false
       promql_condition   = null
       promql_warning     = null
-      threshold          = 50
-      silence            = 30
+      threshold          = 3
+      silence            = 60
 
       fingerprint = [
-        "service",
-        "upstream",
+        "k8s_namespace_name",
+        "k8s_pod_name",
       ]
     }
 
     # --------------------------------------------------------------------------
-    # INC-008 — Ingestion worker memory utilization
+    # INC-007 — Pod CrashLoopBackOff (crash_loop)
+    # --------------------------------------------------------------------------
+    INC-007 = {
+      name        = "PodCrashLoopBackOff"
+      folder      = "reliability"
+      description = "INC-007: Application pod in CrashLoopBackOff state"
+      stream_type = "logs"
+      stream_name = "app_logs"
+      enabled     = true
+      query_type  = "custom"
+
+      conditions = jsonencode({
+        and = [
+          {
+            column      = "body"
+            ignore_case = true
+            operator    = "Contains"
+            value       = "CrashLoopBackOff"
+          }
+        ]
+      })
+
+      aggregation = {
+        group_by      = ["k8s_namespace_name", "k8s_pod_name"]
+        function      = "count"
+        multi_alert   = true
+        warning_value = 2
+
+        having = {
+          column   = "_timestamp"
+          operator = ">="
+          value    = "5"
+        }
+      }
+
+      sql                = null
+      promql             = null
+      promql_multi_alert = false
+      promql_condition   = null
+      promql_warning     = null
+      threshold          = 5
+      silence            = 60
+
+      fingerprint = [
+        "k8s_namespace_name",
+        "k8s_pod_name",
+      ]
+    }
+
+    # --------------------------------------------------------------------------
+    # INC-008 — Ingestion worker memory utilization (memory_pressure)
     # --------------------------------------------------------------------------
     INC-008 = {
       name        = "MemoryPressure"
@@ -418,8 +422,8 @@ locals {
       }
 
       promql_warning = 80
-      threshold     = null
-      silence       = 60
+      threshold      = null
+      silence        = 60
 
       fingerprint = [
         "k8s_namespace_name",
@@ -428,60 +432,61 @@ locals {
     }
 
     # --------------------------------------------------------------------------
-    # INC-009 — Ingestion worker CPU utilization
+    # INC-009 — Pod OOMKilled (pod_oom)
+    # --------------------------------------------------------------------------
+    # INC-009 — Pod OOMKilled (pod_oom)
     # --------------------------------------------------------------------------
     INC-009 = {
-      name        = "IngestionWorkerCPUPressure"
+      name        = "PodOOMKilled"
       folder      = "reliability"
-      description = "INC-009: ingestion-worker CPU utilization above 90% of pod CPU limits"
-      stream_type = "metrics"
-      stream_name = "k8s_pod_cpu_limit_utilization"
+      description = "INC-009: Container exceeded memory limit and was OOMKilled"
+      stream_type = "logs"
+      stream_name = "app_logs"
       enabled     = true
-      query_type  = "promql"
+      query_type  = "custom"
 
-      conditions  = null
-      aggregation = null
-      sql         = null
+      conditions = jsonencode({
+        and = [
+          {
+            column      = "body"
+            ignore_case = true
+            operator    = "Contains"
+            value       = "OOMKilled"
+          }
+        ]
+      })
 
-      promql = "k8s_pod_cpu_limit_utilization{k8s_namespace_name=\"rivulet\",k8s_pod_name=~\"ingestion-worker.*\"}"
+      aggregation = {
+        group_by      = ["k8s_namespace_name", "k8s_pod_name"]
+        function      = "count"
+        multi_alert   = true
+        warning_value = 1
 
-      promql_multi_alert = true
-
-      promql_condition = {
-        column      = "value"
-        ignore_case = false
-        operator    = ">="
-        value       = "90"
+        having = {
+          column   = "_timestamp"
+          operator = ">="
+          value    = "2"        # CHANGED from "1" — must be > warning_value
+        }
       }
 
-      promql_warning = 80
-      threshold     = null
-      silence       = 30
+      sql                = null
+      promql             = null
+      promql_multi_alert = false
+      promql_condition   = null
+      promql_warning     = null
+      threshold          = 2    # CHANGED from 1 — must match having value
+      silence            = 60
 
       fingerprint = [
         "k8s_namespace_name",
         "k8s_pod_name",
       ]
     }
-
     # --------------------------------------------------------------------------
-    # INC-010 — Deduplication safety canary
+    # INC-010 — Deduplication safety canary (webhook-only, disabled)
     #
     # This alert is deliberately disabled.
-    #
-    # IMPORTANT:
     # fingerprint is intentionally null rather than [].
-    #
-    # An empty Set is materialized by Terraform/OpenTofu as an actual empty
-    # cty.Set, while OpenObserve returns null when fingerprint_fields are
-    # omitted. That mismatch caused the provider's:
-    #
-    #   Provider produced inconsistent result after apply
-    #
-    # error.
-    #
-    # With null, the deduplication block omits fingerprint_fields and lets
-    # OpenObserve infer the fingerprint.
     # --------------------------------------------------------------------------
     INC-010 = {
       name        = "DuplicateWebhookStorm"
@@ -508,7 +513,7 @@ locals {
     }
 
     # --------------------------------------------------------------------------
-    # INC-011 — Namespace deletion safety canary
+    # INC-011 — Namespace deletion safety canary (webhook-only, disabled)
     # --------------------------------------------------------------------------
     INC-011 = {
       name        = "ProhibitedNamespaceDeletion"
@@ -535,12 +540,12 @@ locals {
     }
 
     # --------------------------------------------------------------------------
-    # INC-012 — Cascading failure across critical services
+    # INC-012 — ImagePullBackOff (image_pull_error)
     # --------------------------------------------------------------------------
     INC-012 = {
-      name        = "CascadingFailureAcrossServices"
+      name        = "ImagePullBackOff"
       folder      = "reliability"
-      description = "INC-012: elevated error volume in api-gateway or ingestion-worker"
+      description = "INC-012: Pod cannot pull container image; deployment references nonexistent tag"
       stream_type = "logs"
       stream_name = "app_logs"
       enabled     = true
@@ -550,25 +555,9 @@ locals {
         and = [
           {
             column      = "body"
-            ignore_case = false
+            ignore_case = true
             operator    = "Contains"
-            value       = "error"
-          },
-          {
-            or = [
-              {
-                column      = "k8s_pod_name"
-                ignore_case = false
-                operator    = "Contains"
-                value       = "api-gateway"
-              },
-              {
-                column      = "k8s_pod_name"
-                ignore_case = false
-                operator    = "Contains"
-                value       = "ingestion-worker"
-              }
-            ]
+            value       = "ImagePullBackOff"
           }
         ]
       })
@@ -577,12 +566,12 @@ locals {
         group_by      = ["k8s_namespace_name", "k8s_pod_name"]
         function      = "count"
         multi_alert   = true
-        warning_value = 10
+        warning_value = 1
 
         having = {
           column   = "_timestamp"
           operator = ">="
-          value    = "20"
+          value    = "3"
         }
       }
 
@@ -591,12 +580,121 @@ locals {
       promql_multi_alert = false
       promql_condition   = null
       promql_warning     = null
-      threshold          = 20
+      threshold          = 3
       silence            = 60
 
       fingerprint = [
         "k8s_namespace_name",
         "k8s_pod_name",
+      ]
+    }
+
+    # --------------------------------------------------------------------------
+    # INC-013 — Valkey eviction under memory pressure (cache_eviction)
+    # --------------------------------------------------------------------------
+    INC-013 = {
+      name        = "ValkeyEvictionUnderPressure"
+      folder      = "reliability"
+      description = "INC-013: Valkey evicting keys due to maxmemory limit reached"
+      stream_type = "logs"
+      stream_name = "valkey_logs"
+      enabled     = true
+      query_type  = "custom"
+
+      conditions = jsonencode({
+        and = [
+          {
+            column      = "body"
+            ignore_case = true
+            operator    = "Contains"
+            value       = "evict"
+          }
+        ]
+      })
+
+      aggregation = {
+        group_by      = ["k8s_namespace_name", "k8s_pod_name"]
+        function      = "count"
+        multi_alert   = true
+        warning_value = 5
+
+        having = {
+          column   = "_timestamp"
+          operator = ">="
+          value    = "10"
+        }
+      }
+
+      sql                = null
+      promql             = null
+      promql_multi_alert = false
+      promql_condition   = null
+      promql_warning     = null
+      threshold          = 10
+      silence            = 60
+
+      fingerprint = [
+        "k8s_namespace_name",
+        "k8s_pod_name",
+      ]
+    }
+
+    # --------------------------------------------------------------------------
+    # INC-014 — Resource quota exceeded (resource_quota)
+    # --------------------------------------------------------------------------
+    INC-014 = {
+      name        = "ResourceQuotaExceeded"
+      folder      = "reliability"
+      description = "INC-014: Deployment scaled beyond namespace ResourceQuota; pods stuck Pending"
+      stream_type = "logs"
+      stream_name = "app_logs"
+      enabled     = true
+      query_type  = "custom"
+
+      conditions = jsonencode({
+        and = [
+          {
+            or = [
+              {
+                column      = "body"
+                ignore_case = true
+                operator    = "Contains"
+                value       = "ExceededQuota"
+              },
+              {
+                column      = "body"
+                ignore_case = true
+                operator    = "Contains"
+                value       = "exceeded quota"
+              }
+            ]
+          }
+        ]
+      })
+
+      aggregation = {
+        group_by      = ["k8s_namespace_name"]
+        function      = "count"
+        multi_alert   = true
+        warning_value = 1
+
+        having = {
+          column   = "_timestamp"
+          operator = ">="
+          value    = "3"
+        }
+      }
+
+      sql                = null
+      promql             = null
+      promql_multi_alert = false
+      promql_condition   = null
+      promql_warning     = null
+      threshold          = 3
+      silence            = 60
+
+      fingerprint = [
+        "k8s_namespace_name",
       ]
     }
   }
@@ -614,8 +712,6 @@ resource "openobserve_alert" "incidents" {
   enabled     = each.value.enabled
   folder_id   = local.alert_folder_ids[each.value.folder]
 
-  # These streams are intentionally literal strings.
-  # Terraform/OpenTofu does not manage stream lifecycle.
   stream_name = each.value.stream_name
   stream_type = each.value.stream_type
 
@@ -665,46 +761,22 @@ resource "openobserve_alert" "incidents" {
   }
 
   trigger_condition {
-    period    = 5
-    frequency = 5
-    silence   = each.value.silence
+    period     = 5
+    frequency  = 5
+    silence    = each.value.silence
     align_time = true
 
-    # OpenObserve interprets trigger_condition.threshold as a group-count
-    # threshold when per-group alerting is enabled.
-    #
-    # For multi-alerts:
-    #   threshold = null
-    #   operator  = null
-    #
-    # For ordinary/single-result alerts:
-    #   threshold = the normal trigger threshold
-    #   operator  = >=
-    #
-    # This prevents:
-    #
-    #   per-group alerting + group-count threshold
-    #
-    # which the OpenObserve API explicitly rejects.
     operator  = each.value.promql_multi_alert || try(each.value.aggregation.multi_alert, false) ? null : ">="
     threshold = each.value.promql_multi_alert || try(each.value.aggregation.multi_alert, false) ? null : each.value.threshold
   }
 
-  # Deduplication is always enabled.
-  #
-  # fingerprint_fields is emitted only when an explicit fingerprint is
-  # configured. For INC-010 and INC-011 the server must infer it.
   dynamic "deduplication" {
     for_each = [1]
 
     content {
       enabled             = true
       time_window_minutes = 30
-
-      # null => attribute omitted from the request.
-      # This is deliberate: [] causes the provider to hold an empty cty.Set,
-      # while the server reads the omitted value back as null.
-      fingerprint_fields = each.value.fingerprint
+      fingerprint_fields  = each.value.fingerprint
     }
   }
 

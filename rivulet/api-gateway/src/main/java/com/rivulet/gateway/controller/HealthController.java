@@ -1,60 +1,61 @@
 package com.rivulet.gateway.controller;
 
-import org.springframework.boot.availability.ApplicationAvailability;
-import org.springframework.boot.availability.LivenessState;
-import org.springframework.boot.availability.ReadinessState;
-import org.springframework.http.HttpStatus;
+import com.rivulet.gateway.chaos.ChaosService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Kubernetes-compatible application availability endpoints.
+ * Kubernetes probe endpoints for the API Gateway.
  *
- * <p>The custom {@code /healthz} and {@code /readyz} paths are retained for compatibility with the
- * existing deployment and worker configuration.
+ * <p>Two distinct endpoints are exposed because Kubernetes uses them for different purposes:
  *
- * <p>The endpoints expose Spring Boot's application availability state rather than performing
- * external dependency checks. This keeps liveness independent of databases, caches, or other shared
- * services.
+ * <ul>
+ *   <li>{@code /healthz} backs the startup and liveness probes. It reports process liveness only
+ *       and must never fail while the JVM is able to serve requests. A failure here restarts the
+ *       container.
+ *   <li>{@code /readyz} backs the readiness probe. It reports whether the pod should receive
+ *       traffic. A failure here removes the pod from the Service endpoints while the container
+ *       keeps running.
+ * </ul>
  *
- * <p>Spring Boot Actuator also provides native liveness and readiness health groups. These custom
- * endpoints are compatibility endpoints and do not replace those Actuator endpoints.
+ * <p>The chaos unhealthy fault is deliberately wired to {@code /readyz} only. This models a
+ * dependency-health degradation: the process is alive but cannot serve traffic, so the pod drops
+ * out of the load-balancer rotation without being restarted.
  */
 @RestController
-public final class HealthController {
+public class HealthController {
 
-    private final ApplicationAvailability applicationAvailability;
+    private static final String OK_BODY = "{\"status\":\"ok\"}";
+    private static final String UNHEALTHY_BODY = "{\"status\":\"unhealthy\"}";
 
-    public HealthController(ApplicationAvailability applicationAvailability) {
-        this.applicationAvailability = applicationAvailability;
+    private final ChaosService chaosService;
+
+    public HealthController(ChaosService chaosService) {
+        this.chaosService = chaosService;
     }
 
     /**
-     * Returns HTTP 200 while the application is live and HTTP 503 otherwise.
+     * Liveness and startup probe target. Returns 200 whenever the process can serve HTTP requests.
      *
-     * @return liveness response
+     * <p>This endpoint intentionally ignores the chaos unhealthy flag. Routing chaos state through
+     * a liveness probe would cause Kubernetes to restart the container, which destroys the
+     * observable "Running but not Ready" state that the readiness-failure incident is designed to
+     * produce.
      */
     @GetMapping("/healthz")
-    public ResponseEntity<String> healthz() {
-        if (applicationAvailability.getLivenessState() == LivenessState.CORRECT) {
-            return ResponseEntity.ok("ok");
-        }
-
-        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body("not live");
+    public ResponseEntity<String> liveness() {
+        return ResponseEntity.ok(OK_BODY);
     }
 
     /**
-     * Returns HTTP 200 while the application accepts traffic and HTTP 503 otherwise.
-     *
-     * @return readiness response
+     * Readiness probe target. Returns 503 while the chaos unhealthy fault is active, otherwise 200.
      */
     @GetMapping("/readyz")
-    public ResponseEntity<String> readyz() {
-        if (applicationAvailability.getReadinessState() == ReadinessState.ACCEPTING_TRAFFIC) {
-            return ResponseEntity.ok("ok");
+    public ResponseEntity<String> readiness() {
+        if (chaosService.isUnhealthy()) {
+            return ResponseEntity.status(503).body(UNHEALTHY_BODY);
         }
-
-        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body("not ready");
+        return ResponseEntity.ok(OK_BODY);
     }
 }

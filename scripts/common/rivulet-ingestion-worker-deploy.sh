@@ -40,7 +40,7 @@ umask 0077
 NAMESPACE="${NAMESPACE:-rivulet}"
 APP_NAME="${APP_NAME:-ingestion-worker}"
 IMAGE_REPO="${IMAGE_REPO:-ghcr.io/athithya-sakthivel/rivulet-ingestion-worker}"
-IMAGE_TAG="${IMAGE_TAG:-2026-10-08-12-33-37--4fdf232}"
+IMAGE_TAG="${IMAGE_TAG:-2026-10-16-19-54-11--db58e79}"
 
 DEPLOYMENT_ENVIRONMENT="${DEPLOYMENT_ENVIRONMENT:-evaluation}"
 OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-ingestion-worker}"

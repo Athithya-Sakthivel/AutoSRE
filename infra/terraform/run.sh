@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-
 # This script manages and verifies the OpenObserve alerting Terraform/OpenTofu deployment.
 # It checks OpenObserve health, authentication, and the externally-owned telemetry streams.
 # It does NOT create, modify, or destroy the OpenObserve log or metric streams.
@@ -18,7 +17,6 @@ export TF_VAR_o2_password='StagingO2RootPass123!'
 export TF_VAR_o2_endpoint=http://localhost:5080
 export TF_VAR_o2_organization=default
 
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 TF_BIN="${TF_BIN:-tofu}"
@@ -29,9 +27,10 @@ O2_EMAIL="${TF_VAR_o2_email:-${OPENOBSERVE_USERNAME:-}}"
 O2_PASSWORD="${TF_VAR_o2_password:-${OPENOBSERVE_PASSWORD:-}}"
 O2_ORG="${TF_VAR_o2_organization:-${OPENOBSERVE_ORG_ID:-default}}"
 
-EXPECTED_ALERTS="${EXPECTED_ALERTS:-12}"
-EXPECTED_CUSTOM_ALERTS="${EXPECTED_CUSTOM_ALERTS:-6}"
-EXPECTED_PROMQL_ALERTS="${EXPECTED_PROMQL_ALERTS:-4}"
+# Dataset v4: 14 incidents total
+EXPECTED_ALERTS="${EXPECTED_ALERTS:-14}"
+EXPECTED_CUSTOM_ALERTS="${EXPECTED_CUSTOM_ALERTS:-10}"
+EXPECTED_PROMQL_ALERTS="${EXPECTED_PROMQL_ALERTS:-2}"
 EXPECTED_SQL_ALERTS="${EXPECTED_SQL_ALERTS:-2}"
 
 REQUIRED_LOG_STREAMS=(
@@ -93,7 +92,7 @@ check_config() {
     die "EXPECTED_SQL_ALERTS must be an integer"
 
   (( EXPECTED_CUSTOM_ALERTS + EXPECTED_PROMQL_ALERTS + EXPECTED_SQL_ALERTS == EXPECTED_ALERTS )) ||
-    die "Alert counts do not add up"
+    die "Alert counts do not add up: ${EXPECTED_CUSTOM_ALERTS}+${EXPECTED_PROMQL_ALERTS}+${EXPECTED_SQL_ALERTS} != ${EXPECTED_ALERTS}"
 }
 
 o2_get() {
@@ -284,6 +283,9 @@ verify_state() {
 
   local state_json
   local alert_count
+  local custom_count
+  local promql_count
+  local sql_count
 
   state_json="$(
     "${TF_BIN}" \
@@ -306,6 +308,42 @@ verify_state() {
     die "Expected ${EXPECTED_ALERTS} deployed alerts, found ${alert_count}"
 
   ok "${alert_count} deployed alerts verified"
+
+  # Verify type distribution
+  custom_count="$(
+    jq -r '
+      [
+        .values.root_module.resources[]?
+        | select(.type == "openobserve_alert")
+        | select(.values.query_condition[0].type == "custom" or .values.query_condition.type == "custom")
+      ]
+      | length
+    ' <<<"${state_json}" 2>/dev/null || echo "?"
+  )"
+
+  promql_count="$(
+    jq -r '
+      [
+        .values.root_module.resources[]?
+        | select(.type == "openobserve_alert")
+        | select(.values.query_condition[0].type == "promql" or .values.query_condition.type == "promql")
+      ]
+      | length
+    ' <<<"${state_json}" 2>/dev/null || echo "?"
+  )"
+
+  sql_count="$(
+    jq -r '
+      [
+        .values.root_module.resources[]?
+        | select(.type == "openobserve_alert")
+        | select(.values.query_condition[0].type == "sql" or .values.query_condition.type == "sql")
+      ]
+      | length
+    ' <<<"${state_json}" 2>/dev/null || echo "?"
+  )"
+
+  ok "Alert type distribution: custom=${custom_count} promql=${promql_count} sql=${sql_count}"
 }
 
 plan_mode() {

@@ -336,6 +336,7 @@ config:
   # OpenObserve SSRF protection must be explicitly disabled for this staging
   # deployment.
   ZO_SKIP_SSRF_CHECKS: "${O2_SKIP_SSRF_CHECKS}"
+  ZO_SSRF_ALLOW_LOOPBACK: "true"
 
   RUST_LOG: "${O2_LOG_LEVEL}"
 

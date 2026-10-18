@@ -1,6 +1,6 @@
 resource "openobserve_folder" "reliability" {
   name        = "Reliability"
-  description = "Reliability alerts — AutoSRE incidents 001-009 and 012"
+  description = "Reliability alerts — AutoSRE incidents 001-009 and 012-014"
   folder_type = "alerts"
 }
 

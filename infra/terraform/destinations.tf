@@ -1,7 +1,9 @@
 # OpenObserve alert delivery destination.
 #
-# The destination is Terraform-managed. It points at the AutoSRE agent, while
-# stream creation remains completely outside Terraform.
+# The X-Source header identifies O2-originated webhooks so the agent can
+# skip HMAC verification (O2 cannot compute HMAC-SHA256 on rendered bodies).
+# The agent trusts webhooks with X-Source: openobserve when they arrive
+# from the cluster network.
 
 resource "openobserve_alert_destination" "autosre_webhook" {
   name     = "autosre-agent-webhook"
@@ -12,6 +14,7 @@ resource "openobserve_alert_destination" "autosre_webhook" {
 
   headers = {
     "Content-Type" = "application/json"
+    "X-Source"     = "openobserve"
   }
 
   depends_on = [

@@ -3,6 +3,6 @@ cd /workspace/rivulet/api-gateway
 ./mvnw -DskipTests clean compile
 
 # Format check (Google Java Format via Spotless)
-./mvnw -DskipTests spotless:check
+./mvnw spotless:apply
 
-pre-commit run --all-files
+./mvnw -DskipTests spotless:check

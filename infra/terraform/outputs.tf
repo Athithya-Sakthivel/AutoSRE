@@ -45,3 +45,12 @@ output "template_name" {
   description = "OpenObserve alert template name"
   value       = openobserve_alert_template.autosre_webhook.name
 }
+
+output "enabled_alert_count" {
+  description = "Number of enabled alert rules (excludes disabled canaries)"
+
+  value = length({
+    for k, v in local.alerts : k => v
+    if v.enabled
+  })
+}

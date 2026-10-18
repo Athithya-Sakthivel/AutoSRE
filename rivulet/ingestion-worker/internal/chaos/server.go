@@ -120,6 +120,24 @@ func (s *Server) handleLeakDB(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
+		// Open a transaction so PostgreSQL reports this connection as
+		// "idle in transaction" in pg_stat_activity. Without BEGIN, the
+		// connection appears as merely "idle" and is invisible to the
+		// SRE agent's idle-in-transaction detection.
+		if _, execErr := conn.Exec(ctx, "BEGIN"); execErr != nil {
+			slog.Warn(
+				"failed to begin transaction on leaked connection",
+				"index", i+1,
+				"error", execErr,
+			)
+		} else if _, execErr := conn.Exec(ctx, "SELECT 1"); execErr != nil {
+			slog.Warn(
+				"failed to execute SELECT on leaked connection",
+				"index", i+1,
+				"error", execErr,
+			)
+		}
+
 		s.leakedConns = append(s.leakedConns, conn)
 		acquired++
 	}
@@ -241,6 +259,22 @@ func (s *Server) resetState() {
 
 	for _, conn := range leaked {
 		if conn != nil {
+			// Roll back the open transaction before returning the connection
+			// to the pool. Without this, pgxpool may return a connection that
+			// still has an active transaction, causing subtle errors for
+			// subsequent callers.
+			rollbackCtx, rollbackCancel := context.WithTimeout(
+				context.Background(),
+				2*time.Second,
+			)
+			if _, err := conn.Exec(rollbackCtx, "ROLLBACK"); err != nil {
+				slog.Warn(
+					"failed to rollback leaked connection before release",
+					"error", err,
+				)
+			}
+			rollbackCancel()
+
 			conn.Release()
 		}
 	}
