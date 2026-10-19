@@ -18,6 +18,12 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
+    // Pass AUTOSRE_API_KEY to the Playwright request context so that
+    // direct fetch() calls and request.get() in tests can authenticate
+    // against the backend when the middleware is enabled.
+    extraHTTPHeaders: process.env.AUTOSRE_API_KEY
+      ? { "X-API-Key": process.env.AUTOSRE_API_KEY }
+      : {},
   },
   projects: [
     {

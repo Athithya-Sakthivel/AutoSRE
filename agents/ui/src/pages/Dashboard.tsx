@@ -44,6 +44,7 @@ export function DashboardPage(): ReactElement {
   // Apply status filter
   const filteredIncidents = useMemo(() => {
     if (statusFilter === "all") return sortedIncidents;
+
     return sortedIncidents.filter((i) => i.status === statusFilter);
   }, [sortedIncidents, statusFilter]);
 
@@ -56,6 +57,7 @@ export function DashboardPage(): ReactElement {
       no_action: 0,
       failed: 0,
     };
+
     for (const i of incidents) {
       if (i.status === "running") c.running++;
       else if (i.status === "awaiting_approval") c.awaiting_approval++;
@@ -63,6 +65,7 @@ export function DashboardPage(): ReactElement {
       else if (i.status === "no_action") c.no_action++;
       else if (i.status === "failed") c.failed++;
     }
+
     return c;
   }, [incidents]);
 
@@ -88,6 +91,7 @@ export function DashboardPage(): ReactElement {
               counts.running > 0 ? "text-status-running" : "text-slate-400"
             }
           />
+
           <KpiCard
             label="Awaiting Approval"
             value={formatCount(counts.awaiting_approval)}
@@ -97,6 +101,7 @@ export function DashboardPage(): ReactElement {
                 : "text-slate-400"
             }
           />
+
           <KpiCard
             label="Resolved"
             value={formatCount(counts.resolved)}
@@ -104,11 +109,13 @@ export function DashboardPage(): ReactElement {
               counts.resolved > 0 ? "text-status-resolved" : "text-slate-400"
             }
           />
+
           <KpiCard
             label="Assessed"
             value={formatCount(counts.no_action)}
             color="text-slate-400"
           />
+
           <KpiCard
             label="Avg MTTR"
             value={
@@ -117,6 +124,7 @@ export function DashboardPage(): ReactElement {
                 : "—"
             }
           />
+
           <KpiCard
             label="Total Cost"
             value={formatCost(metrics.total_cost_usd)}
@@ -185,15 +193,25 @@ export function DashboardPage(): ReactElement {
 
       {filteredIncidents.length > 0 && (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {filteredIncidents.map((incident) => (
-            <Link
-              key={incident.incident_id}
-              to={`/incidents/${encodeURIComponent(incident.incident_id)}`}
-              className="group block rounded-lg border border-surface-border bg-surface-1 p-4 transition-all hover:border-surface-2 hover:bg-surface-2/50"
-            >
-              <IncidentCard incident={incident} />
-            </Link>
-          ))}
+          {filteredIncidents.map((incident) => {
+            const isActive =
+              incident.status === "running" ||
+              incident.status === "investigating";
+
+            return (
+              <Link
+                key={incident.incident_id}
+                to={`/incidents/${encodeURIComponent(incident.incident_id)}`}
+                className={`group block rounded-lg border bg-surface-1 p-4 transition-all duration-300 hover:border-surface-2 hover:bg-surface-2/50 ${
+                  isActive
+                    ? "border-l-[3px] border-l-status-running border-y-surface-border border-r-surface-border"
+                    : "border-surface-border"
+                }`}
+              >
+                <IncidentCard incident={incident} />
+              </Link>
+            );
+          })}
         </div>
       )}
     </div>

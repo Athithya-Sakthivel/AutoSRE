@@ -96,7 +96,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _EVAL_DIR = Path(__file__).parent
 _AGENTS_DIR = _EVAL_DIR.parent
-DATASET_PATH = _EVAL_DIR / "dataset" / "AutoSRE-Dataset-v3.json"
+DATASET_PATH = _EVAL_DIR / "dataset" / "AutoSRE-Dataset-v4.json"
 RESULTS_DIR = _EVAL_DIR / "results"
 CHAOS_SCRIPT = _AGENTS_DIR / "chaos" / "incidents.sh"
 
@@ -963,30 +963,44 @@ class AgentClient:
         request_timeout = self.timeout if timeout is None else timeout
         if request_timeout <= 0:
             raise TimeoutError("No request time remaining")
+
+        # Merge caller headers with API key auth when configured.
+        # The middleware reads AUTOSRE_API_KEY at app creation time;
+        # the eval harness must send the same key on every request.
+        request_headers = dict(headers) if headers else {}
+        api_key = os.getenv("AUTOSRE_API_KEY", "")
+        if api_key:
+            request_headers["X-API-Key"] = api_key
+
         async with httpx.AsyncClient(timeout=request_timeout) as client:
             response = await client.request(
                 method,
                 f"{self.base_url}{path}",
                 content=payload,
-                headers=headers,
+                headers=request_headers or None,
             )
-        if response.status_code == 429:
-            retry_after = response.headers.get("retry-after")
-            suffix = f"; retry-after={retry_after}s" if retry_after else ""
-            raise RateLimitError(f"AutoSRE rate-limited {method} {path}{suffix}")
-        if response.status_code == 422:
-            try:
-                body = response.json()
-                logger.error(
-                    "Validation error %s %s: %s",
-                    method,
-                    path,
-                    json.dumps(body, indent=2, default=str),
-                )
-            except Exception:
-                logger.error("Validation error %s %s: %s", method, path, response.text)
-        response.raise_for_status()
-        return self._json_object(response)
+            if response.status_code == 429:
+                retry_after = response.headers.get("retry-after")
+                suffix = f"; retry-after={retry_after}s" if retry_after else ""
+                raise RateLimitError(f"AutoSRE rate-limited {method} {path}{suffix}")
+            if response.status_code == 422:
+                try:
+                    body = response.json()
+                    logger.error(
+                        "Validation error %s %s: %s",
+                        method,
+                        path,
+                        json.dumps(body, indent=2, default=str),
+                    )
+                except Exception:
+                    logger.error(
+                        "Validation error %s %s: %s",
+                        method,
+                        path,
+                        response.text,
+                    )
+            response.raise_for_status()
+            return self._json_object(response)
 
     async def trigger_incident(self, incident: dict[str, Any]) -> str:
         """Send a webhook alert to the agent and return the incident ID.

@@ -28,7 +28,9 @@ cleanup() {
   fi
   [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]] && rm -rf "$TMP_DIR" || true
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 init_runtime() {
   TMP_DIR="$(mktemp -d -t eso-kind-XXXXXX)"
@@ -91,94 +93,78 @@ GT_PASS="${GT_PASS:-StagingEvalDbP123}"
 SRE_AGENT_URL="${SRE_AGENT_URL:-http://sre-agent.sre.svc.cluster.local:8000}"
 ALERT_WEBHOOK_SECRET="${ALERT_WEBHOOK_SECRET:-kind-alert-webhook-secret-rotate-me}"
 
-LLM_API_KEY="${LLM_API_KEY:-sk-kind-placeholder-rotate-me}"
-LLM_BASE_URL="${LLM_BASE_URL:-https://api.groq.com/openai/v1}"
-LLM_PROVIDER="${LLM_PROVIDER:-groq}"
-LLM_MODEL_COORDINATOR="${LLM_MODEL_COORDINATOR:-openai/gpt-oss-120b}"
-LLM_MODEL_WORKER="${LLM_MODEL_WORKER:-openai/gpt-oss-20b}"
-LLM_MODEL_SYNTHESIZER="${LLM_MODEL_SYNTHESIZER:-openai/gpt-oss-120b}"
-LLM_MODEL_SELF_CHECK="${LLM_MODEL_SELF_CHECK:-openai/gpt-oss-20b}"
-
 # ------------------------------------------------------------------------------
-# AutoSRE Agent values (AUTOSRE_ prefix)
+# AutoSRE Agent environment (must match the agent's exported variable names)
 # ------------------------------------------------------------------------------
-AUTOSRE_LLM_API_KEY="${AUTOSRE_LLM__API_KEY:?AUTOSRE_LLM__API_KEY is required}}"
-AUTOSRE_LLM_MODEL_COORDINATOR="${AUTOSRE_LLM_MODEL_COORDINATOR:-gemini/gemini-2.5-flash}"
-AUTOSRE_LLM_MODEL_WORKER="${AUTOSRE_LLM_MODEL_WORKER:-gemini/gemini-2.5-flash}"
-AUTOSRE_LLM_FALLBACK_MODELS="${AUTOSRE_LLM_FALLBACK_MODELS:-[\"gemini/gemini-2.0-flash\",\"gemini/gemini-1.5-flash\"]}"
-AUTOSRE_LLM_BASE_URL="${AUTOSRE_LLM_BASE_URL:-}"
-AUTOSRE_LLM_INPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM_INPUT_COST_PER_1K_COORDINATOR:-0.00075}"
-AUTOSRE_LLM_OUTPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM_OUTPUT_COST_PER_1K_COORDINATOR:-0.00375}"
-AUTOSRE_LLM_INPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM_INPUT_COST_PER_1K_WORKER:-0.00075}"
-AUTOSRE_LLM_OUTPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM_OUTPUT_COST_PER_1K_WORKER:-0.00375}"
-AUTOSRE_LLM_MAX_RETRIES="${AUTOSRE_LLM_MAX_RETRIES:-3}"
-AUTOSRE_LLM_INITIAL_BACKOFF_SECONDS="${AUTOSRE_LLM_INITIAL_BACKOFF_SECONDS:-1.0}"
-AUTOSRE_LLM_MAX_BACKOFF_SECONDS="${AUTOSRE_LLM_MAX_BACKOFF_SECONDS:-30.0}"
-AUTOSRE_LLM_ABSOLUTE_BACKOFF_CAP_SECONDS="${AUTOSRE_LLM_ABSOLUTE_BACKOFF_CAP_SECONDS:-30.0}"
-AUTOSRE_LLM_CIRCUIT_BREAKER_ENABLED="${AUTOSRE_LLM_CIRCUIT_BREAKER_ENABLED:-true}"
-AUTOSRE_LLM_CIRCUIT_BREAKER_THRESHOLD="${AUTOSRE_LLM_CIRCUIT_BREAKER_THRESHOLD:-5}"
-AUTOSRE_LLM_CIRCUIT_BREAKER_TIMEOUT_SECONDS="${AUTOSRE_LLM_CIRCUIT_BREAKER_TIMEOUT_SECONDS:-60.0}"
+# Legacy API-key input remains supported; the agent consumes AUTOSRE_LLM__API_KEY.
+export LLM_API_KEY="${LLM_API_KEY:-}"
 
-AUTOSRE_POSTGRES_HOST="${AUTOSRE_POSTGRES_HOST:-$PG_RIVULET_HOST}"
-AUTOSRE_POSTGRES_PORT="${AUTOSRE_POSTGRES_PORT:-$PG_RIVULET_PORT}"
-AUTOSRE_POSTGRES_DB="${AUTOSRE_POSTGRES_DB:-$PG_RIVULET_DB}"
-AUTOSRE_POSTGRES_USER="${AUTOSRE_POSTGRES_USER:-$PG_RIVULET_USER}"
-AUTOSRE_POSTGRES_PASSWORD="${AUTOSRE_POSTGRES_PASSWORD:-$PG_RIVULET_PASS}"
+# LLM (exactly the 10 supported/exported settings)
+export AUTOSRE_LLM__MODEL_COORDINATOR="${AUTOSRE_LLM__MODEL_COORDINATOR:-gemini/gemini-3.5-flash-lite}"
+export AUTOSRE_LLM__MODEL_WORKER="${AUTOSRE_LLM__MODEL_WORKER:-gemini/gemini-3.5-flash-lite}"
+export AUTOSRE_API_KEY="${AUTOSRE_API_KEY:-Temp-password234}"
+export AUTOSRE_LLM__API_KEY="${AUTOSRE_LLM__API_KEY:-${LLM_API_KEY:-}}"
+export AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR:-0.00075}"
+export AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR:-0.00375}"
+export AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER:-0.00075}"
+export AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER:-0.00375}"
+export AUTOSRE_LLM__MAX_RETRIES="${AUTOSRE_LLM__MAX_RETRIES:-5}"
+export AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS="${AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS:-2.0}"
+export AUTOSRE_LLM__MAX_BACKOFF_SECONDS="${AUTOSRE_LLM__MAX_BACKOFF_SECONDS:-60.0}"
 
-AUTOSRE_VALKEY_HOST="${AUTOSRE_VALKEY_HOST:-valkey.rivulet.svc.cluster.local}"
-AUTOSRE_VALKEY_PORT="${AUTOSRE_VALKEY_PORT:-6379}"
-AUTOSRE_VALKEY_PASSWORD="${AUTOSRE_VALKEY_PASSWORD:-StagingValkeyP@ss123}"
-AUTOSRE_VALKEY_TLS_ENABLED="${AUTOSRE_VALKEY_TLS_ENABLED:-false}"
 
-AUTOSRE_OPENOBSERVE_EMAIL="${AUTOSRE_OPENOBSERVE_EMAIL:-$OBS_READER_EMAIL}"
-AUTOSRE_OPENOBSERVE_PASSWORD="${AUTOSRE_OPENOBSERVE_PASSWORD:-$OBS_READER_PASSWORD}"
-AUTOSRE_OPENOBSERVE_URL="${AUTOSRE_OPENOBSERVE_URL:-$OBS_URL}"
+# Safety thresholds and execution limits used by the agent
+export AUTOSRE_SAFETY__CONFIDENCE_PROPOSE="${AUTOSRE_SAFETY__CONFIDENCE_PROPOSE:-0.55}"
+export AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH="${AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH:-0.80}"
+export AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP="${AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP:-0.40}"
+export AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT="${AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT:-0.05}"
+export AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS="${AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS:-1}"
+export AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT="${AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT:-10}"
+export AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS="${AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS:-600}"
 
-AUTOSRE_ALERT_WEBHOOK_SECRET="${AUTOSRE_ALERT_WEBHOOK_SECRET:-$ALERT_WEBHOOK_SECRET}"
-AUTOSRE_ADMIN_SECRET="${AUTOSRE_ADMIN_SECRET:-}"
+# Evaluation judge
+export AUTOSRE_EVAL__JUDGE_MODEL="${AUTOSRE_EVAL__JUDGE_MODEL:-gemini/gemini-3.5-flash-lite}"
+export AUTOSRE_EVAL__JUDGE_API_KEY="${AUTOSRE_EVAL__JUDGE_API_KEY:-${AUTOSRE_LLM__API_KEY}}"
 
-# Accept both single and double underscore (pydantic-settings convention)
-AUTOSRE_SLACK_BOT_TOKEN="${AUTOSRE_SLACK__BOT_TOKEN:-${AUTOSRE_SLACK_BOT_TOKEN:-}}"
-AUTOSRE_SLACK_APP_TOKEN="${AUTOSRE_SLACK__APP_TOKEN:-${AUTOSRE_SLACK_APP_TOKEN:-}}"
-AUTOSRE_SLACK_SIGNING_SECRET="${AUTOSRE_SLACK__SIGNING_SECRET:-${AUTOSRE_SLACK_SIGNING_SECRET:-}}"
-AUTOSRE_SLACK_MODE="${AUTOSRE_SLACK__MODE:-${AUTOSRE_SLACK_MODE:-socket}}"
-AUTOSRE_SLACK_APPROVAL_CHANNEL="${AUTOSRE_SLACK__APPROVAL_CHANNEL:-${AUTOSRE_SLACK_APPROVAL_CHANNEL:-}}"
-AUTOSRE_SLACK_APPROVER_USER_IDS="${AUTOSRE_SLACK__APPROVER_USER_IDS:-${AUTOSRE_SLACK_APPROVER_USER_IDS:-[]}}"
+# PostgreSQL (in-cluster service defaults)
+export AUTOSRE_POSTGRES__HOST="${AUTOSRE_POSTGRES__HOST:-$PG_RIVULET_HOST}"
+export AUTOSRE_POSTGRES__PORT="${AUTOSRE_POSTGRES__PORT:-$PG_RIVULET_PORT}"
+export AUTOSRE_POSTGRES__DB="${AUTOSRE_POSTGRES__DB:-$PG_RIVULET_DB}"
+export AUTOSRE_POSTGRES__USER="${AUTOSRE_POSTGRES__USER:-$PG_RIVULET_USER}"
+export AUTOSRE_POSTGRES__PASSWORD="${AUTOSRE_POSTGRES__PASSWORD:-$PG_RIVULET_PASS}"
 
-AUTOSRE_EVAL_JUDGE_API_KEY="${AUTOSRE_EVAL_JUDGE_API_KEY:-}"
-AUTOSRE_EVAL_JUDGE_MODEL="${AUTOSRE_EVAL_JUDGE_MODEL:-gemini/gemini-2.0-flash-lite}"
-AUTOSRE_EVAL_JUDGE_BASE_URL="${AUTOSRE_EVAL_JUDGE_BASE_URL:-}"
+# Valkey
+export AUTOSRE_VALKEY__HOST="${AUTOSRE_VALKEY__HOST:-valkey.rivulet.svc.cluster.local}"
+export AUTOSRE_VALKEY__PORT="${AUTOSRE_VALKEY__PORT:-6379}"
+export AUTOSRE_VALKEY__PASSWORD="${AUTOSRE_VALKEY__PASSWORD:-StagingValkeyP@ss123}"
+export AUTOSRE_VALKEY__TLS="${AUTOSRE_VALKEY__TLS:-false}"
 
-AUTOSRE_SAFETY_MAX_RISK_TIER_AUTONOMOUS="${AUTOSRE_SAFETY_MAX_RISK_TIER_AUTONOMOUS:-1}"
-AUTOSRE_SAFETY_MAX_ACTIONS_PER_INCIDENT="${AUTOSRE_SAFETY_MAX_ACTIONS_PER_INCIDENT:-10}"
-AUTOSRE_SAFETY_MAX_WALL_CLOCK_SECONDS="${AUTOSRE_SAFETY_MAX_WALL_CLOCK_SECONDS:-600}"
-AUTOSRE_SAFETY_INITIAL_ITERATION_BUDGET="${AUTOSRE_SAFETY_INITIAL_ITERATION_BUDGET:-3}"
-AUTOSRE_SAFETY_STAGNATION_LIMIT="${AUTOSRE_SAFETY_STAGNATION_LIMIT:-2}"
-AUTOSRE_SAFETY_MAX_ACTION_ATTEMPTS="${AUTOSRE_SAFETY_MAX_ACTION_ATTEMPTS:-2}"
-AUTOSRE_SAFETY_CONFIDENCE_PROPOSE="${AUTOSRE_SAFETY_CONFIDENCE_PROPOSE:-0.55}"
-AUTOSRE_SAFETY_CONFIDENCE_FAST_PATH="${AUTOSRE_SAFETY_CONFIDENCE_FAST_PATH:-0.80}"
-AUTOSRE_SAFETY_CONFIDENCE_GIVE_UP="${AUTOSRE_SAFETY_CONFIDENCE_GIVE_UP:-0.40}"
-AUTOSRE_SAFETY_MIN_CONFIDENCE_IMPROVEMENT="${AUTOSRE_SAFETY_MIN_CONFIDENCE_IMPROVEMENT:-0.05}"
-AUTOSRE_SAFETY_MAX_LLM_CALLS_PER_INCIDENT="${AUTOSRE_SAFETY_MAX_LLM_CALLS_PER_INCIDENT:-15}"
+# OpenObserve
+export AUTOSRE_OPENOBSERVE__EMAIL="${AUTOSRE_OPENOBSERVE__EMAIL:-$OBS_READER_EMAIL}"
+export AUTOSRE_OPENOBSERVE__PASSWORD="${AUTOSRE_OPENOBSERVE__PASSWORD:-$OBS_READER_PASSWORD}"
+export AUTOSRE_OPENOBSERVE__URL="${AUTOSRE_OPENOBSERVE__URL:-$OBS_URL}"
 
-AUTOSRE_OTEL_EXPORTER_OTLP_ENDPOINT="${AUTOSRE_OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-gateway.openobserve.svc.cluster.local:4318}"
-AUTOSRE_OTEL_SERVICE_NAME="${AUTOSRE_OTEL_SERVICE_NAME:-autosre-agent}"
-AUTOSRE_OTEL_DEPLOYMENT_ENVIRONMENT="${AUTOSRE_OTEL_DEPLOYMENT_ENVIRONMENT:-staging}"
-AUTOSRE_OTEL_EXPORTER_HEADERS="${AUTOSRE_OTEL_EXPORTER_HEADERS:-}"
+# Alerting and admin
+export AUTOSRE_ALERT__WEBHOOK_SECRET="${AUTOSRE_ALERT__WEBHOOK_SECRET:-$ALERT_WEBHOOK_SECRET}"
+export AUTOSRE_ADMIN__SECRET="${AUTOSRE_ADMIN__SECRET:-${AUTOSRE_ADMIN_SECRET:-}}"
 
-AUTOSRE_DEPLOYMENT_ENVIRONMENT="${AUTOSRE_DEPLOYMENT_ENVIRONMENT:-staging}"
+# OpenTelemetry and deployment metadata
+export AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT="${AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT:-http://otel-gateway.openobserve.svc.cluster.local:4318}"
+export AUTOSRE_OTEL__SERVICE_NAME="${AUTOSRE_OTEL__SERVICE_NAME:-autosre-agent}"
+export AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT="${AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT:-staging}"
+export AUTOSRE_DEPLOYMENT_ENVIRONMENT="${AUTOSRE_DEPLOYMENT_ENVIRONMENT:-staging}"
 
 # ------------------------------------------------------------------------------
 # Usage
 # ------------------------------------------------------------------------------
 usage() {
   cat <<'EOF'
-Usage: eso_local.sh [--dry-run] [--help]
+Usage: eso_setup.sh [--dry-run] [--help]
 
 Bootstraps ESO with in-cluster SecretStore. Zero cloud dependency.
 
 Example:
-  LLM_API_KEY=sk-real AUTOSRE_ADMIN_SECRET=admin123 ./eso_local.sh
+  AUTOSRE_LLM__API_KEY=AIza... AUTOSRE_ADMIN__SECRET=admin123 ./eso_setup.sh
 EOF
 }
 
@@ -240,7 +226,7 @@ ensure_namespaces() {
 }
 
 # ------------------------------------------------------------------------------
-# Source Secret — writes ALL 86 keys
+# Source Secret — writes 60 keys
 # ------------------------------------------------------------------------------
 ensure_source_secret() {
   if [[ "$DRY_RUN" == "true" ]]; then
@@ -249,7 +235,7 @@ ensure_source_secret() {
   fi
 
   local obs_basic otel_headers
-  obs_basic="$(b64 "${OBS_ROOT_EMAIL}:${OBS_ROOT_PASSWORD}")"
+  obs_basic="${OBS_ROOT_EMAIL}:${OBS_ROOT_PASSWORD}"
   otel_headers="Authorization=Bearer ${OTEL_TOKEN}"
 
   local pg_uri pg_jdbc pg_pgpass gt_uri
@@ -308,91 +294,61 @@ ensure_source_secret() {
     _put SreAgentApiUrl                  "$SRE_AGENT_URL"
     _put AlertWebhookSecret              "$ALERT_WEBHOOK_SECRET"
 
-    # Legacy LLM (7 keys)
-    _put LlmApiKey                       "$LLM_API_KEY"
-    _put LlmBaseUrl                      "$LLM_BASE_URL"
-    _put LlmProvider                     "$LLM_PROVIDER"
-    _put LlmModelCoordinator             "$LLM_MODEL_COORDINATOR"
-    _put LlmModelWorker                  "$LLM_MODEL_WORKER"
-    _put LlmModelSynthesizer             "$LLM_MODEL_SYNTHESIZER"
-    _put LlmModelSelfCheck               "$LLM_MODEL_SELF_CHECK"
+    # AutoSRE LLM (10 keys; exactly the agent's exported LLM settings)
+    _put AutosreLlmModelCoordinator           "$AUTOSRE_LLM__MODEL_COORDINATOR"
+    _put AutosreLlmModelWorker                "$AUTOSRE_LLM__MODEL_WORKER"
+    _put AutosreApiKey                        "$AUTOSRE_API_KEY"
+    _put AutosreLlmApiKey                     "$AUTOSRE_LLM__API_KEY"
+    _put AutosreLlmInputCostPer1kCoordinator  "$AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR"
+    _put AutosreLlmOutputCostPer1kCoordinator "$AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR"
+    _put AutosreLlmInputCostPer1kWorker       "$AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER"
+    _put AutosreLlmOutputCostPer1kWorker      "$AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER"
+    _put AutosreLlmMaxRetries                 "$AUTOSRE_LLM__MAX_RETRIES"
+    _put AutosreLlmInitialBackoffSeconds      "$AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS"
+    _put AutosreLlmMaxBackoffSeconds          "$AUTOSRE_LLM__MAX_BACKOFF_SECONDS"
 
-    # Autosre LLM (17 keys)
-    _put AutosreLlmApiKey                       "$AUTOSRE_LLM_API_KEY"
-    _put AutosreLlmModelCoordinator             "$AUTOSRE_LLM_MODEL_COORDINATOR"
-    _put AutosreLlmModelWorker                  "$AUTOSRE_LLM_MODEL_WORKER"
-    _put AutosreLlmFallbackModels               "$AUTOSRE_LLM_FALLBACK_MODELS"
-    _put AutosreLlmBaseUrl                      "$AUTOSRE_LLM_BASE_URL"
-    _put AutosreLlmInputCostPer1kCoordinator    "$AUTOSRE_LLM_INPUT_COST_PER_1K_COORDINATOR"
-    _put AutosreLlmOutputCostPer1kCoordinator   "$AUTOSRE_LLM_OUTPUT_COST_PER_1K_COORDINATOR"
-    _put AutosreLlmInputCostPer1kWorker         "$AUTOSRE_LLM_INPUT_COST_PER_1K_WORKER"
-    _put AutosreLlmOutputCostPer1kWorker        "$AUTOSRE_LLM_OUTPUT_COST_PER_1K_WORKER"
-    _put AutosreLlmMaxRetries                   "$AUTOSRE_LLM_MAX_RETRIES"
-    _put AutosreLlmInitialBackoffSeconds        "$AUTOSRE_LLM_INITIAL_BACKOFF_SECONDS"
-    _put AutosreLlmMaxBackoffSeconds            "$AUTOSRE_LLM_MAX_BACKOFF_SECONDS"
-    _put AutosreLlmAbsoluteBackoffCapSeconds    "$AUTOSRE_LLM_ABSOLUTE_BACKOFF_CAP_SECONDS"
-    _put AutosreLlmCircuitBreakerEnabled        "$AUTOSRE_LLM_CIRCUIT_BREAKER_ENABLED"
-    _put AutosreLlmCircuitBreakerThreshold      "$AUTOSRE_LLM_CIRCUIT_BREAKER_THRESHOLD"
-    _put AutosreLlmCircuitBreakerTimeoutSeconds "$AUTOSRE_LLM_CIRCUIT_BREAKER_TIMEOUT_SECONDS"
+    # AutoSRE PostgreSQL (5 keys)
+    _put AutosrePostgresHost                  "$AUTOSRE_POSTGRES__HOST"
+    _put AutosrePostgresPort                  "$AUTOSRE_POSTGRES__PORT"
+    _put AutosrePostgresDb                    "$AUTOSRE_POSTGRES__DB"
+    _put AutosrePostgresUser                  "$AUTOSRE_POSTGRES__USER"
+    _put AutosrePostgresPassword              "$AUTOSRE_POSTGRES__PASSWORD"
 
-    # Autosre Postgres (5 keys)
-    _put AutosrePostgresHost             "$AUTOSRE_POSTGRES_HOST"
-    _put AutosrePostgresPort             "$AUTOSRE_POSTGRES_PORT"
-    _put AutosrePostgresDb               "$AUTOSRE_POSTGRES_DB"
-    _put AutosrePostgresUser             "$AUTOSRE_POSTGRES_USER"
-    _put AutosrePostgresPassword         "$AUTOSRE_POSTGRES_PASSWORD"
+    # AutoSRE Valkey (4 keys; TLS variable name matches the agent)
+    _put AutosreValkeyHost                    "$AUTOSRE_VALKEY__HOST"
+    _put AutosreValkeyPort                    "$AUTOSRE_VALKEY__PORT"
+    _put AutosreValkeyPassword                "$AUTOSRE_VALKEY__PASSWORD"
+    _put AutosreValkeyTls                     "$AUTOSRE_VALKEY__TLS"
 
-    # Autosre Valkey (4 keys) — cross-namespace to rivulet
-    _put AutosreValkeyHost               "$AUTOSRE_VALKEY_HOST"
-    _put AutosreValkeyPort               "$AUTOSRE_VALKEY_PORT"
-    _put AutosreValkeyPassword           "$AUTOSRE_VALKEY_PASSWORD"
-    _put AutosreValkeyTlsEnabled         "$AUTOSRE_VALKEY_TLS_ENABLED"
+    # AutoSRE OpenObserve (3 keys)
+    _put AutosreOpenobserveEmail              "$AUTOSRE_OPENOBSERVE__EMAIL"
+    _put AutosreOpenobservePassword           "$AUTOSRE_OPENOBSERVE__PASSWORD"
+    _put AutosreOpenobserveUrl                "$AUTOSRE_OPENOBSERVE__URL"
 
-    # Autosre OpenObserve (3 keys)
-    _put AutosreOpenobserveEmail         "$AUTOSRE_OPENOBSERVE_EMAIL"
-    _put AutosreOpenobservePassword      "$AUTOSRE_OPENOBSERVE_PASSWORD"
-    _put AutosreOpenobserveUrl           "$AUTOSRE_OPENOBSERVE_URL"
+    # AutoSRE alerting/admin (2 keys)
+    _put AutosreAlertWebhookSecret            "$AUTOSRE_ALERT__WEBHOOK_SECRET"
+    _put AutosreAdminSecret                   "$AUTOSRE_ADMIN__SECRET"
 
-    # Autosre Alert (1 key)
-    _put AutosreAlertWebhookSecret       "$AUTOSRE_ALERT_WEBHOOK_SECRET"
+    # AutoSRE evaluation judge (2 keys)
+    _put AutosreEvalJudgeApiKey               "$AUTOSRE_EVAL__JUDGE_API_KEY"
+    _put AutosreEvalJudgeModel                "$AUTOSRE_EVAL__JUDGE_MODEL"
 
-    # Autosre Admin (1 key)
-    _put AutosreAdminSecret              "$AUTOSRE_ADMIN_SECRET"
+    # AutoSRE safety (7 keys)
+    _put AutosreSafetyMaxRiskTierAutonomous   "$AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS"
+    _put AutosreSafetyMaxActionsPerIncident   "$AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT"
+    _put AutosreSafetyMaxWallClockSeconds     "$AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS"
+    _put AutosreSafetyConfidencePropose        "$AUTOSRE_SAFETY__CONFIDENCE_PROPOSE"
+    _put AutosreSafetyConfidenceFastPath       "$AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH"
+    _put AutosreSafetyConfidenceGiveUp         "$AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP"
+    _put AutosreSafetyMinConfidenceImprovement "$AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT"
 
-    # Autosre Slack (6 keys)
-    _put AutosreSlackBotToken            "$AUTOSRE_SLACK_BOT_TOKEN"
-    _put AutosreSlackAppToken            "$AUTOSRE_SLACK_APP_TOKEN"
-    _put AutosreSlackSigningSecret       "$AUTOSRE_SLACK_SIGNING_SECRET"
-    _put AutosreSlackMode                "$AUTOSRE_SLACK_MODE"
-    _put AutosreSlackApprovalChannel     "$AUTOSRE_SLACK_APPROVAL_CHANNEL"
-    _put AutosreSlackApproverUserIds     "$AUTOSRE_SLACK_APPROVER_USER_IDS"
+    # AutoSRE OpenTelemetry (3 keys)
+    _put AutosreOtelExporterOtlpEndpoint      "$AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT"
+    _put AutosreOtelServiceName               "$AUTOSRE_OTEL__SERVICE_NAME"
+    _put AutosreOtelDeploymentEnvironment     "$AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT"
 
-    # Autosre Eval Judge (3 keys)
-    _put AutosreEvalJudgeApiKey          "$AUTOSRE_EVAL_JUDGE_API_KEY"
-    _put AutosreEvalJudgeModel           "$AUTOSRE_EVAL_JUDGE_MODEL"
-    _put AutosreEvalJudgeBaseUrl         "$AUTOSRE_EVAL_JUDGE_BASE_URL"
-
-    # Autosre Safety (11 keys)
-    _put AutosreSafetyMaxRiskTierAutonomous        "$AUTOSRE_SAFETY_MAX_RISK_TIER_AUTONOMOUS"
-    _put AutosreSafetyMaxActionsPerIncident        "$AUTOSRE_SAFETY_MAX_ACTIONS_PER_INCIDENT"
-    _put AutosreSafetyMaxWallClockSeconds          "$AUTOSRE_SAFETY_MAX_WALL_CLOCK_SECONDS"
-    _put AutosreSafetyInitialIterationBudget       "$AUTOSRE_SAFETY_INITIAL_ITERATION_BUDGET"
-    _put AutosreSafetyStagnationLimit              "$AUTOSRE_SAFETY_STAGNATION_LIMIT"
-    _put AutosreSafetyMaxActionAttempts            "$AUTOSRE_SAFETY_MAX_ACTION_ATTEMPTS"
-    _put AutosreSafetyConfidencePropose            "$AUTOSRE_SAFETY_CONFIDENCE_PROPOSE"
-    _put AutosreSafetyConfidenceFastPath           "$AUTOSRE_SAFETY_CONFIDENCE_FAST_PATH"
-    _put AutosreSafetyConfidenceGiveUp             "$AUTOSRE_SAFETY_CONFIDENCE_GIVE_UP"
-    _put AutosreSafetyMinConfidenceImprovement     "$AUTOSRE_SAFETY_MIN_CONFIDENCE_IMPROVEMENT"
-    _put AutosreSafetyMaxLlmCallsPerIncident       "$AUTOSRE_SAFETY_MAX_LLM_CALLS_PER_INCIDENT"
-
-    # Autosre OTel (4 keys)
-    _put AutosreOtelExporterOtlpEndpoint          "$AUTOSRE_OTEL_EXPORTER_OTLP_ENDPOINT"
-    _put AutosreOtelServiceName                   "$AUTOSRE_OTEL_SERVICE_NAME"
-    _put AutosreOtelDeploymentEnvironment         "$AUTOSRE_OTEL_DEPLOYMENT_ENVIRONMENT"
-    _put AutosreOtelExporterHeaders               "$AUTOSRE_OTEL_EXPORTER_HEADERS"
-
-    # Autosre Deployment (1 key)
-    _put AutosreDeploymentEnvironment             "$AUTOSRE_DEPLOYMENT_ENVIRONMENT"
+    # AutoSRE deployment metadata (1 key)
+    _put AutosreDeploymentEnvironment         "$AUTOSRE_DEPLOYMENT_ENVIRONMENT"
 
   } | kubectl apply -f - >/dev/null
 
@@ -615,13 +571,9 @@ spec:
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: llm-credentials }
   data:
-    - { secretKey: LLM_API_KEY,           remoteRef: { key: ${K}, property: LlmApiKey } }
-    - { secretKey: LLM_BASE_URL,          remoteRef: { key: ${K}, property: LlmBaseUrl } }
-    - { secretKey: LLM_PROVIDER,          remoteRef: { key: ${K}, property: LlmProvider } }
-    - { secretKey: LLM_MODEL_COORDINATOR, remoteRef: { key: ${K}, property: LlmModelCoordinator } }
-    - { secretKey: LLM_MODEL_WORKER,      remoteRef: { key: ${K}, property: LlmModelWorker } }
-    - { secretKey: LLM_MODEL_SYNTHESIZER, remoteRef: { key: ${K}, property: LlmModelSynthesizer } }
-    - { secretKey: LLM_MODEL_SELF_CHECK,  remoteRef: { key: ${K}, property: LlmModelSelfCheck } }
+    - { secretKey: LLM_API_KEY,           remoteRef: { key: ${K}, property: AutosreLlmApiKey } }
+    - { secretKey: LLM_MODEL_COORDINATOR, remoteRef: { key: ${K}, property: AutosreLlmModelCoordinator } }
+    - { secretKey: LLM_MODEL_WORKER,      remoteRef: { key: ${K}, property: AutosreLlmModelWorker } }
 ---
 apiVersion: external-secrets.io/${ESO_API_VERSION}
 kind: ExternalSecret
@@ -657,61 +609,43 @@ spec:
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: autosre-agent-secrets }
   data:
-    - { secretKey: AUTOSRE_LLM__API_KEY,                        remoteRef: { key: ${K}, property: AutosreLlmApiKey } }
-    - { secretKey: AUTOSRE_LLM__MODEL_COORDINATOR,              remoteRef: { key: ${K}, property: AutosreLlmModelCoordinator } }
-    - { secretKey: AUTOSRE_LLM__MODEL_WORKER,                   remoteRef: { key: ${K}, property: AutosreLlmModelWorker } }
-    - { secretKey: AUTOSRE_LLM__FALLBACK_MODELS,                remoteRef: { key: ${K}, property: AutosreLlmFallbackModels } }
-    - { secretKey: AUTOSRE_LLM__BASE_URL,                       remoteRef: { key: ${K}, property: AutosreLlmBaseUrl } }
-    - { secretKey: AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR,  remoteRef: { key: ${K}, property: AutosreLlmInputCostPer1kCoordinator } }
-    - { secretKey: AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR, remoteRef: { key: ${K}, property: AutosreLlmOutputCostPer1kCoordinator } }
-    - { secretKey: AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER,       remoteRef: { key: ${K}, property: AutosreLlmInputCostPer1kWorker } }
-    - { secretKey: AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER,      remoteRef: { key: ${K}, property: AutosreLlmOutputCostPer1kWorker } }
-    - { secretKey: AUTOSRE_LLM__MAX_RETRIES,                    remoteRef: { key: ${K}, property: AutosreLlmMaxRetries } }
-    - { secretKey: AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS,        remoteRef: { key: ${K}, property: AutosreLlmInitialBackoffSeconds } }
-    - { secretKey: AUTOSRE_LLM__MAX_BACKOFF_SECONDS,            remoteRef: { key: ${K}, property: AutosreLlmMaxBackoffSeconds } }
-    - { secretKey: AUTOSRE_LLM__ABSOLUTE_BACKOFF_CAP_SECONDS,   remoteRef: { key: ${K}, property: AutosreLlmAbsoluteBackoffCapSeconds } }
-    - { secretKey: AUTOSRE_LLM__CIRCUIT_BREAKER_ENABLED,        remoteRef: { key: ${K}, property: AutosreLlmCircuitBreakerEnabled } }
-    - { secretKey: AUTOSRE_LLM__CIRCUIT_BREAKER_THRESHOLD,      remoteRef: { key: ${K}, property: AutosreLlmCircuitBreakerThreshold } }
-    - { secretKey: AUTOSRE_LLM__CIRCUIT_BREAKER_TIMEOUT_SECONDS,remoteRef: { key: ${K}, property: AutosreLlmCircuitBreakerTimeoutSeconds } }
-    - { secretKey: AUTOSRE_POSTGRES__HOST,     remoteRef: { key: ${K}, property: AutosrePostgresHost } }
-    - { secretKey: AUTOSRE_POSTGRES__PORT,     remoteRef: { key: ${K}, property: AutosrePostgresPort } }
-    - { secretKey: AUTOSRE_POSTGRES__DB,       remoteRef: { key: ${K}, property: AutosrePostgresDb } }
-    - { secretKey: AUTOSRE_POSTGRES__USER,     remoteRef: { key: ${K}, property: AutosrePostgresUser } }
-    - { secretKey: AUTOSRE_POSTGRES__PASSWORD, remoteRef: { key: ${K}, property: AutosrePostgresPassword } }
-    - { secretKey: AUTOSRE_VALKEY__HOST,        remoteRef: { key: ${K}, property: AutosreValkeyHost } }
-    - { secretKey: AUTOSRE_VALKEY__PORT,        remoteRef: { key: ${K}, property: AutosreValkeyPort } }
-    - { secretKey: AUTOSRE_VALKEY__PASSWORD,    remoteRef: { key: ${K}, property: AutosreValkeyPassword } }
-    - { secretKey: AUTOSRE_VALKEY__TLS_ENABLED, remoteRef: { key: ${K}, property: AutosreValkeyTlsEnabled } }
-    - { secretKey: AUTOSRE_OPENOBSERVE__EMAIL,    remoteRef: { key: ${K}, property: AutosreOpenobserveEmail } }
-    - { secretKey: AUTOSRE_OPENOBSERVE__PASSWORD, remoteRef: { key: ${K}, property: AutosreOpenobservePassword } }
-    - { secretKey: AUTOSRE_OPENOBSERVE__URL,      remoteRef: { key: ${K}, property: AutosreOpenobserveUrl } }
-    - { secretKey: AUTOSRE_ALERT__WEBHOOK_SECRET, remoteRef: { key: ${K}, property: AutosreAlertWebhookSecret } }
-    - { secretKey: AUTOSRE_ADMIN__SECRET, remoteRef: { key: ${K}, property: AutosreAdminSecret } }
-    - { secretKey: AUTOSRE_SLACK__BOT_TOKEN,       remoteRef: { key: ${K}, property: AutosreSlackBotToken } }
-    - { secretKey: AUTOSRE_SLACK__APP_TOKEN,       remoteRef: { key: ${K}, property: AutosreSlackAppToken } }
-    - { secretKey: AUTOSRE_SLACK__SIGNING_SECRET,  remoteRef: { key: ${K}, property: AutosreSlackSigningSecret } }
-    - { secretKey: AUTOSRE_SLACK__MODE,            remoteRef: { key: ${K}, property: AutosreSlackMode } }
-    - { secretKey: AUTOSRE_SLACK__APPROVAL_CHANNEL,remoteRef: { key: ${K}, property: AutosreSlackApprovalChannel } }
-    - { secretKey: AUTOSRE_SLACK__APPROVER_USER_IDS,remoteRef: { key: ${K}, property: AutosreSlackApproverUserIds } }
-    - { secretKey: AUTOSRE_EVAL__JUDGE_API_KEY,  remoteRef: { key: ${K}, property: AutosreEvalJudgeApiKey } }
-    - { secretKey: AUTOSRE_EVAL__JUDGE_MODEL,   remoteRef: { key: ${K}, property: AutosreEvalJudgeModel } }
-    - { secretKey: AUTOSRE_EVAL__JUDGE_BASE_URL,remoteRef: { key: ${K}, property: AutosreEvalJudgeBaseUrl } }
-    - { secretKey: AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS,   remoteRef: { key: ${K}, property: AutosreSafetyMaxRiskTierAutonomous } }
-    - { secretKey: AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT,   remoteRef: { key: ${K}, property: AutosreSafetyMaxActionsPerIncident } }
-    - { secretKey: AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS,     remoteRef: { key: ${K}, property: AutosreSafetyMaxWallClockSeconds } }
-    - { secretKey: AUTOSRE_SAFETY__INITIAL_ITERATION_BUDGET,   remoteRef: { key: ${K}, property: AutosreSafetyInitialIterationBudget } }
-    - { secretKey: AUTOSRE_SAFETY__STAGNATION_LIMIT,           remoteRef: { key: ${K}, property: AutosreSafetyStagnationLimit } }
-    - { secretKey: AUTOSRE_SAFETY__MAX_ACTION_ATTEMPTS,        remoteRef: { key: ${K}, property: AutosreSafetyMaxActionAttempts } }
-    - { secretKey: AUTOSRE_SAFETY__CONFIDENCE_PROPOSE,         remoteRef: { key: ${K}, property: AutosreSafetyConfidencePropose } }
-    - { secretKey: AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH,       remoteRef: { key: ${K}, property: AutosreSafetyConfidenceFastPath } }
-    - { secretKey: AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP,         remoteRef: { key: ${K}, property: AutosreSafetyConfidenceGiveUp } }
-    - { secretKey: AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT, remoteRef: { key: ${K}, property: AutosreSafetyMinConfidenceImprovement } }
-    - { secretKey: AUTOSRE_SAFETY__MAX_LLM_CALLS_PER_INCIDENT, remoteRef: { key: ${K}, property: AutosreSafetyMaxLlmCallsPerIncident } }
-    - { secretKey: AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT, remoteRef: { key: ${K}, property: AutosreOtelExporterOtlpEndpoint } }
-    - { secretKey: AUTOSRE_OTEL__SERVICE_NAME,           remoteRef: { key: ${K}, property: AutosreOtelServiceName } }
-    - { secretKey: AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT, remoteRef: { key: ${K}, property: AutosreOtelDeploymentEnvironment } }
-    - { secretKey: AUTOSRE_OTEL__EXPORTER_HEADERS,       remoteRef: { key: ${K}, property: AutosreOtelExporterHeaders } }
-    - { secretKey: AUTOSRE_DEPLOYMENT_ENVIRONMENT, remoteRef: { key: ${K}, property: AutosreDeploymentEnvironment } }
+    - { secretKey: AUTOSRE_LLM__API_KEY,                          remoteRef: { key: ${K}, property: AutosreLlmApiKey } }
+    - { secretKey: AUTOSRE_LLM__MODEL_COORDINATOR,                remoteRef: { key: ${K}, property: AutosreLlmModelCoordinator } }
+    - { secretKey: AUTOSRE_LLM__MODEL_WORKER,                     remoteRef: { key: ${K}, property: AutosreLlmModelWorker } }
+    - { secretKey: AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR,    remoteRef: { key: ${K}, property: AutosreLlmInputCostPer1kCoordinator } }
+    - { secretKey: AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR,   remoteRef: { key: ${K}, property: AutosreLlmOutputCostPer1kCoordinator } }
+    - { secretKey: AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER,         remoteRef: { key: ${K}, property: AutosreLlmInputCostPer1kWorker } }
+    - { secretKey: AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER,        remoteRef: { key: ${K}, property: AutosreLlmOutputCostPer1kWorker } }
+    - { secretKey: AUTOSRE_LLM__MAX_RETRIES,                      remoteRef: { key: ${K}, property: AutosreLlmMaxRetries } }
+    - { secretKey: AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS,          remoteRef: { key: ${K}, property: AutosreLlmInitialBackoffSeconds } }
+    - { secretKey: AUTOSRE_LLM__MAX_BACKOFF_SECONDS,              remoteRef: { key: ${K}, property: AutosreLlmMaxBackoffSeconds } }
+    - { secretKey: AUTOSRE_POSTGRES__HOST,                        remoteRef: { key: ${K}, property: AutosrePostgresHost } }
+    - { secretKey: AUTOSRE_POSTGRES__PORT,                        remoteRef: { key: ${K}, property: AutosrePostgresPort } }
+    - { secretKey: AUTOSRE_POSTGRES__DB,                          remoteRef: { key: ${K}, property: AutosrePostgresDb } }
+    - { secretKey: AUTOSRE_POSTGRES__USER,                        remoteRef: { key: ${K}, property: AutosrePostgresUser } }
+    - { secretKey: AUTOSRE_POSTGRES__PASSWORD,                    remoteRef: { key: ${K}, property: AutosrePostgresPassword } }
+    - { secretKey: AUTOSRE_VALKEY__HOST,                          remoteRef: { key: ${K}, property: AutosreValkeyHost } }
+    - { secretKey: AUTOSRE_VALKEY__PORT,                          remoteRef: { key: ${K}, property: AutosreValkeyPort } }
+    - { secretKey: AUTOSRE_VALKEY__PASSWORD,                      remoteRef: { key: ${K}, property: AutosreValkeyPassword } }
+    - { secretKey: AUTOSRE_VALKEY__TLS,                           remoteRef: { key: ${K}, property: AutosreValkeyTls } }
+    - { secretKey: AUTOSRE_OPENOBSERVE__EMAIL,                    remoteRef: { key: ${K}, property: AutosreOpenobserveEmail } }
+    - { secretKey: AUTOSRE_OPENOBSERVE__PASSWORD,                 remoteRef: { key: ${K}, property: AutosreOpenobservePassword } }
+    - { secretKey: AUTOSRE_OPENOBSERVE__URL,                      remoteRef: { key: ${K}, property: AutosreOpenobserveUrl } }
+    - { secretKey: AUTOSRE_ALERT__WEBHOOK_SECRET,                 remoteRef: { key: ${K}, property: AutosreAlertWebhookSecret } }
+    - { secretKey: AUTOSRE_ADMIN__SECRET,                         remoteRef: { key: ${K}, property: AutosreAdminSecret } }
+    - { secretKey: AUTOSRE_EVAL__JUDGE_API_KEY,                   remoteRef: { key: ${K}, property: AutosreEvalJudgeApiKey } }
+    - { secretKey: AUTOSRE_EVAL__JUDGE_MODEL,                     remoteRef: { key: ${K}, property: AutosreEvalJudgeModel } }
+    - { secretKey: AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS,       remoteRef: { key: ${K}, property: AutosreSafetyMaxRiskTierAutonomous } }
+    - { secretKey: AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT,       remoteRef: { key: ${K}, property: AutosreSafetyMaxActionsPerIncident } }
+    - { secretKey: AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS,         remoteRef: { key: ${K}, property: AutosreSafetyMaxWallClockSeconds } }
+    - { secretKey: AUTOSRE_SAFETY__CONFIDENCE_PROPOSE,             remoteRef: { key: ${K}, property: AutosreSafetyConfidencePropose } }
+    - { secretKey: AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH,           remoteRef: { key: ${K}, property: AutosreSafetyConfidenceFastPath } }
+    - { secretKey: AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP,             remoteRef: { key: ${K}, property: AutosreSafetyConfidenceGiveUp } }
+    - { secretKey: AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT,     remoteRef: { key: ${K}, property: AutosreSafetyMinConfidenceImprovement } }
+    - { secretKey: AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT,           remoteRef: { key: ${K}, property: AutosreOtelExporterOtlpEndpoint } }
+    - { secretKey: AUTOSRE_OTEL__SERVICE_NAME,                     remoteRef: { key: ${K}, property: AutosreOtelServiceName } }
+    - { secretKey: AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT,            remoteRef: { key: ${K}, property: AutosreOtelDeploymentEnvironment } }
+    - { secretKey: AUTOSRE_DEPLOYMENT_ENVIRONMENT,                  remoteRef: { key: ${K}, property: AutosreDeploymentEnvironment } }
 # ============================================================================
 # eval namespace (3 ExternalSecrets)
 # ============================================================================
@@ -858,7 +792,7 @@ main() {
   done
 
   init_runtime
-  log "eso_local.sh — dry_run=${DRY_RUN}"
+  log "eso_setup.sh — dry_run=${DRY_RUN}"
 
   preflight
   install_eso

@@ -13,9 +13,9 @@
 #     latest        -> imagePullPolicy: Always
 #     anything else -> imagePullPolicy: IfNotPresent
 #
-# Secrets contract (all created by eso_local.sh):
-#   autosre-agent-secrets   AUTOSRE_* (86 keys including Valkey)
-#   postgres-agent          POSTGRES_HOST/PORT/DB/USER/PASSWORD/URI
+# Secrets contract (created by eso_setup.sh / External Secrets Operator):
+#   autosre-agent-secrets   37 AUTOSRE_* runtime keys (must match eso_setup.sh)
+#   postgres-agent          POSTGRES_HOST/PORT/DB/USER/PASSWORD/URI (legacy compatibility)
 #   openobserve-reader      email/password/url
 #   otel-exporter-headers   otel-exporter-headers (optional)
 #
@@ -26,7 +26,7 @@
 #   * default-deny         — Cilium endpoint isolation
 #
 # Dependencies (must be deployed before this script):
-#   1. scripts/staging/eso_local.sh          — ESO + all secrets
+#   1. scripts/staging/eso_setup.sh          — ESO + all secrets
 #   2. infra/k8s/cilium/templates/           — Cilium network policies
 #   3. scripts/staging/postgres.sh           — Postgres in rivulet namespace
 #   4. scripts/staging/valkey-deploy.sh      — Valkey in rivulet namespace
@@ -42,7 +42,7 @@ umask 0077
 NAMESPACE="${NAMESPACE:-sre}"
 APP_NAME="${APP_NAME:-autosre-agent}"
 IMAGE_REPO="${IMAGE_REPO:-ghcr.io/athithya-sakthivel/autosre-agent}"
-IMAGE_TAG="${IMAGE_TAG:-2026-10-16-18-14-03--db58e79}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
 
 DEPLOYMENT_ENVIRONMENT="${DEPLOYMENT_ENVIRONMENT:-staging}"
 OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-autosre-agent}"
@@ -55,7 +55,7 @@ VALKEY_PORT="${VALKEY_PORT:-6379}"
 OBSERVE_URL="${OBSERVE_URL:-http://openobserve.openobserve.svc.cluster.local:5080}"
 OTEL_ENDPOINT="${OTEL_ENDPOINT:-http://otel-gateway.openobserve.svc.cluster.local:4318}"
 
-# Secret names (all in sre namespace, created by eso_local.sh)
+# Secret names (all in sre namespace, created by eso_setup.sh)
 AGENT_SECRETS="${AGENT_SECRETS:-autosre-agent-secrets}"
 PG_SECRET="${PG_SECRET:-postgres-agent}"
 OBSERVE_SECRET="${OBSERVE_SECRET:-openobserve-reader}"
@@ -80,59 +80,16 @@ WORK_DIR=""
 PRESERVE_WORK_DIR=false
 
 # -----------------------------------------------------------------------------
-# LLM provider configuration — Google Gemini via LiteLLM
+# AutoSRE runtime configuration contract
 # -----------------------------------------------------------------------------
+# All application AUTOSRE_* values are injected from the ESO-managed
+# ${AGENT_SECRETS} Secret in ${NAMESPACE}. Keep its keys synchronized with:
+#   1. scripts/staging/test_e2e.sh exported AUTOSRE_* names/defaults
+#   2. scripts/staging/eso_setup.sh source Secret + ExternalSecret mappings
 #
-# Model IDs use the LiteLLM canonical form: gemini/<google-model-id>.
-# LiteLLM infers the provider from the "gemini/" prefix and routes to
-# the Google AI Studio endpoint. No base_url override is needed.
-#
-# Both coordinator and worker default to the same model because Gemini
-# 3.8 Flash has identical pricing and context window for both tiers.
-# The router still functions correctly as a pass-through; split to a
-# cheaper model later when paid-tier pricing diverges.
-#
-# API key: a single Google AI Studio key (AIza...) serves both the
-# agent and the DeepEval judge. No separate GROQ_API_KEY is needed.
-
-# Model selection. Override to test alternative Gemini models:
-#   gemini/gemini-3.5-flash-lite   (higher RPD on free tier)
-#   gemini/gemini-3.7-flash        (same pricing as 3.8)
-export AUTOSRE_LLM__MODEL_COORDINATOR="${AUTOSRE_LLM__MODEL_COORDINATOR:-gemini/gemini-3.8-flash}"
-export AUTOSRE_LLM__MODEL_WORKER="${AUTOSRE_LLM__MODEL_WORKER:-gemini/gemini-3.5-flash-lite}"
-
-# API key. Accepts either LLM_API_KEY (legacy) or AUTOSRE_LLM__API_KEY.
-export AUTOSRE_LLM__API_KEY="${AUTOSRE_LLM__API_KEY:?AUTOSRE_LLM__API_KEY is required}}"
-
-# Token pricing (USD / 1K tokens) — Gemini 3.x Standard tier.
-# Free tier bills $0.00, but the eval harness uses these rates to
-# project production costs and validate cost-efficiency constraints.
-
-export AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR:-0.00075}"
-export AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR:-0.00375}"
-export AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER:-0.00075}"
-export AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER:-0.00375}"
-
-export AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS="1"
-export AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT="10"
-export AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS="600"
-
-# -----------------------------------------------------------------------------
-# Eval judge configuration
-# -----------------------------------------------------------------------------
-# The judge uses the same Gemini model as the agent. DeepEval's
-# LiteLLMModel constructor accepts the canonical LiteLLM model ID
-# and passes it through to litellm.completion(). No base_url override
-# is needed for standard Google AI Studio access.
-#
-# The judge does NOT set temperature=0. Google's Gemini 3 documentation
-# warns that lowering temperature below the default (1.0) can degrade
-# reasoning quality and cause infinite generation loops. Instead, we
-# use generation_kwargs.reasoning_effort to control depth.
-
-export AUTOSRE_EVAL__JUDGE_MODEL="${AUTOSRE_EVAL__JUDGE_MODEL:-gemini/gemini-3.5-flash-lite}"
-export AUTOSRE_EVAL__JUDGE_API_KEY="${AUTOSRE_EVAL__JUDGE_API_KEY:-$AUTOSRE_LLM__API_KEY}"
-
+# Do not export duplicate host-side LLM values here: they would not alter the
+# container environment and could make `render`, `status`, or `delete` depend on
+# an API key unnecessarily. The pod reads exactly these Secret keys below.
 
 # ------------------------------------------------------------------------------
 # Logging
@@ -260,17 +217,74 @@ preflight_cilium() {
 }
 
 preflight_secrets() {
-  # Verify autosre-agent-secrets has Valkey keys
-  if kubectl -n "${NAMESPACE}" get secret "${AGENT_SECRETS}" >/dev/null 2>&1; then
-    local valkey_count
-    valkey_count="$(kubectl -n "${NAMESPACE}" get secret "${AGENT_SECRETS}" -o json 2>/dev/null | \
-      jq '[.data | keys[] | select(startswith("AUTOSRE_VALKEY"))] | length' 2>/dev/null || echo "0")"
-    if [[ "${valkey_count}" -lt 4 ]]; then
-      log_warn "autosre-agent-secrets has only ${valkey_count}/4 Valkey keys."
-      log_warn "Re-run scripts/staging/eso_local.sh with the updated script."
-    else
-      log_info "autosre-agent-secrets has all 4 Valkey keys"
+  # Validate the exact runtime contract emitted by eso_setup.sh. Do not print
+  # secret values; only inspect the keys stored in the Kubernetes Secret.
+  if ! kubectl -n "${NAMESPACE}" get secret "${AGENT_SECRETS}" >/dev/null 2>&1; then
+    return 0  # The main preflight reports a missing Secret with its name.
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    log_warn "jq not installed — skipping AutoSRE Secret key-contract check."
+    return 0
+  fi
+
+  local secret_json key
+  local missing=()
+  local required_keys=(
+    AUTOSRE_LLM__API_KEY
+    AUTOSRE_LLM__MODEL_COORDINATOR
+    AUTOSRE_LLM__MODEL_WORKER
+    AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR
+    AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR
+    AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER
+    AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER
+    AUTOSRE_LLM__MAX_RETRIES
+    AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS
+    AUTOSRE_LLM__MAX_BACKOFF_SECONDS
+    AUTOSRE_POSTGRES__HOST
+    AUTOSRE_POSTGRES__PORT
+    AUTOSRE_POSTGRES__DB
+    AUTOSRE_POSTGRES__USER
+    AUTOSRE_POSTGRES__PASSWORD
+    AUTOSRE_VALKEY__HOST
+    AUTOSRE_VALKEY__PORT
+    AUTOSRE_VALKEY__PASSWORD
+    AUTOSRE_VALKEY__TLS
+    AUTOSRE_OPENOBSERVE__EMAIL
+    AUTOSRE_OPENOBSERVE__PASSWORD
+    AUTOSRE_OPENOBSERVE__URL
+    AUTOSRE_ALERT__WEBHOOK_SECRET
+    AUTOSRE_ADMIN__SECRET
+    AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS
+    AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT
+    AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS
+    AUTOSRE_SAFETY__CONFIDENCE_PROPOSE
+    AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH
+    AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP
+    AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT
+    AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT
+    AUTOSRE_OTEL__SERVICE_NAME
+    AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT
+    AUTOSRE_DEPLOYMENT_ENVIRONMENT
+    AUTOSRE_EVAL__JUDGE_API_KEY
+    AUTOSRE_EVAL__JUDGE_MODEL
+  )
+
+  secret_json="$(kubectl -n "${NAMESPACE}" get secret "${AGENT_SECRETS}" -o json 2>/dev/null)" || {
+    log_warn "Could not inspect ${NAMESPACE}/${AGENT_SECRETS}."
+    return 0
+  }
+  for key in "${required_keys[@]}"; do
+    if ! jq -e --arg key "${key}" '.data | has($key)' <<<"${secret_json}" >/dev/null 2>&1; then
+      missing+=("${key}")
     fi
+  done
+
+  if (( ${#missing[@]} > 0 )); then
+    log_warn "${NAMESPACE}/${AGENT_SECRETS} is missing ${#missing[@]} of ${#required_keys[@]} expected keys:"
+    printf '  %s\n' "${missing[@]}" >&2
+    log_warn "Re-run scripts/staging/eso_setup.sh and wait for ExternalSecrets to become Ready."
+  else
+    log_info "${NAMESPACE}/${AGENT_SECRETS} has all ${#required_keys[@]} expected AutoSRE keys"
   fi
 }
 
@@ -304,7 +318,7 @@ preflight() {
   for s in "${AGENT_SECRETS}" "${PG_SECRET}" "${OBSERVE_SECRET}"; do
     if ! kubectl -n "${NAMESPACE}" get secret "${s}" >/dev/null 2>&1; then
       log_warn "Secret '${s}' not found in namespace '${NAMESPACE}'."
-      log_warn "Run scripts/staging/eso_local.sh first."
+      log_warn "Run scripts/staging/eso_setup.sh first."
     fi
   done
 
@@ -481,18 +495,17 @@ spec:
               valueFrom: { secretKeyRef: { name: ${PG_SECRET}, key: POSTGRES_PASSWORD } }
 
             # ================================================================
-            # AUTOSRE_LLM__* (16 keys)
+            # LLM (10 keys)
             # ================================================================
+
+            - name: AUTOSRE_API_KEY
+              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_API_KEY } }
             - name: AUTOSRE_LLM__API_KEY
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__API_KEY } }
             - name: AUTOSRE_LLM__MODEL_COORDINATOR
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__MODEL_COORDINATOR } }
             - name: AUTOSRE_LLM__MODEL_WORKER
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__MODEL_WORKER } }
-            - name: AUTOSRE_LLM__FALLBACK_MODELS
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__FALLBACK_MODELS } }
-            - name: AUTOSRE_LLM__BASE_URL
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__BASE_URL } }
             - name: AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR } }
             - name: AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR
@@ -507,17 +520,9 @@ spec:
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS } }
             - name: AUTOSRE_LLM__MAX_BACKOFF_SECONDS
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__MAX_BACKOFF_SECONDS } }
-            - name: AUTOSRE_LLM__ABSOLUTE_BACKOFF_CAP_SECONDS
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__ABSOLUTE_BACKOFF_CAP_SECONDS } }
-            - name: AUTOSRE_LLM__CIRCUIT_BREAKER_ENABLED
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__CIRCUIT_BREAKER_ENABLED } }
-            - name: AUTOSRE_LLM__CIRCUIT_BREAKER_THRESHOLD
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__CIRCUIT_BREAKER_THRESHOLD } }
-            - name: AUTOSRE_LLM__CIRCUIT_BREAKER_TIMEOUT_SECONDS
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_LLM__CIRCUIT_BREAKER_TIMEOUT_SECONDS } }
 
             # ================================================================
-            # AUTOSRE_POSTGRES__* (5 keys)
+            # PostgreSQL (5 keys)
             # ================================================================
             - name: AUTOSRE_POSTGRES__HOST
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_POSTGRES__HOST } }
@@ -531,7 +536,7 @@ spec:
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_POSTGRES__PASSWORD } }
 
             # ================================================================
-            # AUTOSRE_VALKEY__* (4 keys) — cross-namespace to rivulet
+            # Valkey (4 keys; TLS setting name matches application config)
             # ================================================================
             - name: AUTOSRE_VALKEY__HOST
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_VALKEY__HOST } }
@@ -539,11 +544,11 @@ spec:
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_VALKEY__PORT } }
             - name: AUTOSRE_VALKEY__PASSWORD
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_VALKEY__PASSWORD } }
-            - name: AUTOSRE_VALKEY__TLS_ENABLED
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_VALKEY__TLS_ENABLED } }
+            - name: AUTOSRE_VALKEY__TLS
+              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_VALKEY__TLS } }
 
             # ================================================================
-            # AUTOSRE_OPENOBSERVE__* (3 keys)
+            # OpenObserve (3 keys)
             # ================================================================
             - name: AUTOSRE_OPENOBSERVE__EMAIL
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_OPENOBSERVE__EMAIL } }
@@ -553,19 +558,19 @@ spec:
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_OPENOBSERVE__URL } }
 
             # ================================================================
-            # AUTOSRE_ALERT__* (1 key)
+            # Alerting (1 key)
             # ================================================================
             - name: AUTOSRE_ALERT__WEBHOOK_SECRET
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_ALERT__WEBHOOK_SECRET } }
 
             # ================================================================
-            # AUTOSRE_ADMIN__* (1 key, optional)
+            # Admin (1 key; optional)
             # ================================================================
             - name: AUTOSRE_ADMIN__SECRET
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_ADMIN__SECRET, optional: true } }
 
             # ================================================================
-            # AUTOSRE_SAFETY__* (11 keys)
+            # Safety (7 keys)
             # ================================================================
             - name: AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS } }
@@ -573,12 +578,6 @@ spec:
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT } }
             - name: AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS } }
-            - name: AUTOSRE_SAFETY__INITIAL_ITERATION_BUDGET
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SAFETY__INITIAL_ITERATION_BUDGET } }
-            - name: AUTOSRE_SAFETY__STAGNATION_LIMIT
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SAFETY__STAGNATION_LIMIT } }
-            - name: AUTOSRE_SAFETY__MAX_ACTION_ATTEMPTS
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SAFETY__MAX_ACTION_ATTEMPTS } }
             - name: AUTOSRE_SAFETY__CONFIDENCE_PROPOSE
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SAFETY__CONFIDENCE_PROPOSE } }
             - name: AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH
@@ -587,11 +586,9 @@ spec:
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP } }
             - name: AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT } }
-            - name: AUTOSRE_SAFETY__MAX_LLM_CALLS_PER_INCIDENT
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_SAFETY__MAX_LLM_CALLS_PER_INCIDENT } }
 
             # ================================================================
-            # AUTOSRE_OTEL__* (4 keys)
+            # OpenTelemetry (3 keys)
             # ================================================================
             - name: AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT } }
@@ -599,24 +596,20 @@ spec:
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_OTEL__SERVICE_NAME } }
             - name: AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT } }
-            - name: AUTOSRE_OTEL__EXPORTER_HEADERS
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_OTEL__EXPORTER_HEADERS } }
 
             # ================================================================
-            # AUTOSRE_DEPLOYMENT_ENVIRONMENT (1 key)
+            # Deployment metadata (1 key)
             # ================================================================
             - name: AUTOSRE_DEPLOYMENT_ENVIRONMENT
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_DEPLOYMENT_ENVIRONMENT } }
 
             # ================================================================
-            # AUTOSRE_EVAL__* (3 keys, optional — only used by eval harness)
+            # Eval judge (2 keys; optional for the runtime agent)
             # ================================================================
             - name: AUTOSRE_EVAL__JUDGE_API_KEY
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_EVAL__JUDGE_API_KEY, optional: true } }
             - name: AUTOSRE_EVAL__JUDGE_MODEL
               valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_EVAL__JUDGE_MODEL, optional: true } }
-            - name: AUTOSRE_EVAL__JUDGE_BASE_URL
-              valueFrom: { secretKeyRef: { name: ${AGENT_SECRETS}, key: AUTOSRE_EVAL__JUDGE_BASE_URL, optional: true } }
 
             # ================================================================
             # OTel exporter headers (optional, from separate secret)
@@ -820,7 +813,7 @@ async def test():
         host=os.environ['AUTOSRE_VALKEY__HOST'],
         port=int(os.environ['AUTOSRE_VALKEY__PORT']),
         password=os.environ.get('AUTOSRE_VALKEY__PASSWORD') or None,
-        ssl=os.environ.get('AUTOSRE_VALKEY__TLS_ENABLED', 'false').lower() == 'true',
+        ssl=os.environ.get('AUTOSRE_VALKEY__TLS', 'false').lower() == 'true',
         socket_connect_timeout=5.0,
         decode_responses=True,
     )
@@ -868,7 +861,7 @@ Flags:
                   sha-<12-char-sha> for an immutable deploy.
 
 Prerequisites (must be deployed before this script):
-  1. scripts/staging/eso_local.sh          — ESO + all secrets
+  1. scripts/staging/eso_setup.sh          — ESO + all secrets
   2. infra/k8s/cilium/templates/           — Cilium network policies
   3. scripts/staging/postgres.sh           — Postgres in rivulet namespace
   4. scripts/staging/valkey-deploy.sh      — Valkey in rivulet namespace
@@ -925,8 +918,11 @@ main() {
     usage; exit 2
   fi
 
-  local cmd="${args[0]}"; shift 1 || true
-  local passthrough=("$@")
+  local cmd="${args[0]}"
+  local passthrough=()
+  if (( ${#args[@]} > 1 )); then
+    passthrough=("${args[@]:1}")
+  fi
 
   if [[ "${resolve_sha}" == "true" ]]; then
     local local_ref="${IMAGE_REPO}:${IMAGE_TAG}"

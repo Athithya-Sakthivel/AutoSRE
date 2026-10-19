@@ -1,20 +1,17 @@
 /**
- * Root application component with routing, readiness bootstrap, and
- * live agent health indicator.
+ * Root application component with routing, readiness bootstrap,
+ * live agent health indicator, and global sync indicator.
  *
  * Component hierarchy:
- *   <ErrorBoundary>              catches render errors
+ *   <ErrorBoundary>              catches render errors, logs to console
  *     <ReadyGate>                polls /readyz, blocks until backend is ready
  *       <BrowserRouter>          client-side routing
  *         <DocumentTitle>        keeps browser tab title synchronized
  *         <Routes>               page components
  *
- * Agent health:
- *   The header's AgentHealthIndicator polls /healthz every 10 seconds.
- *   It reflects three states:
- *     online    — backend responds with status: "ok", paused: false
- *     paused    — backend responds, paused: true
- *     offline   — request fails or times out
+ * Live indicators:
+ *   AgentHealthIndicator polls /healthz every 10 seconds.
+ *   SyncIndicator shows a pulsing dot when any React Query is fetching.
  */
 
 import { useEffect, useState } from "react";
@@ -29,7 +26,7 @@ import {
   Routes,
   useLocation,
 } from "react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { DashboardPage } from "./pages/Dashboard";
@@ -184,6 +181,45 @@ function DocumentTitle(): null {
 }
 
 // ---------------------------------------------------------------------------
+// Sync indicator — shows when any query is actively fetching
+// ---------------------------------------------------------------------------
+
+function SyncIndicator(): ReactElement | null {
+  const queryClient = useQueryClient();
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  useEffect(() => {
+    const check = (): void => {
+      const queries = queryClient.getQueryCache().getAll();
+      setIsSyncing(queries.some((q) => q.state.fetchStatus === "fetching"));
+    };
+
+    // Check immediately
+    check();
+
+    // Subscribe to cache changes
+    const unsubscribe = queryClient.getQueryCache().subscribe(check);
+    return unsubscribe;
+  }, [queryClient]);
+
+  if (!isSyncing) return null;
+
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 text-[10px] text-slate-500"
+      role="status"
+      aria-label="Syncing data"
+    >
+      <span
+        className="h-1.5 w-1.5 animate-pulse rounded-full bg-status-running"
+        aria-hidden="true"
+      />
+      syncing
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // App shell
 // ---------------------------------------------------------------------------
 
@@ -212,7 +248,8 @@ function AppShell(): ReactElement {
             <TopNavLink to="/metrics">Metrics</TopNavLink>
           </nav>
 
-          <div className="ml-auto text-xs text-slate-400">
+          <div className="ml-auto flex items-center gap-3 text-xs text-slate-400">
+            <SyncIndicator />
             <AgentHealthIndicator />
           </div>
         </div>
@@ -362,7 +399,13 @@ function NotFoundPage(): ReactElement {
 
 export function App(): ReactElement {
   return (
-    <ErrorBoundary>
+    <ErrorBoundary
+      onError={(error, info) => {
+        // Surface render errors to console for debugging
+        // In production, replace with structured logging endpoint
+        console.error("[ErrorBoundary]", error, info.componentStack);
+      }}
+    >
       <ReadyGate>
         <BrowserRouter>
           <DocumentTitle />

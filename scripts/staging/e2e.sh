@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# export AUTOSRE_SLACK_*
 export AUTOSRE_LLM__API_KEY="${AUTOSRE_LLM__API_KEY:?AUTOSRE_LLM__API_KEY is required}}"
+export AUTOSRE_API_KEY="${AUTOSRE_API_KEY:-Temp-password234}"
 
-export AUTOSRE_LLM__MODEL_COORDINATOR="${AUTOSRE_LLM__MODEL_COORDINATOR:-gemini/gemini-3.8-flash}"
+export AUTOSRE_LLM__MODEL_COORDINATOR="${AUTOSRE_LLM__MODEL_COORDINATOR:-gemini/gemini-3.5-flash-lite}"
 export AUTOSRE_LLM__MODEL_WORKER="${AUTOSRE_LLM__MODEL_WORKER:-gemini/gemini-3.5-flash-lite}"
 
 
@@ -40,8 +40,9 @@ curl -fsS http://localhost:5080 >/dev/null 2>&1 && echo "OpenObserve ready" || {
 bash infra/terraform/run.sh --apply        # Provision O2 streams, alerts, and roles
 
 
-# Not required in CI/CD
+
 # bash scripts/common/autosre-agent-deploy.sh deploy
+# Not required in CI/CD
 # bash scripts/common/test-o2.sh             # Run end-to-end telemetry smoke test
 
 

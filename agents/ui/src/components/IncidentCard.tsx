@@ -10,8 +10,10 @@ interface IncidentCardProps {
 }
 
 function cardClassName(isAwaiting: boolean, isFailed: boolean): string {
+  // duration-300 + ease-in-out makes status changes animate smoothly
+  // (e.g., amber awaiting → green resolved after approval)
   const baseClasses =
-    "rounded-lg border bg-surface-1 p-4 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-status-running/50";
+    "rounded-lg border bg-surface-1 p-4 transition-all duration-300 ease-in-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-status-running/50";
 
   if (isAwaiting) {
     return `${baseClasses} border-status-awaiting/40 ring-1 ring-status-awaiting/20`;

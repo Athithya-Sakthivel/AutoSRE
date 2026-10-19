@@ -10,6 +10,11 @@
 # Failure output is always verbose — failed checks print response bodies,
 # DOM content, and Vite proxy verification automatically.
 #
+# Environment:
+#   AUTOSRE_API_KEY     Optional API key for authenticated testing.
+#                       When set, the backend requires X-API-Key header.
+#                       When unset, auth is disabled (local dev mode).
+#
 # Prerequisites:
 #   cd /workspace/agents && bash test_e2e.sh --run
 
@@ -35,6 +40,9 @@ Modes:
   --playwright   API + Playwright E2E test suite (~30s)
   --diagnose     API + Playwright DOM diagnostic dump (~40s)
 
+Environment:
+  AUTOSRE_API_KEY  Optional API key for authenticated testing.
+
 Failure output is always verbose — failed checks print response bodies,
 DOM content, and Vite proxy verification automatically.
 
@@ -45,6 +53,9 @@ Examples:
   bash agents/ui/test_e2e.sh                  # API only
   bash agents/ui/test_e2e.sh --playwright     # API + E2E tests
   bash agents/ui/test_e2e.sh --diagnose       # API + DOM inspection
+
+  # With auth enabled:
+  AUTOSRE_API_KEY=test-secret bash agents/ui/test_e2e.sh --playwright
 HELPTEXT
       exit 0
       ;;
@@ -65,6 +76,9 @@ UI_URL="http://127.0.0.1:5173"
 WAIT_TIMEOUT=60
 UI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Auth: export for Playwright tests to read via process.env
+export AUTOSRE_API_KEY="${AUTOSRE_API_KEY:-}"
+
 # ---------------------------------------------------------------------------
 # Counters
 # ---------------------------------------------------------------------------
@@ -75,6 +89,7 @@ SKIP=0
 RESULTS=()
 FAIL_DETAILS=()
 INCIDENT_ID=""
+PLAYWRIGHT_FAILED=false
 
 # ---------------------------------------------------------------------------
 # Colors
@@ -185,28 +200,41 @@ check_array_ok() {
 }
 
 # ---------------------------------------------------------------------------
-# HTTP helpers
+# HTTP helpers — all send X-API-Key when AUTOSRE_API_KEY is set
 # ---------------------------------------------------------------------------
 
 http_get() {
-  curl -sf --max-time 10 "${BASE_URL}${1}" 2>/dev/null || true
+  local args=(-sf --max-time 10)
+  if [[ -n "${AUTOSRE_API_KEY:-}" ]]; then
+    args+=(-H "X-API-Key: ${AUTOSRE_API_KEY}")
+  fi
+  curl "${args[@]}" "${BASE_URL}${1}" 2>/dev/null || true
 }
 
 http_status() {
-  curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${BASE_URL}${1}" 2>/dev/null || true
+  local args=(-s -o /dev/null -w '%{http_code}' --max-time 10)
+  if [[ -n "${AUTOSRE_API_KEY:-}" ]]; then
+    args+=(-H "X-API-Key: ${AUTOSRE_API_KEY}")
+  fi
+  curl "${args[@]}" "${BASE_URL}${1}" 2>/dev/null || true
 }
 
 http_get_with_status() {
-  # Writes status code to stdout line 1, body to remaining lines
   local url="${BASE_URL}${1}"
   local tmpfile code body
+  local args=(-s -w '%{http_code}' --max-time 10)
+  if [[ -n "${AUTOSRE_API_KEY:-}" ]]; then
+    args+=(-H "X-API-Key: ${AUTOSRE_API_KEY}")
+  fi
   tmpfile=$(mktemp)
-  code=$(curl -s -w '%{http_code}' --max-time 10 -o "$tmpfile" "$url" 2>/dev/null) || true
+  code=$(curl "${args[@]}" -o "$tmpfile" "$url" 2>/dev/null) || true
   body=$(cat "$tmpfile" 2>/dev/null) || true
   rm -f "$tmpfile"
   printf '%s\n%s' "${code:-000}" "${body:-}"
 }
 
+# UI helpers go through Vite proxy which injects auth headers server-side.
+# No X-API-Key needed here.
 ui_get() {
   curl -sf --max-time 10 "${UI_URL}${1}" 2>/dev/null || true
 }
@@ -416,10 +444,12 @@ fi
 
 log "8. Approval Signing — POST /api/sign-approval"
 
-SIGN_RESP=$(curl -sf -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"approved":true,"comment":"test"}' \
-  "${BASE_URL}/api/sign-approval" 2>/dev/null) || true
+SIGN_ARGS=(-sf -X POST -H "Content-Type: application/json"
+           -d '{"approved":true,"comment":"test"}')
+if [[ -n "${AUTOSRE_API_KEY:-}" ]]; then
+  SIGN_ARGS+=(-H "X-API-Key: ${AUTOSRE_API_KEY}")
+fi
+SIGN_RESP=$(curl "${SIGN_ARGS[@]}" "${BASE_URL}/api/sign-approval" 2>/dev/null) || true
 
 if [[ -n "$SIGN_RESP" ]]; then
   check_field "$SIGN_RESP" '.signature' "sign-approval.signature"
@@ -461,7 +491,7 @@ if [[ "$MODE" == "playwright" ]]; then
   fi
 
   if [[ "$UI_CODE" == "200" ]]; then
-    log "11. Playwright E2E Tests"
+    log "11. Playwright Approval Flow Tests (Mocked Backend)"
 
     cd "$UI_DIR" || exit 1
 
@@ -476,23 +506,61 @@ if [[ "$MODE" == "playwright" ]]; then
         npx playwright install chromium
       fi
 
-      printf '  Running: npx playwright test tests/e2e.spec.ts\n\n'
+      # Log auth mode
+      if [[ -n "$AUTOSRE_API_KEY" ]]; then
+        printf '  Auth: enabled (X-API-Key header will be validated)\n'
+      else
+        printf '  Auth: disabled (local dev mode)\n'
+      fi
 
-      pw_output=$(npx playwright test tests/e2e.spec.ts 2>&1) || true
-      pw_exit=$?
+      # Run approval flow tests (mocked backend, no real agent needed).
+      # Capture exit code properly — || true would mask failures.
+      printf '\n  Running: npx playwright test tests/approval-flow.spec.ts\n\n'
+      pw_exit=0
+      pw_output=$(npx playwright test tests/approval-flow.spec.ts 2>&1) || pw_exit=$?
 
-      # Safely print output — cat avoids printf interpreting leading dashes
       cat <<< "$pw_output"
       printf '\n'
 
       if [[ $pw_exit -eq 0 ]]; then
-        ok "All Playwright tests passed"
+        ok "Approval flow tests passed"
       else
-        bad "Playwright tests failed (exit code $pw_exit)"
+        bad "Approval flow tests failed (exit code $pw_exit)"
+        PLAYWRIGHT_FAILED=true
 
         failing_tests=$(printf '%s' "$pw_output" | grep "✘" | head -10) || true
         if [[ -n "${failing_tests:-}" ]]; then
-          detail "  Failing tests:"
+          detail "  Failing approval tests:"
+          while IFS= read -r ft_line; do
+            detail "    $ft_line"
+          done <<< "$failing_tests"
+        fi
+      fi
+    fi
+
+    cd - >/dev/null
+
+    log "12. Playwright Integration Tests (Real Backend)"
+
+    cd "$UI_DIR" || exit 1
+
+    if [[ -d "node_modules" ]] && command -v npx >/dev/null 2>&1; then
+      printf '  Running: npx playwright test tests/e2e.spec.ts\n\n'
+      pw_exit=0
+      pw_output=$(npx playwright test tests/e2e.spec.ts 2>&1) || pw_exit=$?
+
+      cat <<< "$pw_output"
+      printf '\n'
+
+      if [[ $pw_exit -eq 0 ]]; then
+        ok "Integration tests passed"
+      else
+        bad "Integration tests failed (exit code $pw_exit)"
+        PLAYWRIGHT_FAILED=true
+
+        failing_tests=$(printf '%s' "$pw_output" | grep "✘" | head -10) || true
+        if [[ -n "${failing_tests:-}" ]]; then
+          detail "  Failing integration tests:"
           while IFS= read -r ft_line; do
             detail "    $ft_line"
           done <<< "$failing_tests"
@@ -555,8 +623,8 @@ if [[ "$MODE" == "diagnose" ]]; then
 
       printf '  Running: npx playwright test tests/diagnose-ui.spec.ts\n\n'
 
-      diag_pw_output=$(npx playwright test tests/diagnose-ui.spec.ts 2>&1) || true
-      diag_pw_exit=$?
+      diag_pw_exit=0
+      diag_pw_output=$(npx playwright test tests/diagnose-ui.spec.ts 2>&1) || diag_pw_exit=$?
 
       # Safely print output
       cat <<< "$diag_pw_output"
@@ -619,6 +687,7 @@ if (( FAIL > 0 )); then
   printf '    • Frontend not running → cd agents/ui && npx vite --host 127.0.0.1 &\n'
   printf '    • Vite proxy leaking JSON → check vite.config.ts bypass logic\n'
   printf '    • Playwright timeout → check waitForAppReady() in e2e.spec.ts\n'
+  printf '    • Auth failing → ensure AUTOSRE_API_KEY matches between backend and test\n'
   printf '\n'
 fi
 
@@ -641,9 +710,15 @@ case "$MODE" in
   diagnose)   printf '  Mode: --diagnose (API + DOM inspection)\n' ;;
 esac
 
+if [[ -n "$AUTOSRE_API_KEY" ]]; then
+  printf '  Auth: enabled (AUTOSRE_API_KEY set)\n'
+else
+  printf '  Auth: disabled (local dev mode)\n'
+fi
+
 printf '=========================================================\n'
 
-if (( FAIL > 0 )); then
+if (( FAIL > 0 )) || [[ "$PLAYWRIGHT_FAILED" == "true" ]]; then
   exit 1
 fi
 exit 0

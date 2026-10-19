@@ -3,6 +3,12 @@
  *
  * All selectors are derived from actual DOM inspection via diagnose-ui.spec.ts.
  * Tests wait for data-dependent elements rather than relying on shell readiness.
+ *
+ * Auth:
+ *   When AUTOSRE_API_KEY is set, the Vite dev proxy injects X-API-Key into
+ *   proxied requests (server-side). For direct fetch() calls to the backend
+ *   API (port 8000), the header is added via extraHTTPHeaders in
+ *   playwright.config.ts and the apiHeaders() helper below.
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -10,12 +16,29 @@ import { test, expect, type Page } from "@playwright/test";
 const BASE = "http://127.0.0.1:5173";
 const API = "http://127.0.0.1:8000";
 
+// Auth: read from environment for direct fetch() calls to the backend.
+// The Vite proxy handles auth for browser-side requests automatically.
+const API_KEY = process.env.AUTOSRE_API_KEY ?? "";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Build fetch headers with optional API key authentication.
+ * Used for direct backend calls that bypass the Vite proxy.
+ */
+function apiHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+  };
+  if (API_KEY) {
+    headers["X-API-Key"] = API_KEY;
+  }
+  return headers;
+}
+
 async function waitForAppReady(page: Page): Promise<void> {
-  // Wait for ReadyGate loading screen to disappear
   const loadingIndicator = page.getByText("Connecting to backend…");
   try {
     await loadingIndicator.waitFor({ state: "hidden", timeout: 30_000 });
@@ -29,8 +52,28 @@ async function navigateTo(page: Page, path: string): Promise<void> {
   await waitForAppReady(page);
 }
 
+/**
+ * Wait for the incidents API query to complete (success or error).
+ * Prevents race conditions where the test checks DOM before data loads.
+ */
+async function waitForIncidentsQuery(page: Page): Promise<void> {
+  // Wait for either incident cards or the empty state / error message
+  try {
+    await page
+      .locator(
+        '[data-testid="incident-card"], text=/no incidents|no .* incidents|failed to load/i',
+      )
+      .first()
+      .waitFor({ state: "visible", timeout: 15_000 });
+  } catch {
+    // Timeout is acceptable — the test will report its own failure
+  }
+}
+
 async function getFirstIncidentId(): Promise<string | null> {
-  const response = await fetch(`${API}/incidents`);
+  const response = await fetch(`${API}/incidents`, {
+    headers: apiHeaders(),
+  });
   if (!response.ok) return null;
   const data = (await response.json()) as {
     items?: Array<{ incident_id?: string }>;
@@ -46,30 +89,36 @@ test.describe("Dashboard Page", () => {
   test("renders KPI cards", async ({ page }) => {
     await navigateTo(page, "/dashboard");
 
-    // Wait for data-dependent content, not just shell
-    // The footer always renders last after data loads
+    // Wait for data-dependent content — the footer renders last after data loads
     await expect(
       page.getByText("AutoSRE · Autonomous SRE incident investigation"),
     ).toBeVisible({ timeout: 15_000 });
 
-    // Now check KPI labels — use case-insensitive match since CSS may transform case
+    // Dashboard KPI cards: Active, Awaiting Approval, Resolved, Assessed,
+    // Avg MTTR, Total Cost. CSS text-transform uppercases the labels.
     await expect(page.getByText(/active/i).first()).toBeVisible();
+    await expect(page.getByText(/resolved/i).first()).toBeVisible();
+    await expect(page.getByText(/avg mttr/i).first()).toBeVisible();
     await expect(page.getByText(/total cost/i).first()).toBeVisible();
   });
 
-  test("renders incident sections", async ({ page }) => {
+  test("renders incident filter tabs", async ({ page }) => {
     await navigateTo(page, "/dashboard");
 
     await expect(
       page.getByText("AutoSRE · Autonomous SRE incident investigation"),
     ).toBeVisible({ timeout: 15_000 });
 
-    const hasActive = await page.getByText(/Active \(\d+\)/).isVisible();
-    const hasResolved = await page.getByText(/Recently Resolved/).isVisible();
-    const hasFailed = await page.getByText(/Recently Failed/).isVisible();
-    const hasNoAction = await page.getByText(/No Action/).isVisible();
-
-    expect(hasActive || hasResolved || hasFailed || hasNoAction).toBe(true);
+    // Filter tabs use role="tab" with counts: All, Active, Awaiting Approval,
+    // Resolved, Assessed, Failed.
+    await expect(page.getByRole("tab", { name: /^All/ })).toBeVisible();
+    await expect(page.getByRole("tab", { name: /^Active/ })).toBeVisible();
+    await expect(
+      page.getByRole("tab", { name: /^Awaiting Approval/ }),
+    ).toBeVisible();
+    await expect(page.getByRole("tab", { name: /^Resolved/ })).toBeVisible();
+    await expect(page.getByRole("tab", { name: /^Assessed/ })).toBeVisible();
+    await expect(page.getByRole("tab", { name: /^Failed/ })).toBeVisible();
   });
 
   test("incident cards are clickable when present", async ({ page }) => {
@@ -88,22 +137,20 @@ test.describe("Dashboard Page", () => {
     await expect(page).toHaveURL(/\/incidents\/[^/?#]+/);
   });
 
-  test("refresh button works", async ({ page }) => {
+  test("filter tabs change the active tab visually", async ({ page }) => {
     await navigateTo(page, "/dashboard");
 
-    // Wait for full render
     await expect(
       page.getByText("AutoSRE · Autonomous SRE incident investigation"),
     ).toBeVisible({ timeout: 15_000 });
 
-    const refreshButton = page.getByRole("button", { name: /refresh/i });
-    await expect(refreshButton).toBeVisible();
-    await refreshButton.click();
+    // Click the "Resolved" filter tab
+    const resolvedTab = page.getByRole("tab", { name: /^Resolved/ });
+    await expect(resolvedTab).toBeVisible();
+    await resolvedTab.click();
 
-    // After refresh, content should reappear
-    await expect(page.getByText(/active/i).first()).toBeVisible({
-      timeout: 15_000,
-    });
+    // The clicked tab should have the active styling class
+    await expect(resolvedTab).toHaveClass(/bg-surface-2/);
   });
 });
 
@@ -121,7 +168,6 @@ test.describe("Incident Detail Page", () => {
 
     await navigateTo(page, `/incidents/${incidentId}`);
 
-    // Wait for detail page content
     await expect(page.getByRole("heading", { level: 1 }).first()).toBeVisible({
       timeout: 15_000,
     });
@@ -168,20 +214,21 @@ test.describe("Incident Detail Page", () => {
     await expect(page.getByText("Cost", { exact: true })).toBeVisible();
   });
 
-  test("handles 404 for invalid incident ID", async ({ page }) => {
-    // Verify backend returns 404
-    const apiResponse = await fetch(
+  test("handles 404 for invalid incident ID", async ({ page, request }) => {
+    // Use Playwright's request context (which has extraHTTPHeaders from config)
+    // instead of raw fetch() to ensure auth headers are sent.
+    const apiResponse = await request.get(
       `${API}/incidents/nonexistent-id-12345/report`,
     );
-    expect(apiResponse.status).toBe(404);
+    expect(apiResponse.status()).toBe(404);
 
     await navigateTo(page, "/incidents/nonexistent-id-12345");
 
-    // Wait for page to settle, then check body text
+    // Wait for the page to settle and render the error state
     await page.waitForTimeout(3000);
     const bodyText = await page.locator("body").innerText();
 
-    // The page may show raw JSON {"detail":"...not found"} or a rendered error
+    // The detail page shows "Incident not found" or the raw API error
     const hasError =
       /not found|error|failed|unable to load|detail|incident/i.test(bodyText);
     expect(hasError).toBe(true);
@@ -195,14 +242,12 @@ test.describe("Incident Detail Page", () => {
 test.describe("Metrics Page", () => {
   test.beforeEach(async ({ page }) => {
     await navigateTo(page, "/metrics");
-    // Wait for metrics data to load (footer indicates full render)
     await expect(
       page.getByText("AutoSRE · Autonomous SRE incident investigation"),
     ).toBeVisible({ timeout: 15_000 });
   });
 
   test("renders KPI cards", async ({ page }) => {
-    // Use case-insensitive matching — CSS text-transform may uppercase labels
     await expect(page.getByText(/total incidents/i).first()).toBeVisible();
     await expect(page.getByText(/resolution rate/i).first()).toBeVisible();
     await expect(page.getByText(/active mttr/i).first()).toBeVisible();
@@ -288,10 +333,10 @@ test.describe("Approvals Page", () => {
   test("shows empty state or approval list", async ({ page }) => {
     await navigateTo(page, "/approvals");
 
-    // Wait for page to fully render
-    await expect(
-      page.getByText("AutoSRE · Autonomous SRE incident investigation"),
-    ).toBeVisible({ timeout: 15_000 });
+    // Wait for the incidents query to complete before checking DOM.
+    // Without this, the test may see the loading/error state instead of
+    // the final rendered content.
+    await waitForIncidentsQuery(page);
 
     const bodyText = await page.locator("body").innerText();
     const hasEmptyState = /no pending approvals/i.test(bodyText);

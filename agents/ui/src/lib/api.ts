@@ -156,6 +156,17 @@ export async function apiFetch<T>(
     headers.set("Accept", "application/json");
   }
 
+  // API key auth: injected at deploy time via window.__AUTOSRE_API_KEY__
+  // Empty string in local dev = auth disabled (backend middleware skips)
+  const apiKey: string =
+    typeof window !== "undefined"
+      ? (((window as unknown as Record<string, unknown>)
+          .__AUTOSRE_API_KEY__ as string) ?? "")
+      : "";
+  if (apiKey) {
+    headers.set("X-API-Key", apiKey);
+  }
+
   let serializedBody: BodyInit | undefined;
   if (rawBody !== undefined) {
     serializedBody = rawBody;

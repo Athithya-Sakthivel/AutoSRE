@@ -7,6 +7,21 @@ import tailwindcss from "@tailwindcss/vite";
 // routes and static SPA assets from this origin in production.
 const BACKEND_TARGET = "http://localhost:8000";
 
+/**
+ * Build auth headers for the dev proxy from the process environment.
+ *
+ * When AUTOSRE_API_KEY is set, the Vite dev server injects X-API-Key into
+ * every proxied request to the backend. This keeps the secret server-side
+ * only — it never reaches the browser bundle.
+ *
+ * In production, the API key is injected into the HTML by the backend's
+ * render_index_with_key() helper and read by src/lib/api.ts at runtime.
+ */
+function authHeaders(): Record<string, string> {
+  const key = process.env.AUTOSRE_API_KEY || "";
+  return key ? { "X-API-Key": key } : {};
+}
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
 
@@ -14,21 +29,41 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      // Simple prefix proxies — no client route conflicts
-      "/api": { target: BACKEND_TARGET, changeOrigin: true },
+      // Simple prefix proxies — no client route conflicts.
+      // Auth headers injected for protected routes.
+      "/api": {
+        target: BACKEND_TARGET,
+        changeOrigin: true,
+        headers: authHeaders(),
+      },
       "/healthz": { target: BACKEND_TARGET, changeOrigin: true },
       "/readyz": { target: BACKEND_TARGET, changeOrigin: true },
 
-      // Metrics sub-routes — explicit to avoid catching /metrics (SPA)
-      "/metrics/summary": { target: BACKEND_TARGET, changeOrigin: true },
-      "/metrics/timeseries": { target: BACKEND_TARGET, changeOrigin: true },
-      "/metrics/top-expensive": { target: BACKEND_TARGET, changeOrigin: true },
+      // Metrics sub-routes — explicit to avoid catching /metrics (SPA).
+      // All are protected routes that need auth.
+      "/metrics/summary": {
+        target: BACKEND_TARGET,
+        changeOrigin: true,
+        headers: authHeaders(),
+      },
+      "/metrics/timeseries": {
+        target: BACKEND_TARGET,
+        changeOrigin: true,
+        headers: authHeaders(),
+      },
+      "/metrics/top-expensive": {
+        target: BACKEND_TARGET,
+        changeOrigin: true,
+        headers: authHeaders(),
+      },
 
       // Incidents — needs bypass logic because /incidents (API list)
       // and /incidents/:id (SPA detail page) share the same prefix.
+      // All API sub-routes are protected.
       "/incidents": {
         target: BACKEND_TARGET,
         changeOrigin: true,
+        headers: authHeaders(),
         bypass: (req: IncomingMessage) => {
           const url = req.url ?? "";
 

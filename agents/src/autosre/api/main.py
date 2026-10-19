@@ -44,6 +44,7 @@ from psycopg_pool import AsyncConnectionPool
 from redis.asyncio import Redis
 
 from autosre import __version__ as _pkg_version
+from autosre.api.middleware import ApiKeyMiddleware, render_index_with_key
 from autosre.api.routes import router, webhook_router
 from autosre.api.runner import LangGraphRunner
 from autosre.config import Settings, get_settings, reset_settings_cache
@@ -425,6 +426,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     logger.info("CORS origins: %s", cors_origins)
 
+    # API key authentication (added after CORS so preflight works unauthenticated).
+    # Read the key NOW so the middleware captures it at app creation time.
+    # Without this, lazy middleware instantiation would read the env var on
+    # the first request, which may have been restored by test fixtures.
+    api_key = os.getenv("AUTOSRE_API_KEY", "")
+    app.add_middleware(ApiKeyMiddleware, api_key=api_key)
+
     # Routers.
     app.include_router(router)
     app.include_router(webhook_router)
@@ -485,7 +493,7 @@ def _mount_spa_if_available(app: FastAPI) -> None:
         )
         return
 
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, HTMLResponse
     from fastapi.staticfiles import StaticFiles
 
     assets_dir = ui_dist / "assets"
@@ -497,10 +505,22 @@ def _mount_spa_if_available(app: FastAPI) -> None:
         )
 
     @app.get("/{full_path:path}")
-    async def spa_fallback(full_path: str) -> FileResponse:
-        """Serve the SPA index for any non-API path."""
+    async def spa_fallback(full_path: str) -> HTMLResponse | FileResponse:
+        """Serve the SPA index for any non-API path.
+
+        Injects AUTOSRE_API_KEY into the HTML so the UI can authenticate
+        API requests in production without a separate login flow.
+        """
         if _is_reserved_path(full_path):
             raise HTTPException(status_code=404, detail="Not found")
+
+        # Read HTML and inject API key (no-op when key unset)
+        html_content = index_html.read_text(encoding="utf-8")
+        html_with_key = render_index_with_key(html_content)
+
+        # Return as HTMLResponse when key injected, FileResponse otherwise
+        if html_with_key != html_content:
+            return HTMLResponse(html_with_key)
         return FileResponse(str(index_html))
 
     logger.info("Serving React UI from %s", ui_dist)

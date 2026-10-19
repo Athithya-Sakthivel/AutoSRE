@@ -55,8 +55,8 @@ spec:
             limits:   { cpu: 100m, memory: 32Mi }
       containers:
         - name: autosre-agent
-          image: ghcr.io/athithya-sakthivel/autosre-agent:2026-10-16-18-14-03--db58e79
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/athithya-sakthivel/autosre-agent:latest
+          imagePullPolicy: Always
           env:
             # ================================================================
             # Service identity
@@ -83,7 +83,7 @@ spec:
               valueFrom: { secretKeyRef: { name: postgres-agent, key: POSTGRES_PASSWORD } }
 
             # ================================================================
-            # AUTOSRE_LLM__* (16 keys)
+            # LLM (10 keys)
             # ================================================================
             - name: AUTOSRE_LLM__API_KEY
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__API_KEY } }
@@ -91,10 +91,6 @@ spec:
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__MODEL_COORDINATOR } }
             - name: AUTOSRE_LLM__MODEL_WORKER
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__MODEL_WORKER } }
-            - name: AUTOSRE_LLM__FALLBACK_MODELS
-              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__FALLBACK_MODELS } }
-            - name: AUTOSRE_LLM__BASE_URL
-              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__BASE_URL } }
             - name: AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR } }
             - name: AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR
@@ -109,17 +105,9 @@ spec:
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS } }
             - name: AUTOSRE_LLM__MAX_BACKOFF_SECONDS
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__MAX_BACKOFF_SECONDS } }
-            - name: AUTOSRE_LLM__ABSOLUTE_BACKOFF_CAP_SECONDS
-              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__ABSOLUTE_BACKOFF_CAP_SECONDS } }
-            - name: AUTOSRE_LLM__CIRCUIT_BREAKER_ENABLED
-              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__CIRCUIT_BREAKER_ENABLED } }
-            - name: AUTOSRE_LLM__CIRCUIT_BREAKER_THRESHOLD
-              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__CIRCUIT_BREAKER_THRESHOLD } }
-            - name: AUTOSRE_LLM__CIRCUIT_BREAKER_TIMEOUT_SECONDS
-              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__CIRCUIT_BREAKER_TIMEOUT_SECONDS } }
 
             # ================================================================
-            # AUTOSRE_POSTGRES__* (5 keys)
+            # PostgreSQL (5 keys)
             # ================================================================
             - name: AUTOSRE_POSTGRES__HOST
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_POSTGRES__HOST } }
@@ -133,7 +121,7 @@ spec:
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_POSTGRES__PASSWORD } }
 
             # ================================================================
-            # AUTOSRE_VALKEY__* (4 keys) — cross-namespace to rivulet
+            # Valkey (4 keys; TLS setting name matches application config)
             # ================================================================
             - name: AUTOSRE_VALKEY__HOST
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_VALKEY__HOST } }
@@ -141,11 +129,11 @@ spec:
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_VALKEY__PORT } }
             - name: AUTOSRE_VALKEY__PASSWORD
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_VALKEY__PASSWORD } }
-            - name: AUTOSRE_VALKEY__TLS_ENABLED
-              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_VALKEY__TLS_ENABLED } }
+            - name: AUTOSRE_VALKEY__TLS
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_VALKEY__TLS } }
 
             # ================================================================
-            # AUTOSRE_OPENOBSERVE__* (3 keys)
+            # OpenObserve (3 keys)
             # ================================================================
             - name: AUTOSRE_OPENOBSERVE__EMAIL
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_OPENOBSERVE__EMAIL } }
@@ -155,19 +143,19 @@ spec:
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_OPENOBSERVE__URL } }
 
             # ================================================================
-            # AUTOSRE_ALERT__* (1 key)
+            # Alerting (1 key)
             # ================================================================
             - name: AUTOSRE_ALERT__WEBHOOK_SECRET
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_ALERT__WEBHOOK_SECRET } }
 
             # ================================================================
-            # AUTOSRE_ADMIN__* (1 key, optional)
+            # Admin (1 key; optional)
             # ================================================================
             - name: AUTOSRE_ADMIN__SECRET
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_ADMIN__SECRET, optional: true } }
 
             # ================================================================
-            # AUTOSRE_SAFETY__* (11 keys)
+            # Safety (7 keys)
             # ================================================================
             - name: AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS } }
@@ -175,12 +163,6 @@ spec:
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT } }
             - name: AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS } }
-            - name: AUTOSRE_SAFETY__INITIAL_ITERATION_BUDGET
-              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__INITIAL_ITERATION_BUDGET } }
-            - name: AUTOSRE_SAFETY__STAGNATION_LIMIT
-              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__STAGNATION_LIMIT } }
-            - name: AUTOSRE_SAFETY__MAX_ACTION_ATTEMPTS
-              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__MAX_ACTION_ATTEMPTS } }
             - name: AUTOSRE_SAFETY__CONFIDENCE_PROPOSE
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__CONFIDENCE_PROPOSE } }
             - name: AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH
@@ -189,11 +171,9 @@ spec:
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP } }
             - name: AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT } }
-            - name: AUTOSRE_SAFETY__MAX_LLM_CALLS_PER_INCIDENT
-              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_SAFETY__MAX_LLM_CALLS_PER_INCIDENT } }
 
             # ================================================================
-            # AUTOSRE_OTEL__* (4 keys)
+            # OpenTelemetry (3 keys)
             # ================================================================
             - name: AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT } }
@@ -201,24 +181,20 @@ spec:
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_OTEL__SERVICE_NAME } }
             - name: AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT } }
-            - name: AUTOSRE_OTEL__EXPORTER_HEADERS
-              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_OTEL__EXPORTER_HEADERS } }
 
             # ================================================================
-            # AUTOSRE_DEPLOYMENT_ENVIRONMENT (1 key)
+            # Deployment metadata (1 key)
             # ================================================================
             - name: AUTOSRE_DEPLOYMENT_ENVIRONMENT
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_DEPLOYMENT_ENVIRONMENT } }
 
             # ================================================================
-            # AUTOSRE_EVAL__* (3 keys, optional — only used by eval harness)
+            # Eval judge (2 keys; optional for the runtime agent)
             # ================================================================
             - name: AUTOSRE_EVAL__JUDGE_API_KEY
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_EVAL__JUDGE_API_KEY, optional: true } }
             - name: AUTOSRE_EVAL__JUDGE_MODEL
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_EVAL__JUDGE_MODEL, optional: true } }
-            - name: AUTOSRE_EVAL__JUDGE_BASE_URL
-              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_EVAL__JUDGE_BASE_URL, optional: true } }
 
             # ================================================================
             # OTel exporter headers (optional, from separate secret)

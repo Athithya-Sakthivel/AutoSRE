@@ -8,6 +8,12 @@ Module-level state in ``autosre.api.routes`` (the fingerprint dedup
 index and the rate limiter) persists across tests in one process, so an
 autouse fixture resets both before every test to prevent cross-test
 contamination.
+
+API key authentication:
+    These tests exercise business logic, not auth. The ``app`` fixture
+    ensures ``AUTOSRE_API_KEY`` is unset during app creation so the
+    middleware disables itself. Auth behavior is validated by the E2E
+    Playwright suite (tests/approval-flow.spec.ts).
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
@@ -24,7 +31,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from autosre.api.main import create_app
-from autosre.config import Settings
+from autosre.config import Settings, reset_settings_cache
 
 # ---------------------------------------------------------------------------
 # No-op lifespan for tests
@@ -38,7 +45,7 @@ async def noop_lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 # ---------------------------------------------------------------------------
-# Module-level state reset
+# Autouse fixtures — run before every test
 # ---------------------------------------------------------------------------
 
 
@@ -60,6 +67,20 @@ def _reset_route_module_state() -> Iterator[None]:
 
     _alerts_limiter.reset()
     _fingerprint_index.reset()
+
+
+@pytest.fixture(autouse=True)
+def _clean_settings_cache() -> Iterator[None]:
+    """Reset the Settings lru_cache before and after each test.
+
+    ``get_settings()`` is cached with ``@lru_cache(maxsize=1)``. If a
+    prior test created a Settings object, it stays cached and the next
+    test gets the stale instance. Clearing the cache ensures each test
+    gets a fresh Settings built from the current environment.
+    """
+    reset_settings_cache()
+    yield
+    reset_settings_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -94,11 +115,28 @@ def settings() -> Settings:
 
 
 @pytest.fixture
-def app(settings: Settings) -> FastAPI:
-    """Create a test app with a no-op lifespan."""
-    test_app = create_app(settings)
-    test_app.router.lifespan_context = noop_lifespan
-    return test_app
+def app(settings: Settings) -> Iterator[FastAPI]:
+    """Create a test app with a no-op lifespan and auth disabled.
+
+    Uses ``yield`` (not ``return``) so ``AUTOSRE_API_KEY`` stays removed
+    from the environment for the entire test duration. Starlette
+    instantiates middleware lazily on the first HTTP request — if the
+    env var is restored before that request, the middleware enables
+    itself and all tests fail with 401.
+
+    Additionally, ``main.py`` reads the env var at ``create_app()`` time
+    and passes it explicitly to ``add_middleware(ApiKeyMiddleware,
+    api_key=...)``, so the middleware captures the empty value
+    synchronously during app creation.
+    """
+    saved_key = os.environ.pop("AUTOSRE_API_KEY", None)
+    try:
+        test_app = create_app(settings)
+        test_app.router.lifespan_context = noop_lifespan
+        yield test_app
+    finally:
+        if saved_key is not None:
+            os.environ["AUTOSRE_API_KEY"] = saved_key
 
 
 @pytest.fixture
@@ -198,8 +236,6 @@ async def test_health_endpoint(
         data = response.json()
         assert data["status"] == "ok"
         assert "version" in data
-        # `paused` was added in the kill-switch release; assert it exists
-        # and is a bool so the UI contract holds.
         assert isinstance(data.get("paused"), bool)
 
 
@@ -337,7 +373,6 @@ async def test_alert_webhook_dedup_on_duplicate_fingerprint(
     assert first.json()["status"] == "accepted"
     mock_runner.schedule_incident.assert_awaited_once()
 
-    # Reset the mock's call count but not the fingerprint index.
     mock_runner.schedule_incident.reset_mock()
 
     second = await client.post("/alerts", content=payload_bytes, headers=headers)
@@ -345,7 +380,6 @@ async def test_alert_webhook_dedup_on_duplicate_fingerprint(
     assert second.json()["status"] == "already_investigating"
     assert second.json()["incident_id"] == "test-incident-id"
 
-    # Second delivery must NOT schedule a new graph.
     mock_runner.schedule_incident.assert_not_called()
 
 
@@ -613,8 +647,6 @@ async def test_list_incidents_with_data(
     assert data["items"][0]["incident_id"] == "inc-1"
     assert data["items"][0]["status"] == "resolved"
     assert data["items"][1]["incident_id"] == "inc-2"
-    # awaiting_approval is a derived status: requires_human_approval=True
-    # and approval_granted is None and raw status is "running".
     assert data["items"][1]["status"] == "awaiting_approval"
 
 

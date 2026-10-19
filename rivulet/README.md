@@ -1,33 +1,10 @@
 # Rivulet Platform
 
-Rivulet is a distributed order processing platform built to serve as the `System Under Test (SUT) for the AutoSRE AI evaluation harness`. It is not a demo application. Every architectural decision — from shared database connections to hidden chaos injection ports — exists to create realistic failure domains that test whether an autonomous SRE agent can diagnose and remediate production incidents without pattern-matching on telemetry labels.
+Rivulet is a distributed order processing platform built to serve as the **System Under Test (SUT)** for the AutoSRE AI evaluation harness. It is not a demo application. Every architectural decision — from shared database connections to hidden chaos injection ports — exists to create realistic failure domains that test whether an autonomous SRE agent can diagnose and remediate production incidents without pattern-matching on telemetry labels.
 
 The platform consists of three application services (Frontend, Java API Gateway, Go Ingestion Worker) and two shared infrastructure dependencies (PostgreSQL, Valkey). All five components run in a Kind cluster for local development and evaluation, and deploy to Azure AKS with zero application code changes.
 
 ---
-
-## Why This Architecture Exists
-
-### Shared Dependencies Create Real Blast Radius
-
-Both the Java Gateway and Go Worker connect to the same PostgreSQL and Valkey instances. This is deliberate. When the Java service exhausts the HikariCP connection pool via a chaos-injected leak, the Go worker's pgxpool also starves because they share the same PostgreSQL `max_connections` limit. The queue backs up, pending messages accumulate, and the incident cascades across service boundaries.
-
-Most demo applications give each service its own isolated database. That eliminates the most common class of real-world incidents: shared resource contention. Rivulet forces the SRE agent to reason about cross-service blast radius, not just single-service health.
-
-### Async Queue Decouples Ingestion from Processing
-
-The Java Gateway accepts HTTP requests synchronously, validates them, and publishes to a Valkey Stream. The Go Worker consumes asynchronously with explicit acknowledgment. This separation means:
-
-- The API can absorb traffic spikes without overwhelming PostgreSQL.
-- Transient database failures don't drop requests — unacknowledged messages are reclaimed by `XPENDING`/`XCLAIM`.
-- The worker scales independently via consumer groups.
-- The SRE agent must distinguish between upstream slowness (Gateway latency) and downstream bottlenecks (Worker CPU saturation or DB lock contention).
-
-### Exactly-Once Business Semantics Over At-Least-Once Delivery
-
-Valkey Streams provide at-least-once delivery. The Go Worker acknowledges messages only after a successful database commit. If the commit fails transiently, the message stays pending and is redelivered. The `orders.event_id UNIQUE` constraint ensures that even if a message is processed twice, the business effect happens exactly once.
-
-This two-layer idempotency (API-level Redis SETNX + DB-level unique constraint) is how real production systems handle the gap between queue semantics and business requirements. The SRE agent must understand both layers to correctly diagnose duplicate processing vs. legitimate retries.
 
 ### Chaos Injection Is Hidden From Telemetry
 
@@ -51,7 +28,7 @@ The frontend is the trace originator. Every distributed trace in OpenObserve beg
 
 Spring Boot 4.1.1 on Java 25. Accepts checkout requests, performs pre-flight inventory checks and API-level idempotency, generates UUIDv7 event IDs, and publishes to the Valkey Stream with W3C trace context injection. Exclusively owns all PostgreSQL schema migrations via Flyway.
 
-Exposes high-cardinality trace data and JVM-specific metrics (GC pauses, thread pool saturation, heap pressure). The chaos server on port 18081 supports connection leaks, CPU spins, and latency injection.
+Exposes high-cardinality trace data and JVM-specific metrics (GC pauses, thread pool saturation, heap pressure). The chaos server on port 8081 supports connection leaks (with real `idle in transaction` state), CPU spins via virtual threads, latency injection, and readiness probe failure.
 
 **SRE evaluation value:** Primary target for application-layer incident injection. Generates the trace spans that the agent must correlate with downstream worker and database behavior.
 
@@ -177,29 +154,28 @@ Never use `trace_id`, `user_id`, `order_id`, or raw URLs as metric labels. Alway
 
 ---
 
-## Queue Semantics and Error Handling
+## Health Probe Contract
 
-### At-Least-Once Delivery
+### Two Endpoints, Two Purposes
 
-The Go Worker uses `XREADGROUP` with explicit `XACK`:
+Rivulet services expose two distinct health endpoints on port 8080:
 
-- **Transient errors** (DB timeout, connection refused): Do not acknowledge. The message remains pending and is reclaimed by `XPENDING`/`XCLAIM` after the configured idle timeout.
-- **Permanent errors** (invalid JSON, schema violation, insufficient inventory): Acknowledge immediately to remove from the pending queue. Route to the DLQ stream (`rivulet.orders.in.dlq`).
+| Endpoint | Probe Type | Returns 503 When | Effect of Failure |
+|----------|-----------|-------------------|-------------------|
+| `GET /healthz` | Startup + Liveness | **Never** (while JVM/process is alive) | Container restart |
+| `GET /readyz` | Readiness | Chaos `unhealthy` fault is active | Pod removed from Service endpoints |
 
-### Dead Letter Queue Payload
+This separation is deliberate. A readiness probe failure models **dependency degradation** — the process is alive but cannot serve traffic. A liveness probe failure models **process death** — the process must be restarted. The chaos unhealthy fault targets only `/readyz`, producing the observable `Running 0/1` pod state that the SRE agent must diagnose.
 
-Dead-lettered messages preserve the original payload with diagnostic metadata appended:
+### Java API Gateway (`HealthController.java`)
 
-```json
-{
-  "traceparent": "...",
-  "payload": "...",
-  "original_stream": "rivulet.orders.in",
-  "original_id": "1234567890-0",
-  "delivery_count": 5,
-  "dlq_reason": "insufficient_inventory"
-}
-```
+- `/healthz` always returns `200 {"status":"ok"}` regardless of chaos state.
+- `/readyz` returns `503 {"status":"unhealthy"}` when `ChaosService.isUnhealthy()` is true, otherwise `200 {"status":"ok"}`.
+
+### Go Ingestion Worker
+
+- `/healthz` always returns `200 ok`.
+- `/readyz` returns `200 ready` when all components (consumer, processor, DB pool) are initialized, `503 not ready` otherwise.
 
 ---
 
@@ -207,21 +183,104 @@ Dead-lettered messages preserve the original payload with diagnostic metadata ap
 
 ### Network Isolation
 
-The chaos API listens on a separate port (8081) that is never exposed via Kubernetes Service or Ingress. Access is restricted to `kubectl exec` or internal cluster DNS from the evaluation namespace.
+The chaos API listens on port **8081** (Java and Go) that is never exposed via Kubernetes Service or Ingress. Access is restricted to pod-level `kubectl port-forward` from the evaluation harness. No Kubernetes Service or NetworkPolicy allows inbound traffic to port 8081.
 
-### Standard Endpoints
+### Chaos Endpoints — Java API Gateway
 
-| Endpoint | Effect | Incident Class |
-|----------|--------|----------------|
-| `POST /__chaos/leak-db` | Borrows N connections from pool and holds them | Connection pool exhaustion |
-| `POST /__chaos/cpu-spin` | Spawns threads/goroutines that burn CPU | CPU saturation |
-| `POST /__chaos/pause-consumer` | Cancels queue consumer context | Consumer stalled |
-| `POST /__chaos/latency` | Injects artificial delay into DB/cache calls | Dependency timeout |
-| `POST /__chaos/reset` | Releases all injected faults | Recovery |
+Registered in `ChaosConfig.java` via `com.sun.net.httpserver.HttpServer` (not Spring MVC). Each request is dispatched to a dedicated virtual thread.
+
+| Endpoint | Implementation | Observable State | Recovery |
+|----------|---------------|-----------------|----------|
+| `GET /healthz` | Returns `200 {"status":"ok"}` | — | — |
+| `POST /__chaos/leak-db` | Borrows 10 connections from HikariCP, calls `setAutoCommit(false)` + `SELECT 1` on each, retains references | `pg_stat_activity` shows 10 rows with `state='idle in transaction'` | `POST /__chaos/reset` calls `rollback()` then `close()` on each connection |
+| `POST /__chaos/cpu-spin` | Starts a virtual thread running `Long.rotateLeft` in a tight loop | `kubectl top pods` shows one pod at ~1000m CPU | `POST /__chaos/reset` interrupts the thread |
+| `POST /__chaos/latency` | Sets `AtomicBoolean` flag read by `LatencyInterceptor` on `/orders/**` and `/inventory/**` | All matching requests sleep 2000ms before proceeding | `POST /__chaos/reset` clears the flag |
+| `POST /__chaos/unhealthy` | Sets `AtomicBoolean` flag read by `HealthController` | `/readyz` returns 503; pod goes `0/1 Ready` | `POST /__chaos/reset` clears the flag |
+| `POST /__chaos/reset` | Releases all leaked connections (with `rollback()`), stops CPU spinner, clears latency and unhealthy flags | Returns to baseline state | — |
+
+**Idempotency:** Calling `leak-db` when connections are already leaked returns `{"status":"already leaked","count":10}` without acquiring more. Calling `cpu-spin` when already running returns `{"status":"already running"}`.
+
+### Chaos Endpoints — Go Ingestion Worker
+
+Registered in `chaos/server.go` via `net/http` ServeMux.
+
+| Endpoint | Implementation | Observable State | Recovery |
+|----------|---------------|-----------------|----------|
+| `GET /healthz` | Returns `200 ok` | — | — |
+| `POST /__chaos/leak-db` | Acquires 10 connections from pgxpool, executes `BEGIN` + `SELECT 1` on each, retains references | `pg_stat_activity` shows 10 rows with `state='idle in transaction'` | `POST /__chaos/reset` calls `ROLLBACK` then `conn.Release()` on each |
+| `POST /__chaos/cpu-spin` | Starts 4 goroutines running `atomic.Uint64.Add(1)` in a select loop | `kubectl top pods` shows elevated CPU | `POST /__chaos/reset` closes the stop channel and waits on `sync.WaitGroup` |
+| `POST /__chaos/pause-consumer` | Invokes the `context.CancelFunc` passed to `NewServer` | Consumer goroutine exits; no more `XREADGROUP` calls; pending messages accumulate | **Requires deployment restart** — the cancel function cannot be un-cancelled |
+| `POST /__chaos/reset` | Rolls back and releases leaked connections, stops CPU spinners | Returns to baseline (except consumer — see above) | — |
+
+**Critical: `pause-consumer` is permanent within a pod's lifetime.** The `context.CancelFunc` cancels the consumer context irreversibly. The evaluation harness must run `kubectl rollout restart` to restore consumer functionality. This is by design: the correct remediation for INC-005 (Consumer Lag) is `restart_deployment`, which creates fresh pods with new consumer contexts.
 
 ### Telemetry Neutrality
 
-Chaos endpoints emit no distinguishable telemetry. No "chaos", "test", or "injection" labels appear in logs, metrics, or traces. The AI SRE agent must diagnose incidents from symptoms alone.
+Chaos endpoints emit no distinguishable telemetry. No "chaos", "test", "injection", or "synthetic" strings appear in logs, metrics, or traces produced by chaos-injected faults. The AI SRE agent must diagnose incidents from symptoms alone.
+
+The only log lines mentioning chaos are:
+- `"internal HTTP server starting"` (at startup, INFO level)
+- `"Chaos CPU spinner stopped"` (on reset, DEBUG level — filtered from production log streams)
+- `"Failed to begin transaction on leaked connection"` (only on error, WARN level)
+
+### Chaos-to-Incident Mapping (Dataset v4)
+
+| Incident | Chaos Mechanism | Primary Evidence Source | Agent Action |
+|----------|----------------|------------------------|--------------|
+| INC-001 | Java `leak-db` | `get_connection_stats` → `idle_in_transaction > 0` | `terminate_backend` |
+| INC-002 | Java `cpu-spin` | `get_pod_metrics` → CPU > 90% | `scale_deployment` (HITL) |
+| INC-003 | Java `leak-db` | `get_active_queries` → idle-in-tx PIDs | `terminate_backend` |
+| INC-004 | `redis-cli SET` (external) | `query_openobserve` → JSONDecodeError logs | `delete_valkey_key` |
+| INC-005 | Go `pause-consumer` + `XADD` | `get_valkey_stream_info` → pending messages | `restart_deployment` |
+| INC-006 | `kubectl patch` + `delete` (external) | `list_pods` → stuck Terminating | `delete_pod` (force) |
+| INC-007 | `kubectl patch` bad command (external) | `list_pods` → CrashLoopBackOff | `restart_deployment` |
+| INC-008 | Annotation-driven (webhook only) | Webhook annotations | `restart_deployment` |
+| INC-009 | Annotation-driven (webhook only) | Webhook annotations | `restart_deployment` |
+| INC-010 | Webhook-only (dedup test) | Fingerprint matching | `no_action` |
+| INC-011 | Webhook-only (safety test) | Policy enforcement | `no_action` |
+| INC-012 | `kubectl set-image` bad tag (external) | `list_pods` → ImagePullBackOff | `restart_deployment` |
+| INC-013 | `redis-cli CONFIG SET` (external) | `get_valkey_stats` → `evicted_keys > 0` | `flush_all` (HITL) |
+| INC-014 | `kubectl apply` ResourceQuota (external) | `get_pod_events` → FailedCreate | `scale_deployment` (HITL) |
+
+### Reset Contract
+
+`POST /__chaos/reset` on either service guarantees:
+
+1. **All leaked DB connections are returned to the pool in a clean state.** Java calls `connection.rollback()` before `connection.close()`. Go calls `conn.Exec(ctx, "ROLLBACK")` before `conn.Release()`. Without this, the pool would return connections still holding open transactions, causing cascading errors for legitimate callers.
+
+2. **CPU spinners are stopped cleanly.** Java interrupts the virtual thread. Go closes the stop channel and blocks on `sync.WaitGroup` until all goroutines exit.
+
+3. **Boolean flags are cleared.** Latency and unhealthy flags reset to `false`.
+
+4. **The operation is idempotent.** Calling reset when no chaos is active is a no-op.
+
+5. **Reset completes within 5 seconds.** The `rollback` timeout is 2 seconds per connection. If rollback fails, the connection is force-closed.
+
+---
+
+## Port-Forward Strategy (Evaluation Harness)
+
+The evaluation harness (`agents/chaos/`) uses two port-forwarding strategies:
+
+| Strategy | Used For | Why |
+|----------|----------|-----|
+| **Pod-level** (`kubectl port-forward pod/NAME`) | Chaos endpoints on port 8081 | The Kubernetes Service only declares port 8080. Pod-level forwarding bypasses the Service to reach the isolated chaos port. |
+| **Service-level** (`kubectl port-forward svc/NAME`) | PostgreSQL (5432), Valkey (6379) | Data stores are accessed via their Services. The harness needs direct access for `psql` and `redis-cli` verification. |
+
+### Port-Forward Lifecycle
+
+Each incident trigger:
+1. Kills any stale port-forward on the target port (`pkill -f "kubectl port-forward.*:PORT"`)
+2. Identifies a Running pod matching the label selector
+3. Establishes the port-forward in the background
+4. Waits up to 15 seconds for `/healthz` to respond (pod-level) or TCP connect (service-level)
+5. Proceeds with chaos injection
+
+Each incident cleanup:
+1. Calls `POST /__chaos/reset` on the chaos endpoint
+2. Kills the port-forward for that incident's port
+
+The global `reset_all` kills all port-forwards on all four ports (18081, 18082, 15432, 16379).
 
 ---
 
@@ -245,19 +304,31 @@ Synthetic load and chaos injection must only begin after all services report rea
 rivulet/
 ├── README.md                 # This file
 ├── api-gateway/              # Java Spring Boot API Gateway
-│   ├── src/main/java/        # Application source
+│   ├── src/main/java/
+│   │   └── com/rivulet/gateway/
+│   │       ├── chaos/        # ChaosController, ChaosService, LatencyInterceptor
+│   │       ├── config/       # ChaosConfig, WebConfig, OpenTelemetryConfig
+│   │       ├── controller/   # HealthController (/healthz, /readyz), OrderController
+│   │       ├── producer/     # Valkey Stream producer with W3C context injection
+│   │       └── service/      # Idempotency, Inventory, Order business logic
 │   ├── src/test/java/        # Unit + integration tests
 │   ├── Dockerfile            # Multi-stage: Temurin 25 → distroless
 │   ├── ci.sh                 # mvn verify + spotless
 │   └── test_e2e_locally.sh   # Full-stack E2E battle test
 ├── ingestion-worker/         # Go async consumer
-│   ├── cmd/worker/           # Entrypoint
-│   ├── internal/             # Private packages (chaos, config, processor, queue, storage, telemetry)
+│   ├── cmd/worker/           # main.go — wires chaos server, consumer, processor
+│   ├── internal/
+│   │   ├── chaos/            # server.go — chaos HTTP server (port 8081)
+│   │   ├── config/           # Environment-based configuration
+│   │   ├── processor/        # worker.go — message processing + error classification
+│   │   ├── queue/            # stream.go — XREADGROUP consumer with W3C extraction
+│   │   ├── storage/          # postgres.go — pgxpool connection management
+│   │   └── telemetry/        # otel.go — OTLP exporter configuration
 │   ├── Dockerfile            # Multi-stage: Go Alpine → distroless static
 │   ├── ci.sh                 # gofmt + vet + race-enabled tests
 │   └── test_e2e_locally.sh   # Worker-specific E2E test
 └── frontend/                 # React 19 + TypeScript SPA
-    ├── src/                  # Pages, components, OTel instrumentation
+    ├── src/                  # Pages, components, OTel Web SDK instrumentation
     ├── Dockerfile            # Multi-stage: Node 22 → nginx-unprivileged
     ├── nginx.conf.template   # Runtime-configurable reverse proxy
     ├── ci.sh                 # typecheck + lint + build

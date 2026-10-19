@@ -32,9 +32,9 @@ variable "o2_organization" {
 }
 
 variable "agent_webhook_url" {
-  description = "URL that the OpenObserve alert destination POSTs alert notifications to. Use http://host.docker.internal:8000/alerts for local dev, or the cluster-internal DNS for production."
+  description = "URL that the OpenObserve alert destination POSTs alert notifications to."
   type        = string
-  default     = "http://host.docker.internal:8000/alerts"
+  default     = "http://autosre-agent.sre.svc.cluster.local:8000/alerts"
 
   validation {
     condition     = can(regex("^https?://[^[:space:]]+$", var.agent_webhook_url))
