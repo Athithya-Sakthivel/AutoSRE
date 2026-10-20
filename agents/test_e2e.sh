@@ -83,10 +83,6 @@ if [[ -n "$INCIDENT_ID" && "$MODE" == "ci" ]]; then
 fi
 
 
-cd /workspace
-find . -path "*/node_modules" -prune -o -type d -name "__pycache__" -exec rm -rf {} +
-cd -
-
 # -----------------------------------------------------------------------------
 # Paths and constants
 # -----------------------------------------------------------------------------
