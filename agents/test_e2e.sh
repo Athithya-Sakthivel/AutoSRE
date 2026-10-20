@@ -82,6 +82,11 @@ if [[ -n "$INCIDENT_ID" && "$MODE" == "ci" ]]; then
     exit 2
 fi
 
+
+cd /workspace
+find . -path "*/node_modules" -prune -o -type d -name "__pycache__" -exec rm -rf {} +
+cd -
+
 # -----------------------------------------------------------------------------
 # Paths and constants
 # -----------------------------------------------------------------------------
@@ -323,7 +328,12 @@ log "Coordinator:    $AUTOSRE_LLM__MODEL_COORDINATOR"
 log "Worker:         $AUTOSRE_LLM__MODEL_WORKER"
 log "Max retries:    $AUTOSRE_LLM__MAX_RETRIES"
 log "Backoff:        ${AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS}s..${AUTOSRE_LLM__MAX_BACKOFF_SECONDS}s"
-log "Auth:           ${AUTOSRE_API_KEY:+enabled}${AUTOSRE_API_KEY:-disabled}"
+if [[ -n "${AUTOSRE_API_KEY:-}" ]]; then
+    log "Auth:           enabled"
+else
+    log "Auth:           disabled"
+fi
+
 if [[ "$MODE" != "run" ]]; then
     log "Judge model:    $AUTOSRE_EVAL__JUDGE_MODEL"
 fi

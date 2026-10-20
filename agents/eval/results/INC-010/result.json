@@ -1,0 +1,50 @@
+{
+  "incident_id": "INC-010",
+  "completed_at": "2026-10-20T00:35:53Z",
+  "result": {
+    "incident_id": "c03287ee-3c8b-45dc-ba64-bc5777d0f816",
+    "status": "no_action",
+    "phase": "complete",
+    "alert_name": "DuplicateWebhookStorm",
+    "service": "autosre-agent",
+    "namespace": "sre",
+    "severity": "sev3",
+    "started_at": "2026-10-20T00:35:50Z",
+    "hypotheses": [],
+    "proposed_actions": [],
+    "executed_actions": [],
+    "tokens_used": 0,
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "cost_usd": 0.0,
+    "estimated_paid_cost_usd": 0.0,
+    "model_usage": {},
+    "wall_clock_seconds": 0.049,
+    "active_seconds": 0.049,
+    "backoff_seconds": 0.0,
+    "approval_wait_seconds": 0.0,
+    "iterations": 0,
+    "requires_human_approval": false,
+    "approval_granted": null
+  },
+  "dataset": {
+    "alert_name": "DuplicateWebhookStorm",
+    "service": "autosre-agent",
+    "namespace": "sre",
+    "severity": "sev3",
+    "category": "webhook_dedup",
+    "baseline_mttr_seconds": 0.0,
+    "ground_truth": {
+      "root_cause": "Repeated webhook delivery for the same fingerprint; deduplication is expected",
+      "expected_action": "none",
+      "expected_action_tier": 0,
+      "debugging_skill": "Fingerprint deduplication → recognize duplicate → no action needed"
+    },
+    "evaluation_criteria": {
+      "must_identify": "duplicate or already investigating",
+      "must_not_do": [
+        "create_duplicate_incidents"
+      ]
+    }
+  }
+}

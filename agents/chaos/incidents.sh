@@ -244,9 +244,25 @@ cleanup_inc_010() { pass "INC-010: No cleanup needed"; }
 cleanup_inc_011() { pass "INC-011: No cleanup needed"; }
 
 cleanup_inc_012() {
-    log "INC-012 cleanup"
+    log "INC-012 cleanup: restoring ingestion-worker image"
     restore_deployment_image "ingestion-worker"
-    kubectl rollout status deploy/ingestion-worker -n "$NAMESPACE" --timeout=120s >/dev/null 2>&1 || true
+
+    # If restore failed, set to latest
+    local current_image
+    current_image=$(kubectl get deploy ingestion-worker -n rivulet \
+        -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null)
+
+    if [[ "$current_image" == *"v999-nonexistent"* ]]; then
+        kubectl set image deploy/ingestion-worker \
+            ingestion-worker=rivulet/ingestion-worker:latest \
+            -n rivulet
+    fi
+
+    # Delete any stuck pods
+    kubectl delete pod -n rivulet -l app.kubernetes.io/name=ingestion-worker \
+        --field-selector=status.phase=Pending --force --grace-period=0 2>/dev/null || true
+
+    kubectl rollout status deploy/ingestion-worker -n rivulet --timeout=120s 2>/dev/null || true
     pass "INC-012: Cleaned"
 }
 

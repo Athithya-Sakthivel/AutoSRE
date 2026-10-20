@@ -454,9 +454,19 @@ class SafeExecutor:
             raise
 
         # ------------------------------------------------------------------
-        # Step 4 — a proposal explicitly requesting approval is treated
-        # conservatively: policy still controls the tier, but we never
-        # discard a planner's explicit approval annotation.
+        # Step 4 — reconcile the proposal's approval flag with the policy
+        # decision.
+        #
+        # 4a: If the proposal explicitly requests approval but the policy
+        #     did not require it, upgrade the decision. This prevents a
+        #     planner from accidentally discarding an approval annotation.
+        #
+        # 4b: If the proposal explicitly declines approval (because the
+        #     graph already obtained HITL approval via approve_node) but
+        #     the policy requires it, downgrade the decision. The graph
+        #     is the approval authority; when it signals "approval
+        #     previously obtained," the executor must trust it and
+        #     proceed to dispatch.
         # ------------------------------------------------------------------
         if action.requires_approval and not decision.requires_approval:
             decision = PolicyDecision(
@@ -464,6 +474,13 @@ class SafeExecutor:
                 risk_tier=decision.risk_tier,
                 requires_approval=True,
                 reason=(f"{decision.reason}; proposal explicitly requires approval"),
+            )
+        elif not action.requires_approval and decision.requires_approval:
+            decision = PolicyDecision(
+                allowed=decision.allowed,
+                risk_tier=decision.risk_tier,
+                requires_approval=False,
+                reason=(f"{decision.reason}; approval previously obtained by graph"),
             )
 
         result = ExecutionResult(action=action, decision=decision)

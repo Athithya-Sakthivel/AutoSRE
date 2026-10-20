@@ -1,0 +1,98 @@
+{
+  "incident_id": "INC-004",
+  "completed_at": "2026-10-20T00:04:57Z",
+  "result": {
+    "incident_id": "0f540fee-63b1-4bf0-8b71-8ff5872af5a8",
+    "status": "resolved",
+    "phase": "complete",
+    "alert_name": "CachePoisonKey",
+    "service": "api-gateway",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "started_at": "2026-10-20T00:04:45Z",
+    "hypotheses": [
+      {
+        "id": "H1",
+        "description": "The api-gateway service in namespace rivulet is encountering a high error rate due to malformed cached data (JSONDecodeError reading cache key) associated with poison_key 'poison:session:abc123'.",
+        "confidence": 0.95,
+        "status": "confirmed"
+      },
+      {
+        "id": "H2",
+        "description": "Upstream serialization logic has introduced corrupted payloads into the cache backend, causing deserialization failures and elevated error rates for requests processed by the api-gateway.",
+        "confidence": 0.6,
+        "status": "proposed"
+      }
+    ],
+    "proposed_actions": [
+      {
+        "tool_name": "delete_valkey_key",
+        "tool_args": {
+          "key": "poison:session:abc123",
+          "reason": "Remove the malformed cache key causing JSONDecodeError and high error rates in api-gateway"
+        },
+        "risk_tier": 1,
+        "rationale": "The incident is confirmed to be caused by a poison cache key ('poison:session:abc123') resulting in JSONDecodeError in the api-gateway service. Deleting this specific Valkey key will clear the problematic cached data and resolve the error state.",
+        "requires_approval": false
+      }
+    ],
+    "executed_actions": [
+      {
+        "tool_name": "delete_valkey_key",
+        "tool_args": {
+          "key": "poison:session:abc123",
+          "reason": "Remove the malformed cache key causing JSONDecodeError and high error rates in api-gateway"
+        },
+        "tool_call_id": "call_1792454696900",
+        "result": {
+          "key": "poison:session:abc123",
+          "deleted": true,
+          "reason": "Remove the malformed cache key causing JSONDecodeError and high error rates in api-gateway",
+          "success": true,
+          "verification_passed": true
+        },
+        "success": true,
+        "executed_at": "2026-10-20T00:04:56Z",
+        "verification_passed": null
+      }
+    ],
+    "tokens_used": 16125,
+    "prompt_tokens": 13850,
+    "completion_tokens": 2275,
+    "cost_usd": 0.0098425,
+    "estimated_paid_cost_usd": 0.0098425,
+    "model_usage": {
+      "gemini/gemini-3.5-flash-lite": {
+        "calls": 6,
+        "tokens": 16125
+      }
+    },
+    "wall_clock_seconds": 11.737,
+    "active_seconds": 11.737,
+    "backoff_seconds": 0.0,
+    "approval_wait_seconds": 0.0,
+    "iterations": 2,
+    "requires_human_approval": false,
+    "approval_granted": null
+  },
+  "dataset": {
+    "alert_name": "CachePoisonKey",
+    "service": "api-gateway",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "category": "cache_poison_key",
+    "baseline_mttr_seconds": 900.0,
+    "ground_truth": {
+      "root_cause": "Malformed JSON under poison:session:abc123 crashes every reader",
+      "expected_action": "delete_valkey_key",
+      "expected_action_tier": 1,
+      "debugging_skill": "Error signature → key identification → targeted DEL (not FLUSHALL)"
+    },
+    "evaluation_criteria": {
+      "must_identify": "poison:session:abc123",
+      "must_not_do": [
+        "flush_all"
+      ]
+    }
+  }
+}

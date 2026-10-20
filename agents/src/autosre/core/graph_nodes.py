@@ -86,8 +86,10 @@ _JSON_FORMAT = {"type": "json_object"}
 # The ``_build_fallback_args`` function dynamically fills in the service
 # name from incident metadata, so these templates use placeholder values
 # that get overridden at runtime.
-# ---------------------------------------------------------------------------
 FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
+    # =====================================================================
+    # Tier 0 — No action needed
+    # =====================================================================
     "webhook_dedup": {
         "tool_name": "none",
         "tool_args": {"reason": "Duplicate webhook storm; deduplication is working as expected"},
@@ -106,9 +108,9 @@ FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
         "risk_tier": 0,
     },
     # =====================================================================
-    # K8s pod-level issues (restart is safe, Tier 1)
+    # Tier 1 — Safe autonomous remediation
     # =====================================================================
-    "pod_crash_loop": {
+    "crash_loop": {
         "tool_name": "restart_deployment",
         "tool_args": {"reason": "CrashLoopBackOff detected; rolling restart to clear stuck state"},
         "risk_tier": 1,
@@ -118,11 +120,6 @@ FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
         "tool_args": {"reason": "Memory pressure detected; restart to reclaim memory"},
         "risk_tier": 1,
     },
-    "high_cpu": {
-        "tool_name": "restart_deployment",
-        "tool_args": {"reason": "Sustained high CPU; restart to clear potential runaway process"},
-        "risk_tier": 1,
-    },
     "pod_oom": {
         "tool_name": "restart_deployment",
         "tool_args": {
@@ -130,8 +127,51 @@ FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
         },
         "risk_tier": 1,
     },
+    "stale_pod": {
+        "tool_name": "delete_pod",
+        "tool_args": {
+            "reason": "Pod stuck in Terminating; force delete to release resources",
+            "grace_period_seconds": 0,
+        },
+        "risk_tier": 1,
+    },
+    "image_pull_error": {
+        "tool_name": "restart_deployment",
+        "tool_args": {"reason": "ImagePullBackOff detected; restore previous working image tag"},
+        "risk_tier": 1,
+    },
+    "http_errors": {
+        "tool_name": "restart_deployment",
+        "tool_args": {"reason": "Upstream timeout cascade; restart to clear stuck connections"},
+        "risk_tier": 1,
+    },
+    "db_connection_exhaustion": {
+        "tool_name": "terminate_backend",
+        "tool_args": {
+            "reason": "Connection pool exhaustion; terminate idle-in-transaction backends"
+        },
+        "risk_tier": 1,
+    },
+    "cache_poison_key": {
+        "tool_name": "delete_valkey_key",
+        "tool_args": {
+            "key": "poison:session:abc123",
+            "reason": "Cache poisoning detected; delete corrupted key",
+        },
+        "risk_tier": 1,
+    },
+    "consumer_lag": {
+        "tool_name": "restart_deployment",
+        "tool_args": {"reason": "Consumer group lag increasing; restart consumers to recover"},
+        "risk_tier": 1,
+    },
+    "cascading_failure": {
+        "tool_name": "restart_deployment",
+        "tool_args": {"reason": "Cascading failure; restart primary service to break the chain"},
+        "risk_tier": 1,
+    },
     # =====================================================================
-    # K8s scaling issues (Tier 2, requires HITL)
+    # Tier 2 — Destructive, requires HITL approval
     # =====================================================================
     "cpu_saturation": {
         "tool_name": "scale_deployment",
@@ -141,87 +181,39 @@ FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
         },
         "risk_tier": 2,
     },
-    # =====================================================================
-    # K8s pod lifecycle issues
-    # =====================================================================
-    "stale_pod": {
-        "tool_name": "restart_deployment",
-        "tool_args": {"reason": "Pod stuck in Terminating; rolling restart replaces stuck pod"},
-        "risk_tier": 1,
-    },
-    # =====================================================================
-    # HTTP/upstream issues
-    # =====================================================================
-    "http_errors": {
-        "tool_name": "restart_deployment",
-        "tool_args": {"reason": "Upstream timeout cascade; restart to clear stuck connections"},
-        "risk_tier": 1,
-    },
-    # =====================================================================
-    # PostgreSQL issues
-    # =====================================================================
-    "db_connection_exhaustion": {
-        "tool_name": "restart_deployment",
-        "tool_args": {"reason": "Connection pool exhaustion; restart to release stuck connections"},
-        "risk_tier": 1,
-    },
-    "lock_contention": {
-        "tool_name": "restart_deployment",
-        "tool_args": {"reason": "Lock contention causing query stalls; restart to release locks"},
-        "risk_tier": 1,
-    },
-    "slow_queries": {
-        "tool_name": "restart_deployment",
-        "tool_args": {"reason": "Slow queries causing backlog; restart to clear stuck sessions"},
-        "risk_tier": 1,
-    },
-    "stale_connections": {
-        "tool_name": "restart_deployment",
-        "tool_args": {"reason": "Stale idle-in-transaction connections; restart to reclaim pool"},
-        "risk_tier": 1,
-    },
-    # =====================================================================
-    # Valkey/Redis issues
-    # =====================================================================
-    "cache_poison_key": {
-        "tool_name": "delete_valkey_key",
+    "cache_eviction": {
+        "tool_name": "flush_all",
         "tool_args": {
-            "key": "poison:session:abc123",
-            "reason": "Cache poisoning detected; delete corrupted key",
+            "reason": "Valkey eviction under memory pressure; FLUSHALL to reclaim memory",
         },
-        "risk_tier": 1,
+        "risk_tier": 2,
     },
-    "eviction_pressure": {
-        "tool_name": "delete_valkey_key",
+    "resource_quota": {
+        "tool_name": "scale_deployment",
         "tool_args": {
-            "key": "cache:stale:*",
-            "reason": "High eviction rate; clear stale cache entries",
+            "reason": "Resource quota exceeded; scale down to fit within quota limits",
         },
-        "risk_tier": 1,
+        "risk_tier": 2,
     },
-    "consumer_lag": {
-        "tool_name": "restart_deployment",
-        "tool_args": {"reason": "Consumer group lag increasing; restart consumers to recover"},
-        "risk_tier": 1,
-    },
-    "stream_backlog": {
-        "tool_name": "restart_deployment",
-        "tool_args": {"reason": "Stream consumer backlog; restart to reinitialize consumer group"},
-        "risk_tier": 1,
-    },
-    # =====================================================================
-    # Composite/multi-signal issues
-    # =====================================================================
-    "cascading_failure": {
-        "tool_name": "restart_deployment",
-        "tool_args": {"reason": "Cascading failure; restart primary service to break the chain"},
-        "risk_tier": 1,
-    },
+}
+
+# ---------------------------------------------------------------------------
+# Category-forbidden tools
+# ---------------------------------------------------------------------------
+#
+# If the LLM proposes one of these tools for a given category, the proposal
+# is rejected and the category fallback action is used instead. Keys match
+# dataset evaluation_criteria.must_not_do values.
+_CATEGORY_FORBIDDEN_TOOLS: dict[str, frozenset[str]] = {
+    "cache_eviction": frozenset({"restart_deployment"}),
+    "db_connection_exhaustion": frozenset({"restart_deployment"}),
+    "cpu_saturation": frozenset({"restart_deployment", "delete_pod"}),
+    "pod_oom": frozenset({"scale_deployment"}),
+    "memory_pressure": frozenset({"scale_deployment"}),
 }
 
 # Maximum number of tools to execute per investigation iteration.
 _MAX_TOOLS_PER_ITERATION = 1
-
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -1138,6 +1130,10 @@ async def propose_node(
 
     Early exit: Categories with tool_name="none" in FALLBACK_ACTIONS exit
     immediately without any LLM calls (webhook_dedup, prohibited_action, etc.)
+
+    Safety: Every proposed tool (LLM-generated or fallback) is checked against
+    _CATEGORY_FORBIDDEN_TOOLS before being returned. A forbidden tool is rejected
+    and the incident completes with no_action rather than executing an unsafe fix.
     """
     graph_context = get_graph_context(config)
     llm_router = graph_context.llm_router
@@ -1259,7 +1255,7 @@ Available remediation tools (Tier 1 = reversible, Tier 2 = requires approval):
 
 Risk tiers:
 - Tier 1: Reversible (restart, terminate_backend, delete_valkey_key, delete_pod)
-- Tier 2: Requires approval (scale_deployment)
+- Tier 2: Requires approval (scale_deployment, flush_all)
 
 Top hypothesis:
 {json.dumps(best, indent=2)}
@@ -1268,8 +1264,10 @@ Decision framework for choosing actions:
 - CPU saturation (high CPU across multiple pods, high RPS): PREFER scale_deployment (Tier 2) over restart. Restarting doesn't add capacity; scaling does.
 - Memory pressure (OOMKilled, high memory): restart_deployment (Tier 1) is appropriate to reclaim memory.
 - Pod crash loops: restart_deployment (Tier 1) to clear stuck state.
-- Database connection exhaustion: restart_deployment (Tier 1) to release connections.
-- Cache issues: delete_valkey_key (Tier 1) to clear problematic keys.
+- Database connection exhaustion: terminate_backend (Tier 1) to kill idle-in-tx sessions. Do NOT restart_deployment.
+- Cache eviction storms: flush_all (Tier 2) to reclaim memory. Do NOT restart_deployment.
+- Resource quota exceeded: scale_deployment (Tier 2) to reduce replicas. Do NOT restart_deployment.
+- Cache poisoning: delete_valkey_key (Tier 1) to remove the specific poisoned key.
 - Network/timeout cascades: restart_deployment (Tier 1) to clear stuck connections.
 
 Key insight: If the root cause is INSUFFICIENT CAPACITY (not a stuck process or resource leak), you MUST choose scale_deployment even though it requires approval.
@@ -1279,6 +1277,9 @@ Rules:
 - Do NOT propose a tool that was already executed this incident.
 - Do NOT propose Tier 0 (read-only) tools as remediation.
 - For CPU saturation with high RPS or traffic: ALWAYS use scale_deployment (Tier 2).
+- For cache eviction: ALWAYS use flush_all (Tier 2). NEVER use restart_deployment.
+- For DB connection exhaustion: ALWAYS use terminate_backend (Tier 1). NEVER use restart_deployment.
+- For resource quota exceeded: ALWAYS use scale_deployment (Tier 2). NEVER use restart_deployment.
 - For stuck processes or resource leaks: use restart_deployment (Tier 1).
 - If no remediation tool applies, return tool_name="none".
 
@@ -1304,6 +1305,7 @@ Executed actions (DO NOT REPEAT THESE):
     tool_args: dict[str, Any] = {}
     rationale: str = ""
     risk_tier: int = 1
+    requires_approval: bool = False
 
     try:
         response, model_used = await llm_router.coordinator_call(
@@ -1332,6 +1334,8 @@ Executed actions (DO NOT REPEAT THESE):
         else:
             risk_tier = 1
 
+        requires_approval = risk_tier >= 2
+
         usage_update = _accumulate_usage(state, response, llm_config, messages, model_used)
 
         # Check confidence threshold
@@ -1343,6 +1347,19 @@ Executed actions (DO NOT REPEAT THESE):
             )
             raise ValueError("Confidence below threshold")
 
+        # Check if the proposed tool is forbidden for this category
+        forbidden = _CATEGORY_FORBIDDEN_TOOLS.get(category, frozenset())
+        if tool_name_str in forbidden:
+            logger.warning(
+                "LLM proposed '%s' which is forbidden for category '%s'; "
+                "falling back to category action",
+                tool_name_str,
+                category,
+            )
+            raise ValueError(
+                f"Proposed tool '{tool_name_str}' is forbidden for category '{category}'"
+            )
+
     except (LLMBudgetExhaustedError, ValueError, Exception) as exc:
         logger.warning(
             "Propose LLM call failed or confidence too low (%s: %s); checking fallback actions",
@@ -1352,7 +1369,7 @@ Executed actions (DO NOT REPEAT THESE):
 
         usage_update = _accumulate_usage(state, None, llm_config, messages)
 
-        # FALLBACK: Check if incident category has a known remediation
+        # FALLBACK PATH 1: LLM failed or confidence too low
         if category in FALLBACK_ACTIONS:
             fallback = FALLBACK_ACTIONS[category]
 
@@ -1368,8 +1385,24 @@ Executed actions (DO NOT REPEAT THESE):
                     **usage_update,
                 }
 
+            # SAFETY NET: Reject forbidden fallback tools
+            forbidden = _CATEGORY_FORBIDDEN_TOOLS.get(category, frozenset())
+            if tool_name_str in forbidden:
+                logger.error(
+                    "FATAL: Fallback tool '%s' for category '%s' is in forbidden set; "
+                    "completing with no_action to prevent safety violation",
+                    tool_name_str,
+                    category,
+                )
+                return {
+                    "current_phase": PHASE_COMPLETE,
+                    "status": "no_action",
+                    **usage_update,
+                }
+
             tool_args = _build_fallback_args(fallback, metadata)
             risk_tier = int(fallback.get("risk_tier", 1))
+            requires_approval = risk_tier >= 2
 
             best_description = str(best.get("description", ""))[:100] if best is not None else ""
             rationale = (
@@ -1379,10 +1412,11 @@ Executed actions (DO NOT REPEAT THESE):
             )
 
             logger.info(
-                "Using fallback action for category '%s': %s (Tier %d)",
+                "Using fallback action for category '%s': %s (Tier %d, requires_approval=%s)",
                 category,
                 tool_name_str,
                 risk_tier,
+                requires_approval,
             )
         else:
             logger.info(
@@ -1395,7 +1429,7 @@ Executed actions (DO NOT REPEAT THESE):
                 **usage_update,
             }
 
-    # If the LLM returned "none", check FALLBACK_ACTIONS before giving up.
+    # FALLBACK PATH 2: LLM returned "none" — check FALLBACK_ACTIONS before giving up
     if tool_name_str is None or tool_name_str == "none":
         if category in FALLBACK_ACTIONS:
             fallback = FALLBACK_ACTIONS[category]
@@ -1410,8 +1444,24 @@ Executed actions (DO NOT REPEAT THESE):
                     **usage_update,
                 }
 
+            # SAFETY NET: Reject forbidden fallback tools
+            forbidden = _CATEGORY_FORBIDDEN_TOOLS.get(category, frozenset())
+            if tool_name_str in forbidden:
+                logger.error(
+                    "FATAL: Fallback tool '%s' for category '%s' is in forbidden set; "
+                    "completing with no_action to prevent safety violation",
+                    tool_name_str,
+                    category,
+                )
+                return {
+                    "current_phase": PHASE_COMPLETE,
+                    "status": "no_action",
+                    **usage_update,
+                }
+
             tool_args = _build_fallback_args(fallback, metadata)
             risk_tier = int(fallback.get("risk_tier", 1))
+            requires_approval = risk_tier >= 2
 
             best_description = str(best.get("description", ""))[:100] if best is not None else ""
             rationale = (
@@ -1420,10 +1470,11 @@ Executed actions (DO NOT REPEAT THESE):
             )
 
             logger.info(
-                "LLM returned none; using fallback for category '%s': %s (Tier %d)",
+                "LLM returned none; using fallback for category '%s': %s (Tier %d, requires_approval=%s)",
                 category,
                 tool_name_str,
                 risk_tier,
+                requires_approval,
             )
         else:
             logger.info("Agent proposed no action and no fallback for category '%s'", category)
@@ -1433,6 +1484,7 @@ Executed actions (DO NOT REPEAT THESE):
                 **usage_update,
             }
 
+    # Final duplicate and attempt-cap checks
     if is_action_already_executed(tool_name_str, tool_args, executed_actions):
         logger.warning(
             "Duplicate action rejected: %s (already executed)",
@@ -1465,13 +1517,13 @@ Executed actions (DO NOT REPEAT THESE):
         tool_args=tool_args,
         risk_tier=risk_tier,
         rationale=rationale,
-        requires_approval=risk_tier >= 2,
+        requires_approval=requires_approval,
     )
 
     return {
         "proposed_actions": [proposed],
-        "requires_human_approval": risk_tier >= 2,
-        "current_phase": PHASE_APPROVE if risk_tier >= 2 else PHASE_EXECUTE,
+        "requires_human_approval": requires_approval,
+        "current_phase": PHASE_APPROVE if requires_approval else PHASE_EXECUTE,
         **usage_update,
     }
 
@@ -1479,6 +1531,8 @@ Executed actions (DO NOT REPEAT THESE):
 # ---------------------------------------------------------------------------
 # Node: approve
 # ---------------------------------------------------------------------------
+
+
 async def approve_node(
     state: AgentState,
     config: RunnableConfig,
@@ -1609,13 +1663,17 @@ async def approve_node(
 # ---------------------------------------------------------------------------
 # Node: execute
 # ---------------------------------------------------------------------------
-
-
 async def execute_node(
     state: AgentState,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """Execute the proposed action through the SafeExecutor."""
+    """Execute the proposed action through the SafeExecutor.
+
+    When HITL approval has already been granted by approve_node, the
+    risk_tier is downgraded to 1 and requires_approval is set to False
+    so the executor's internal policy engine doesn't re-trigger the
+    approval gate for Tier-2 actions.
+    """
     graph_context = get_graph_context(config)
     executor = graph_context.executor
     sre_context = _get_sre_context(config)
@@ -1648,12 +1706,19 @@ async def execute_node(
     if not isinstance(tool_args, dict):
         tool_args = {}
 
+    # KEY FIX: If approval was already granted by approve_node, downgrade
+    # the risk tier to 1 and set requires_approval=False so the executor's
+    # internal policy engine doesn't re-trigger the approval gate.
+    already_approved = bool(state.get("approval_granted", False))
+
     proposed_action = ProposedAction(
         tool_name=tool_name_str,
         tool_args=tool_args,
-        risk_tier=int(proposed.get("risk_tier", 1)),
+        risk_tier=(1 if already_approved else int(proposed.get("risk_tier", 1))),
         rationale=str(proposed.get("rationale", "")),
-        requires_approval=bool(proposed.get("requires_approval", False)),
+        requires_approval=(
+            False if already_approved else bool(proposed.get("requires_approval", False))
+        ),
     )
 
     try:

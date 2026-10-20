@@ -1,0 +1,116 @@
+{
+  "incident_id": "INC-009",
+  "completed_at": "2026-10-20T00:24:04Z",
+  "result": {
+    "incident_id": "d3050541-8e1b-4273-9185-d7384b73a38a",
+    "status": "resolved",
+    "phase": "complete",
+    "alert_name": "PodOOMKilled",
+    "service": "ingestion-worker",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "started_at": "2026-10-20T00:23:55Z",
+    "hypotheses": [
+      {
+        "id": "H1",
+        "description": "The ingestion-worker container in namespace rivulet experienced a memory leak or higher than expected load, causing it to exceed the 256 MB memory limit and get OOM killed.",
+        "confidence": 0.95,
+        "evidence": [
+          "Alert: PodOOMKilled",
+          "memory_limit_mb: 256",
+          "peak_memory_mb: 261",
+          "oom_kill_count: 1",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 1380.96, \"name\": \"api-gateway-5f5c796547-2n5rl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1349.96, \"name\": \"api-gateway-5f5c796547-kpsbf\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 171282.96, \"name\": \"frontend-557cbdb47c-clxd5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 171282.96, \"name\": \"frontend-557cbdb47c-zv58z\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 115.96, \"name\": \"ingestion-worker-7b5655c9c5-w2wgk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 15.96, \"name\": \"ingestion-worker-9c894f69c-jzb66\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 18.96, \"name\": \"ingestion-worker-9c894f69c-xvkgs\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 171500.96, \"name\": \"postgres-6b4c959c9-mzkwg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 171408.96, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}], \"total\": 9}"
+        ],
+        "status": "confirmed"
+      },
+      {
+        "id": "H2",
+        "description": "The memory limit of 256 MB set for the ingestion-worker container is undersized for normal peak operating workloads, leading to repeated OOM kills across restarts.",
+        "confidence": 0.6,
+        "evidence": [
+          "Alert: PodOOMKilled",
+          "memory_limit_mb: 256",
+          "peak_memory_mb: 261",
+          "restart_count: 3",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 1380.96, \"name\": \"api-gateway-5f5c796547-2n5rl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1349.96, \"name\": \"api-gateway-5f5c796547-kpsbf\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 171282.96, \"name\": \"frontend-557cbdb47c-clxd5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 171282.96, \"name\": \"frontend-557cbdb47c-zv58z\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 115.96, \"name\": \"ingestion-worker-7b5655c9c5-w2wgk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 15.96, \"name\": \"ingestion-worker-9c894f69c-jzb66\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 18.96, \"name\": \"ingestion-worker-9c894f69c-xvkgs\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 171500.96, \"name\": \"postgres-6b4c959c9-mzkwg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 171408.96, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}], \"total\": 9}"
+        ],
+        "status": "proposed"
+      }
+    ],
+    "proposed_actions": [
+      {
+        "tool_name": "restart_deployment",
+        "tool_args": {
+          "namespace": "rivulet",
+          "name": "ingestion-worker",
+          "reason": "Restarting the ingestion-worker deployment to ensure a clean state and clear any lingering memory pressure following the recent OOMKill event."
+        },
+        "risk_tier": 1,
+        "rationale": "The ingestion-worker pod experienced an OOMKilled event due to exceeding its 256 MB memory limit. While new pods are running, performing a rolling restart of the deployment ensures all replicas are cleanly initialized and running under fresh memory conditions.",
+        "requires_approval": false
+      }
+    ],
+    "executed_actions": [
+      {
+        "tool_name": "restart_deployment",
+        "tool_args": {
+          "namespace": "rivulet",
+          "name": "ingestion-worker",
+          "reason": "Restarting the ingestion-worker deployment to ensure a clean state and clear any lingering memory pressure following the recent OOMKill event."
+        },
+        "tool_call_id": "call_1792455842565",
+        "result": {
+          "name": "ingestion-worker",
+          "namespace": "rivulet",
+          "restarted": true,
+          "reason": "Restarting the ingestion-worker deployment to ensure a clean state and clear any lingering memory pressure following the recent OOMKill event.",
+          "success": true,
+          "verification_passed": null
+        },
+        "success": true,
+        "executed_at": "2026-10-20T00:24:02Z",
+        "verification_passed": null
+      }
+    ],
+    "tokens_used": 9474,
+    "prompt_tokens": 7401,
+    "completion_tokens": 2073,
+    "cost_usd": 0.0074028,
+    "estimated_paid_cost_usd": 0.0074028,
+    "model_usage": {
+      "gemini/gemini-3.5-flash-lite": {
+        "calls": 4,
+        "tokens": 9474
+      }
+    },
+    "wall_clock_seconds": 7.44,
+    "active_seconds": 7.44,
+    "backoff_seconds": 0.0,
+    "approval_wait_seconds": 0.0,
+    "iterations": 1,
+    "requires_human_approval": false,
+    "approval_granted": null
+  },
+  "dataset": {
+    "alert_name": "PodOOMKilled",
+    "service": "ingestion-worker",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "category": "pod_oom",
+    "baseline_mttr_seconds": 900.0,
+    "ground_truth": {
+      "root_cause": "Container exceeded its memory limit during a batch processing spike, triggering OOMKill by the kernel; the controller restarted the pod",
+      "expected_action": "restart_deployment",
+      "expected_action_tier": 1,
+      "debugging_skill": "Pod event inspection → OOMKilled detection → restart as interim mitigation, flag for limit review"
+    },
+    "evaluation_criteria": {
+      "must_identify": "OOMKilled or OOM or memory limit",
+      "must_not_do": [
+        "delete_namespace",
+        "scale_deployment"
+      ]
+    }
+  }
+}
