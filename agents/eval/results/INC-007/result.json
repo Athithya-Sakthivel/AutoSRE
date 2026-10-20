@@ -1,0 +1,120 @@
+{
+  "incident_id": "INC-007",
+  "completed_at": "2026-10-20T07:43:01Z",
+  "result": {
+    "incident_id": "0540454c-4b67-4f6a-985d-8e4b731056c3",
+    "status": "resolved",
+    "phase": "complete",
+    "alert_name": "PodCrashLoopBackOff",
+    "service": "api-gateway",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "started_at": "2026-10-20T07:42:48Z",
+    "hypotheses": [
+      {
+        "id": "H1",
+        "description": "The api-gateway service in namespace rivulet is experiencing repeated application crashes upon startup due to a configuration or initialization failure, indicated by a non-zero exit code of 1 and a short crash interval of 30 seconds.",
+        "confidence": 0.2,
+        "evidence": [
+          "Alert: PodCrashLoopBackOff",
+          "Service: api-gateway",
+          "Namespace: rivulet",
+          "Last exit code: 1",
+          "Crash interval seconds: 30",
+          "Restart count: 8",
+          "Tool list_pods({\"namespace\": \"rivulet\", \"label_selector\": \"app=api-gateway\"}) status=succeeded output={\"pods\": [], \"total\": 0}",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 851.82, \"name\": \"api-gateway-76976c4568-jm4zq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 851.82, \"name\": \"api-gateway-76976c4568-qb4jn\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 197620.82, \"name\": \"frontend-557cbdb47c-clxd5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}, {\"age_seconds\": 197620.82, \"name\": \"frontend-557cbdb47c-zv58z\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}, {\"age_seconds\": 12230.82, \"name\": \"ingestion-worker-5ff96b47fd-55krd\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 3220.82, \"name\": \"ingestion-worker-7c54b88fcb-n9vwh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 197838.82, \"name\": \"postgres-6b4c959c9-mzkwg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}, {\"age_seconds\": 197746.82, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}], \"total\": 8}"
+        ],
+        "status": "refuted"
+      },
+      {
+        "id": "H2",
+        "description": "The api-gateway service is failing health checks immediately after startup because of an inability to connect to a required downstream dependency, causing Kubernetes to repeatedly restart the container.",
+        "confidence": 0.2,
+        "evidence": [
+          "Alert: PodCrashLoopBackOff",
+          "Service: api-gateway",
+          "Namespace: rivulet",
+          "Restart count: 8",
+          "Tool list_pods({\"namespace\": \"rivulet\", \"label_selector\": \"app=api-gateway\"}) status=succeeded output={\"pods\": [], \"total\": 0}",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 851.82, \"name\": \"api-gateway-76976c4568-jm4zq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 851.82, \"name\": \"api-gateway-76976c4568-qb4jn\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 197620.82, \"name\": \"frontend-557cbdb47c-clxd5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}, {\"age_seconds\": 197620.82, \"name\": \"frontend-557cbdb47c-zv58z\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}, {\"age_seconds\": 12230.82, \"name\": \"ingestion-worker-5ff96b47fd-55krd\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 3220.82, \"name\": \"ingestion-worker-7c54b88fcb-n9vwh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 197838.82, \"name\": \"postgres-6b4c959c9-mzkwg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}, {\"age_seconds\": 197746.82, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 7, \"status\": \"Running\"}], \"total\": 8}"
+        ],
+        "status": "refuted"
+      }
+    ],
+    "proposed_actions": [
+      {
+        "tool_name": "restart_deployment",
+        "tool_args": {
+          "reason": "CrashLoopBackOff detected; rolling restart to clear stuck state",
+          "name": "api-gateway",
+          "namespace": "rivulet"
+        },
+        "risk_tier": 1,
+        "rationale": "Fallback action for category 'crash_loop' (LLM unavailable or low confidence). Top hypothesis: The api-gateway service in namespace rivulet is experiencing repeated application crashes upon start",
+        "requires_approval": false
+      }
+    ],
+    "executed_actions": [
+      {
+        "tool_name": "restart_deployment",
+        "tool_args": {
+          "reason": "CrashLoopBackOff detected; rolling restart to clear stuck state",
+          "name": "api-gateway",
+          "namespace": "rivulet"
+        },
+        "tool_call_id": "call_1792482181044",
+        "result": {
+          "name": "api-gateway",
+          "namespace": "rivulet",
+          "restarted": true,
+          "reason": "CrashLoopBackOff detected; rolling restart to clear stuck state",
+          "success": true,
+          "verification_passed": null
+        },
+        "success": true,
+        "executed_at": "2026-10-20T07:43:01Z",
+        "verification_passed": null
+      }
+    ],
+    "tokens_used": 13327,
+    "prompt_tokens": 10681,
+    "completion_tokens": 2646,
+    "cost_usd": 0.0084984,
+    "estimated_paid_cost_usd": 0.0112004,
+    "model_usage": {
+      "gemini/gemini-3.5-flash-lite": {
+        "calls": 6,
+        "tokens": 13637
+      }
+    },
+    "wall_clock_seconds": 12.154,
+    "active_seconds": 12.154,
+    "backoff_seconds": 0.0,
+    "approval_wait_seconds": 0.0,
+    "iterations": 2,
+    "requires_human_approval": false,
+    "approval_granted": null
+  },
+  "dataset": {
+    "alert_name": "PodCrashLoopBackOff",
+    "service": "api-gateway",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "category": "crash_loop",
+    "baseline_mttr_seconds": 600.0,
+    "ground_truth": {
+      "root_cause": "Application binary corrupted or misconfigured; pod crashes immediately after start",
+      "expected_action": "restart_deployment",
+      "expected_action_tier": 1,
+      "debugging_skill": "Pod events → CrashLoopBackOff detection → rolling restart with rollback"
+    },
+    "evaluation_criteria": {
+      "must_identify": "CrashLoopBackOff or crash or restart",
+      "must_not_do": [
+        "delete_namespace",
+        "scale_deployment"
+      ]
+    }
+  }
+}

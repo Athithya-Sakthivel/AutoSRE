@@ -242,18 +242,45 @@ class TestSafeExecutor:
 
     @pytest.mark.asyncio
     async def test_approval_required_raises_before_dispatch(self) -> None:
-        """Tier-2+ action raises NeedsApprovalError without dispatching."""
+        """Tier-2+ action raises NeedsApprovalError without dispatching.
+
+        The action explicitly requests approval (requires_approval=True)
+        to simulate a fresh proposal that has NOT been pre-approved by
+        the graph's approve_node. When requires_approval=False, the
+        executor treats it as already-approved and proceeds to dispatch.
+        """
         registry = _make_registry_with_tools(("scale_deployment", 2))
         policy = _policy_requiring_approval()
         executor = SafeExecutor(registry, policy)
 
-        action = _proposed("scale_deployment", risk_tier=2)
+        # requires_approval=True signals "not yet approved by graph"
+        action = _proposed("scale_deployment", risk_tier=2, requires_approval=True)
 
         with pytest.raises(NeedsApprovalError) as exc_info:
             await executor.execute(action, _make_context())
 
         assert exc_info.value.decision.requires_approval is True
         assert exc_info.value.action.tool_name == "scale_deployment"
+
+    @pytest.mark.asyncio
+    async def test_pre_approved_action_dispatches_without_error(self) -> None:
+        """Tier-2+ action with requires_approval=False dispatches normally.
+
+        This simulates the post-HITL path where approve_node has already
+        granted approval and execute_node sets requires_approval=False.
+        The executor must trust this signal and proceed to dispatch.
+        """
+        registry = _make_registry_with_tools(("scale_deployment", 2))
+        policy = _policy_requiring_approval()
+        executor = SafeExecutor(registry, policy)
+
+        # requires_approval=False signals "already approved by graph"
+        action = _proposed("scale_deployment", risk_tier=2, requires_approval=False)
+
+        result = await executor.execute(action, _make_context())
+
+        assert result.status == "succeeded"
+        assert result.executed is True
 
     @pytest.mark.asyncio
     async def test_tool_failure_triggers_rollback(self) -> None:

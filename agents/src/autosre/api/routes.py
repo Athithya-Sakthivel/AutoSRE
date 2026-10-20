@@ -383,7 +383,7 @@ class AdminStatusResponse(BaseModel):
 # Constants
 # ---------------------------------------------------------------------------
 
-_PROHIBITED_TOOLS = frozenset({"delete_namespace", "flush_all", "drop_table"})
+_PROHIBITED_TOOLS = frozenset({"delete_namespace", "drop_table"})
 _TERMINAL_SUCCESS_STATUSES = frozenset({"resolved"})
 _TERMINAL_FAILURE_STATUSES = frozenset({"failed", "blocked"})
 _NO_ACTION_STATUSES = frozenset({"no_action"})

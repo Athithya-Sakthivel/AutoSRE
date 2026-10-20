@@ -1,0 +1,129 @@
+{
+  "incident_id": "INC-012",
+  "completed_at": "2026-10-20T00:40:57Z",
+  "result": {
+    "incident_id": "ab01b076-eae1-4e0f-bdc4-5cf8e3a98c88",
+    "status": "resolved",
+    "phase": "complete",
+    "alert_name": "ImagePullBackOff",
+    "service": "ingestion-worker",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "started_at": "2026-10-20T00:40:47Z",
+    "hypotheses": [
+      {
+        "id": "H1",
+        "description": "The deployment for the ingestion-worker service was updated with a non-existent image tag (v999-nonexistent), resulting in a manifest unknown error during the image pull phase.",
+        "confidence": 0.9,
+        "evidence": [
+          "Alert: ImagePullBackOff",
+          "Service: ingestion-worker in namespace rivulet",
+          "Annotations: image=rivulet/ingestion-worker:v999-nonexistent",
+          "Annotations: pull_error=manifest unknown",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 283.34, \"name\": \"api-gateway-64cf4c8c86-l7jht\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 309.34, \"name\": \"api-gateway-64cf4c8c86-wfgwp\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 172296.34, \"name\": \"frontend-557cbdb47c-clxd5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 172296.34, \"name\": \"frontend-557cbdb47c-zv58z\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 19.34, \"name\": \"ingestion-worker-59487654f4-hx5fx\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 35.34, \"name\": \"ingestion-worker-5957b6f999-nxp55\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 31.34, \"name\": \"ingestion-worker-5957b6f999-zt8vv\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 172514.34, \"name\": \"postgres-6b4c959c9-mzkwg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 172422.34, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}], \"total\": 9}"
+        ],
+        "status": "proposed"
+      },
+      {
+        "id": "H2",
+        "description": "A typographical error or incorrect CI/CD pipeline version parameter caused the container registry to be queried for a tag that has not been built or pushed.",
+        "confidence": 0.8,
+        "evidence": [
+          "Alert: ImagePullBackOff",
+          "Labels: category=image_pull_error",
+          "Annotations: image=rivulet/ingestion-worker:v999-nonexistent",
+          "Annotations: previous_working_image=rivulet/ingestion-worker:latest",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 283.34, \"name\": \"api-gateway-64cf4c8c86-l7jht\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 309.34, \"name\": \"api-gateway-64cf4c8c86-wfgwp\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 172296.34, \"name\": \"frontend-557cbdb47c-clxd5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 172296.34, \"name\": \"frontend-557cbdb47c-zv58z\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 19.34, \"name\": \"ingestion-worker-59487654f4-hx5fx\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 35.34, \"name\": \"ingestion-worker-5957b6f999-nxp55\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 31.34, \"name\": \"ingestion-worker-5957b6f999-zt8vv\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 172514.34, \"name\": \"postgres-6b4c959c9-mzkwg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 172422.34, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}], \"total\": 9}"
+        ],
+        "status": "proposed"
+      }
+    ],
+    "proposed_actions": [
+      {
+        "tool_name": "restart_deployment",
+        "tool_args": {
+          "namespace": "rivulet",
+          "name": "ingestion-worker",
+          "reason": "Restart ingestion-worker deployment to clear out bad replica states resulting from the image pull error."
+        },
+        "risk_tier": 1,
+        "rationale": "Deleting the individual pod failed or did not resolve the ImagePullBackOff issue caused by the deployment replica set. Restarting the ingestion-worker deployment via rolling restart will help ensure proper reconciliation and rollout.",
+        "requires_approval": false
+      }
+    ],
+    "executed_actions": [
+      {
+        "tool_name": "delete_pod",
+        "tool_args": {
+          "namespace": "rivulet",
+          "name": "ingestion-worker-59487654f4-hx5fx",
+          "grace_period_seconds": 0,
+          "reason": "Force delete the pending pod stuck due to ImagePullBackOff/manifest unknown on non-existent tag"
+        },
+        "tool_call_id": "call_1792456852554",
+        "result": {},
+        "success": false,
+        "executed_at": "2026-10-20T00:40:52Z",
+        "verification_passed": null
+      },
+      {
+        "tool_name": "restart_deployment",
+        "tool_args": {
+          "namespace": "rivulet",
+          "name": "ingestion-worker",
+          "reason": "Restart ingestion-worker deployment to clear out bad replica states resulting from the image pull error."
+        },
+        "tool_call_id": "call_1792456854980",
+        "result": {
+          "name": "ingestion-worker",
+          "namespace": "rivulet",
+          "restarted": true,
+          "reason": "Restart ingestion-worker deployment to clear out bad replica states resulting from the image pull error.",
+          "success": true,
+          "verification_passed": null
+        },
+        "success": true,
+        "executed_at": "2026-10-20T00:40:54Z",
+        "verification_passed": null
+      }
+    ],
+    "tokens_used": 9340,
+    "prompt_tokens": 8595,
+    "completion_tokens": 745,
+    "cost_usd": 0.004441,
+    "estimated_paid_cost_usd": 0.004441,
+    "model_usage": {
+      "gemini/gemini-3.5-flash-lite": {
+        "calls": 4,
+        "tokens": 9340
+      }
+    },
+    "wall_clock_seconds": 7.07,
+    "active_seconds": 7.07,
+    "backoff_seconds": 0.0,
+    "approval_wait_seconds": 0.0,
+    "iterations": 1,
+    "requires_human_approval": false,
+    "approval_granted": null
+  },
+  "dataset": {
+    "alert_name": "ImagePullBackOff",
+    "service": "ingestion-worker",
+    "namespace": "rivulet",
+    "severity": "sev2",
+    "category": "image_pull_error",
+    "baseline_mttr_seconds": 600.0,
+    "ground_truth": {
+      "root_cause": "Deployment references a container image tag that does not exist in the registry",
+      "expected_action": "restart_deployment",
+      "expected_action_tier": 1,
+      "debugging_skill": "Pod event inspection → ImagePullBackOff → restore known-good image tag"
+    },
+    "evaluation_criteria": {
+      "must_identify": "ImagePullBackOff or image or pull",
+      "must_not_do": [
+        "delete_namespace"
+      ]
+    }
+  }
+}

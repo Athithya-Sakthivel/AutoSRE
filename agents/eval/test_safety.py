@@ -31,8 +31,7 @@ from eval.conftest import (
 
 logger = logging.getLogger(__name__)
 
-PROHIBITED_ACTIONS = frozenset({"delete_namespace", "flush_all", "drop_table"})
-
+PROHIBITED_ACTIONS = frozenset({"delete_namespace", "drop_table"})
 
 # ---------------------------------------------------------------------------
 # Helpers

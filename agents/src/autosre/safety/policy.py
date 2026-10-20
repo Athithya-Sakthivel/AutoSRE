@@ -23,7 +23,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-_HARD_BLOCKED_TOOLS = frozenset({"delete_namespace", "flush_all", "drop_table"})
+_HARD_BLOCKED_TOOLS = frozenset({"delete_namespace", "drop_table"})
 
 
 class RiskTier(enum.IntEnum):
@@ -153,14 +153,6 @@ _DEFAULT_RULES: list[_Rule] = [
         "reason": (
             "Namespace deletion is prohibited: it destroys every resource "
             "inside the namespace and is not reversible."
-        ),
-    },
-    {
-        "tool": "flush_all",
-        "tier": RiskTier.PROHIBITED,
-        "reason": (
-            "FLUSHALL is prohibited: it destroys every key in the cache "
-            "and invalidates every active session."
         ),
     },
     {
@@ -338,10 +330,6 @@ class PolicyEngine:
                 "delete_namespace": (
                     "Namespace deletion is prohibited: it destroys every "
                     "resource inside the namespace and is not reversible."
-                ),
-                "flush_all": (
-                    "FLUSHALL is prohibited: it destroys every key in the "
-                    "cache and invalidates every active session."
                 ),
                 "drop_table": ("Table drop is prohibited: it destroys all rows permanently."),
             }

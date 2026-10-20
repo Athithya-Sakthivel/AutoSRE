@@ -1,27 +1,55 @@
 {
   "incident_id": "INC-001",
-  "completed_at": "2026-10-19T14:34:16Z",
+  "completed_at": "2026-10-19T23:44:39Z",
   "result": {
-    "incident_id": "926b3fbc-1ef8-4fc5-a5b8-97de9e242e34",
+    "incident_id": "f0dac206-9684-4ce3-b5ec-cd9facb61ab3",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "DatabaseConnectionPoolExhausted",
     "service": "api-gateway",
     "namespace": "rivulet",
     "severity": "sev1",
-    "started_at": "2026-10-19T14:33:48Z",
+    "started_at": "2026-10-19T23:44:20Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "Database connection pool exhaustion caused by queries stuck in 'idle in transaction' state, consuming 5 out of the 20 maximum available connections.",
-        "confidence": 0.1,
-        "status": "refuted"
+        "description": "Database connection pool exhaustion caused by queries stuck in 'idle in transaction' state holding active connections.",
+        "confidence": 0.2,
+        "evidence": [
+          "active_connections: 18",
+          "idle_in_transaction: 5",
+          "max_connections: 20",
+          "pool_utilization_pct: 90",
+          "Tool get_connection_stats({}) status=succeeded output={\"stats\": {\"active\": 1, \"idle\": 11, \"idle_in_transaction\": 10, \"max_connections\": 100, \"total_connections\": 22, \"utilisation_pct\": 22.0}}",
+          "Tool get_active_queries({\"min_duration_seconds\": 1, \"exclude_idle\": false}) status=succeeded output={\"queries\": [], \"total_running\": 0}"
+        ],
+        "status": "proposed"
       },
       {
         "id": "H2",
-        "description": "Sudden traffic spike or unoptimized client queries in the api-gateway service leading to high connection usage, nearing the maximum threshold of 20 connections.",
-        "confidence": 0.1,
-        "status": "refuted"
+        "description": "Sudden traffic spike or increased concurrency leading to rapid consumption of available database connections up to the maximum limit.",
+        "confidence": 0.2,
+        "evidence": [
+          "active_connections: 18",
+          "max_connections: 20",
+          "pool_utilization_pct: 90",
+          "Tool get_connection_stats({}) status=succeeded output={\"stats\": {\"active\": 1, \"idle\": 11, \"idle_in_transaction\": 10, \"max_connections\": 100, \"total_connections\": 22, \"utilisation_pct\": 22.0}}",
+          "Tool get_active_queries({\"min_duration_seconds\": 1, \"exclude_idle\": false}) status=succeeded output={\"queries\": [], \"total_running\": 0}"
+        ],
+        "status": "proposed"
+      },
+      {
+        "id": "H3",
+        "description": "Slow database queries preventing connection release and returning to the pool in a timely manner, resulting in high utilization.",
+        "confidence": 0.2,
+        "evidence": [
+          "pool_utilization_pct: 90",
+          "active_connections: 18",
+          "max_connections: 20",
+          "Tool get_connection_stats({}) status=succeeded output={\"stats\": {\"active\": 1, \"idle\": 11, \"idle_in_transaction\": 10, \"max_connections\": 100, \"total_connections\": 22, \"utilisation_pct\": 22.0}}",
+          "Tool get_active_queries({\"min_duration_seconds\": 1, \"exclude_idle\": false}) status=succeeded output={\"queries\": [], \"total_running\": 0}"
+        ],
+        "status": "proposed"
       }
     ],
     "proposed_actions": [
@@ -33,7 +61,7 @@
           "namespace": "rivulet"
         },
         "risk_tier": 1,
-        "rationale": "Fallback action for category 'db_connection_exhaustion' (LLM unavailable or low confidence). Top hypothesis: Database connection pool exhaustion caused by queries stuck in 'idle in transaction' state, consumin",
+        "rationale": "Fallback action for category 'db_connection_exhaustion' (LLM unavailable or low confidence). Top hypothesis: Database connection pool exhaustion caused by queries stuck in 'idle in transaction' state holding a",
         "requires_approval": false
       }
     ],
@@ -45,7 +73,7 @@
           "name": "api-gateway",
           "namespace": "rivulet"
         },
-        "tool_call_id": "call_1792420453578",
+        "tool_call_id": "call_1792453478450",
         "result": {
           "name": "api-gateway",
           "namespace": "rivulet",
@@ -55,23 +83,23 @@
           "verification_passed": null
         },
         "success": true,
-        "executed_at": "2026-10-19T14:34:13Z",
+        "executed_at": "2026-10-19T23:44:38Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 11679,
-    "prompt_tokens": 10474,
-    "completion_tokens": 1205,
-    "cost_usd": 0.0052472000000000005,
-    "estimated_paid_cost_usd": 0.0071032000000000005,
+    "tokens_used": 11704,
+    "prompt_tokens": 9737,
+    "completion_tokens": 1967,
+    "cost_usd": 0.0068679,
+    "estimated_paid_cost_usd": 0.008854899999999999,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
         "calls": 6,
-        "tokens": 11795
+        "tokens": 11919
       }
     },
-    "wall_clock_seconds": 25.055,
-    "active_seconds": 25.055,
+    "wall_clock_seconds": 18.3,
+    "active_seconds": 18.3,
     "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
     "iterations": 2,
