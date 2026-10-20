@@ -51,17 +51,18 @@ async function navigateTo(page: Page, path: string): Promise<void> {
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
   await waitForAppReady(page);
 }
-
 /**
  * Wait for the incidents API query to complete (success or error).
  * Prevents race conditions where the test checks DOM before data loads.
  */
 async function waitForIncidentsQuery(page: Page): Promise<void> {
-  // Wait for either incident cards or the empty state / error message
+  // Wait for either incident cards, empty state messages, or error messages.
+  // The Approvals page shows "no pending approvals" which is different from
+  // the Dashboard's "no incidents" message.
   try {
     await page
       .locator(
-        '[data-testid="incident-card"], text=/no incidents|no .* incidents|failed to load/i',
+        '[data-testid="incident-card"], text=/no incidents|no pending approvals|no .* incidents|failed to load/i',
       )
       .first()
       .waitFor({ state: "visible", timeout: 15_000 });
@@ -333,10 +334,15 @@ test.describe("Approvals Page", () => {
   test("shows empty state or approval list", async ({ page }) => {
     await navigateTo(page, "/approvals");
 
-    // Wait for the incidents query to complete before checking DOM.
-    // Without this, the test may see the loading/error state instead of
-    // the final rendered content.
-    await waitForIncidentsQuery(page);
+    // Wait for the Approvals heading to confirm the page loaded
+    await expect(
+      page.getByRole("heading", { name: "Approvals", exact: true }),
+    ).toBeVisible({ timeout: 15_000 });
+
+    // Wait for the incidents query to settle before reading DOM text.
+    // The ApprovalsPage fetches /incidents and filters client-side, so
+    // we need a brief pause for React Query to resolve.
+    await page.waitForTimeout(1000);
 
     const bodyText = await page.locator("body").innerText();
     const hasEmptyState = /no pending approvals/i.test(bodyText);
@@ -345,6 +351,7 @@ test.describe("Approvals Page", () => {
 
     expect(hasEmptyState || hasApprovals).toBe(true);
   });
+
 });
 
 // ---------------------------------------------------------------------------

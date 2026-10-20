@@ -42,7 +42,7 @@ umask 0077
 NAMESPACE="${NAMESPACE:-sre}"
 APP_NAME="${APP_NAME:-autosre-agent}"
 IMAGE_REPO="${IMAGE_REPO:-ghcr.io/athithya-sakthivel/autosre-agent}"
-IMAGE_TAG="${IMAGE_TAG:-latest}"
+IMAGE_TAG="${IMAGE_TAG:-2026-10-20-19-16-09--43c607b}"
 
 DEPLOYMENT_ENVIRONMENT="${DEPLOYMENT_ENVIRONMENT:-staging}"
 OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-autosre-agent}"
@@ -495,7 +495,7 @@ spec:
               valueFrom: { secretKeyRef: { name: ${PG_SECRET}, key: POSTGRES_PASSWORD } }
 
             # ================================================================
-            # LLM (10 keys)
+            # LLM (11 keys)
             # ================================================================
 
             - name: AUTOSRE_API_KEY

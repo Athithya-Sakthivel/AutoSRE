@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_e2e.sh — End-to-end validation for AutoSRE.
+# test_e2e.sh — End-to-end validation for AutoSRE UI.
 #
 # Three modes:
 #   cd /workspace/agents/ui
@@ -11,12 +11,12 @@
 # DOM content, and Vite proxy verification automatically.
 #
 # Environment:
-#   AUTOSRE_API_KEY     Optional API key for authenticated testing.
-#                       When set, the backend requires X-API-Key header.
-#                       When unset, auth is disabled (local dev mode).
+#   AUTOSRE_API_KEY     API key for authenticated testing.
+#                       Defaults to Temp-password234 (matches parent harness).
+#                       Set to empty string to disable auth.
 #
 # Prerequisites:
-#   cd /workspace/agents && bash test_e2e.sh --run
+#   cd /workspace/agents && bash test_e2e.sh --run &
 
 set -Eeuo pipefail
 
@@ -41,7 +41,8 @@ Modes:
   --diagnose     API + Playwright DOM diagnostic dump (~40s)
 
 Environment:
-  AUTOSRE_API_KEY  Optional API key for authenticated testing.
+  AUTOSRE_API_KEY  API key for authenticated testing.
+                   Defaults to Temp-password234 (matches parent harness).
 
 Failure output is always verbose — failed checks print response bodies,
 DOM content, and Vite proxy verification automatically.
@@ -50,12 +51,12 @@ Prerequisites:
   cd /workspace/agents && bash test_e2e.sh --run &
 
 Examples:
-  bash agents/ui/test_e2e.sh                  # API only
-  bash agents/ui/test_e2e.sh --playwright     # API + E2E tests
-  bash agents/ui/test_e2e.sh --diagnose       # API + DOM inspection
+  bash test_e2e.sh                  # API only
+  bash test_e2e.sh --playwright     # API + E2E tests
+  bash test_e2e.sh --diagnose       # API + DOM inspection
 
-  # With auth enabled:
-  AUTOSRE_API_KEY=test-secret bash agents/ui/test_e2e.sh --playwright
+  # With custom auth key:
+  AUTOSRE_API_KEY=my-secret bash test_e2e.sh --playwright
 HELPTEXT
       exit 0
       ;;
@@ -76,8 +77,10 @@ UI_URL="http://127.0.0.1:5173"
 WAIT_TIMEOUT=60
 UI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Auth: export for Playwright tests to read via process.env
-export AUTOSRE_API_KEY="${AUTOSRE_API_KEY:-}"
+# Auth: default matches the parent harness (agents/test_e2e.sh).
+# When run standalone from ui/, this ensures auth is always enabled.
+# Override with: AUTOSRE_API_KEY="" bash test_e2e.sh to disable.
+export AUTOSRE_API_KEY="${AUTOSRE_API_KEY:-Temp-password234}"
 
 # ---------------------------------------------------------------------------
 # Counters

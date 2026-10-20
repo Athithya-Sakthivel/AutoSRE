@@ -147,6 +147,8 @@ jobs:
       # =================================================================
       - name: Run Playwright E2E
         working-directory: agents/ui
+        env:
+          AUTOSRE_API_KEY: ${{ secrets.AUTOSRE_API_KEY }}
         run: bash test_e2e.sh --playwright
       # =================================================================
       # Stop agent + UI (cleanup before eval)
