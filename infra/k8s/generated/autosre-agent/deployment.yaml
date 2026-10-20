@@ -55,8 +55,8 @@ spec:
             limits:   { cpu: 100m, memory: 32Mi }
       containers:
         - name: autosre-agent
-          image: ghcr.io/athithya-sakthivel/autosre-agent:latest
-          imagePullPolicy: Always
+          image: ghcr.io/athithya-sakthivel/autosre-agent:2026-10-20-19-16-09--43c607b
+          imagePullPolicy: IfNotPresent
           env:
             # ================================================================
             # Service identity
@@ -83,8 +83,11 @@ spec:
               valueFrom: { secretKeyRef: { name: postgres-agent, key: POSTGRES_PASSWORD } }
 
             # ================================================================
-            # LLM (10 keys)
+            # LLM (11 keys)
             # ================================================================
+
+            - name: AUTOSRE_API_KEY
+              valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_API_KEY } }
             - name: AUTOSRE_LLM__API_KEY
               valueFrom: { secretKeyRef: { name: autosre-agent-secrets, key: AUTOSRE_LLM__API_KEY } }
             - name: AUTOSRE_LLM__MODEL_COORDINATOR

@@ -294,7 +294,7 @@ ensure_source_secret() {
     _put SreAgentApiUrl                  "$SRE_AGENT_URL"
     _put AlertWebhookSecret              "$ALERT_WEBHOOK_SECRET"
 
-    # AutoSRE LLM (10 keys; exactly the agent's exported LLM settings)
+    # AutoSRE LLM (11 keys; exactly the agent's exported LLM settings)
     _put AutosreLlmModelCoordinator           "$AUTOSRE_LLM__MODEL_COORDINATOR"
     _put AutosreLlmModelWorker                "$AUTOSRE_LLM__MODEL_WORKER"
     _put AutosreApiKey                        "$AUTOSRE_API_KEY"
@@ -610,6 +610,7 @@ spec:
   target: { name: autosre-agent-secrets }
   data:
     - { secretKey: AUTOSRE_LLM__API_KEY,                          remoteRef: { key: ${K}, property: AutosreLlmApiKey } }
+    - { secretKey: AUTOSRE_API_KEY,                               remoteRef: { key: ${K}, property: AutosreApiKey } }
     - { secretKey: AUTOSRE_LLM__MODEL_COORDINATOR,                remoteRef: { key: ${K}, property: AutosreLlmModelCoordinator } }
     - { secretKey: AUTOSRE_LLM__MODEL_WORKER,                     remoteRef: { key: ${K}, property: AutosreLlmModelWorker } }
     - { secretKey: AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR,    remoteRef: { key: ${K}, property: AutosreLlmInputCostPer1kCoordinator } }

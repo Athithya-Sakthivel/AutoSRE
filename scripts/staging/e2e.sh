@@ -7,7 +7,6 @@ export AUTOSRE_API_KEY="${AUTOSRE_API_KEY:-Temp-password234}"
 export AUTOSRE_LLM__MODEL_COORDINATOR="${AUTOSRE_LLM__MODEL_COORDINATOR:-gemini/gemini-3.5-flash-lite}"
 export AUTOSRE_LLM__MODEL_WORKER="${AUTOSRE_LLM__MODEL_WORKER:-gemini/gemini-3.5-flash-lite}"
 
-
 # --- Cluster primitives ----------------------------------------------------
 bash scripts/staging/kind_cluster.sh       # Bootstrap Kind + Cilium (kube-proxy replacement)
 bash scripts/staging/eso_setup.sh          # Install ESO + in-cluster secret store
