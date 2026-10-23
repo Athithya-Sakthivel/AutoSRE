@@ -825,7 +825,7 @@ def _load_dataset_index() -> dict[str, dict[str, Any]]:
 
     _dataset_cache = {}
 
-    for version in "v4":
+    for version in ("v4",):
         dataset_path = (
             Path(__file__).parent.parent.parent
             / "eval"
