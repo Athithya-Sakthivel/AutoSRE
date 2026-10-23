@@ -339,28 +339,32 @@ if [[ "$MODE" != "ci" ]]; then
     kubectl cluster-info >/dev/null 2>&1 || fail "Kind cluster not reachable" 2
     pass "Kind cluster reachable"
 
-    log "Verifying workloads…"
-    for app in api-gateway postgres ingestion-worker; do
-        kubectl get pods -n rivulet -l "app.kubernetes.io/name=$app" --no-headers 2>/dev/null \
-            | grep -q Running || fail "Rivulet workload not running: $app" 2
-    done
-    kubectl get pods -n rivulet -l app=valkey --no-headers 2>/dev/null \
-        | grep -q Running || fail "Rivulet workload not running: valkey" 2
-    kubectl get pods -n openobserve --no-headers 2>/dev/null \
-        | grep -q Running || fail "OpenObserve not running" 2
-    pass "Rivulet + OpenObserve workloads running"
+    log "Verifying workloads (waiting up to 180s per component)…"
 
-    log "Waiting for ready pods…"
+    # Namespace must exist before we can wait on its pods.
+    kubectl get namespace openobserve >/dev/null 2>&1 \
+        || fail "Namespace 'openobserve' missing — deploy OpenObserve before the harness" 2
+
+    # Single tolerant loop replaces the instantaneous grep gate AND the old
+    # wait loop. kubectl wait polls until pods exist and are Ready, so it
+    # absorbs helm-install and image-pull races on cold CI runners.
     while IFS=':' read -r ns _ selector; do
-        kubectl wait --for=condition=ready pod \
-            -n "$ns" -l "$selector" --timeout=60s >/dev/null 2>&1 \
-            || fail "Pod not ready: $ns ($selector)" 2
+        if ! kubectl wait --for=condition=Ready pod \
+                -n "$ns" -l "$selector" --timeout=180s >/dev/null 2>&1; then
+            error "Workload not ready: $ns ($selector). Current state:"
+            kubectl get pods -n "$ns" -o wide --no-headers >&2 || true
+            kubectl get events -n "$ns" --sort-by=.lastTimestamp 2>/dev/null \
+                | tail -15 >&2 || true
+            fail "Workload not ready: $ns ($selector)" 2
+        fi
     done <<'PODS'
 rivulet:postgres:app.kubernetes.io/name=postgres
 rivulet:valkey:app=valkey
+rivulet:api-gateway:app.kubernetes.io/name=api-gateway
+rivulet:ingestion-worker:app.kubernetes.io/name=ingestion-worker
 openobserve:openobserve:app.kubernetes.io/name=open-observe-minimal
 PODS
-    pass "All pods ready"
+    pass "Rivulet + OpenObserve workloads ready"
 
     log "Recycling stale port-forwards…"
     pkill -f "kubectl port-forward.*:15432" 2>/dev/null || true
@@ -430,8 +434,6 @@ from pathlib import Path
 
 # Try v4 first, fall back to v3
 p = Path("eval/dataset/AutoSRE-Dataset-v4.json")
-if not p.is_file():
-    p = Path("eval/dataset/AutoSRE-Dataset-v3.json")
 if not p.is_file():
     print("FATAL: No dataset file found", file=sys.stderr)
     sys.exit(1)
