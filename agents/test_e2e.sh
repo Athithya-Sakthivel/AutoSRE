@@ -331,7 +331,6 @@ fi
 # =============================================================================
 # PHASE 2 -- Infrastructure + port-forwards (NOT in --ci)
 # =============================================================================
-
 if [[ "$MODE" != "ci" ]]; then
     header "PHASE 2: Infrastructure"
 
@@ -343,7 +342,7 @@ if [[ "$MODE" != "ci" ]]; then
 
     # Namespace must exist before we can wait on its pods.
     kubectl get namespace openobserve >/dev/null 2>&1 \
-        || fail "Namespace 'openobserve' missing — deploy OpenObserve before the harness" 2
+        || fail "Namespace 'openobserve' missing — deploy OpenObserve before the\nharness" 2
 
     # Single tolerant loop with extended timeout for slow CI runners.
     # Diagnostics go to stdout so they're captured in CI logs.
@@ -367,7 +366,7 @@ if [[ "$MODE" != "ci" ]]; then
                     kubectl describe pod "$pod" -n "$ns" | grep -A 20 "Conditions:" || true
                     echo ""
                     echo "Container statuses:"
-                    kubectl get pod "$pod" -n "$ns" -o jsonpath='{range .status.containerStatuses[*]}{.name}: {.ready} ({.state}){"\n"}{end}' || true
+                    kubectl get pod "$pod" -n "$ns" -o jsonpath='{range .status.containerStatuses[*]}{.name}: ready={.ready} state={.state}{"\n"}{end}' || true
                     echo ""
                     echo "Last 30 lines of logs:"
                     kubectl logs "$pod" -n "$ns" --tail=30 || true
@@ -418,7 +417,6 @@ PODS
 else
     header "PHASE 2: Infrastructure (skipped -- ci mode)"
 fi
-
 # =============================================================================
 # PHASE 3 -- Static checks (all modes except --run)
 # =============================================================================
