@@ -339,26 +339,49 @@ if [[ "$MODE" != "ci" ]]; then
     kubectl cluster-info >/dev/null 2>&1 || fail "Kind cluster not reachable" 2
     pass "Kind cluster reachable"
 
-    log "Verifying workloads (waiting up to 180s per component)…"
+    log "Verifying workloads (waiting up to 300s per component)…"
 
     # Namespace must exist before we can wait on its pods.
     kubectl get namespace openobserve >/dev/null 2>&1 \
         || fail "Namespace 'openobserve' missing — deploy OpenObserve before the harness" 2
 
-    # Single tolerant loop replaces the instantaneous grep gate AND the old
-    # wait loop. kubectl wait polls until pods exist and are Ready, so it
-    # absorbs helm-install, image-pull, and transient-restart races on CI.
+    # Single tolerant loop with extended timeout for slow CI runners.
+    # Diagnostics go to stdout so they're captured in CI logs.
     while IFS=':' read -r ns _ selector; do
-        log "Waiting for ${ns}/${selector} to be Ready…"
+        log "Waiting for ${ns}/${selector} to be Ready (300s timeout)…"
+
         if ! kubectl wait --for=condition=Ready pod \
-                -n "$ns" -l "$selector" --timeout=180s >/dev/null 2>&1; then
-            error "Workload not ready: $ns ($selector). Current state:"
-            kubectl get pods -n "$ns" -o wide --no-headers >&2 || true
-            echo "" >&2
-            kubectl get events -n "$ns" --sort-by='.lastTimestamp' 2>/dev/null \
-                | tail -15 >&2 || true
+                -n "$ns" -l "$selector" --timeout=300s >/dev/null 2>&1; then
+
+            echo ""
+            error "Workload not ready: $ns ($selector)"
+            echo ""
+            echo "=== Pod states in namespace ${ns} ==="
+            kubectl get pods -n "$ns" -o wide --no-headers || true
+            echo ""
+
+            echo "=== Pod descriptions (matching ${selector}) ==="
+            kubectl get pods -n "$ns" -l "$selector" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | while read -r pod; do
+                if [[ -n "$pod" ]]; then
+                    echo "--- $pod ---"
+                    kubectl describe pod "$pod" -n "$ns" | grep -A 20 "Conditions:" || true
+                    echo ""
+                    echo "Container statuses:"
+                    kubectl get pod "$pod" -n "$ns" -o jsonpath='{range .status.containerStatuses[*]}{.name}: {.ready} ({.state}){"\n"}{end}' || true
+                    echo ""
+                    echo "Last 30 lines of logs:"
+                    kubectl logs "$pod" -n "$ns" --tail=30 || true
+                    echo ""
+                fi
+            done
+
+            echo "=== Recent events in namespace ${ns} ==="
+            kubectl get events -n "$ns" --sort-by='.lastTimestamp' | tail -20 || true
+            echo ""
+
             fail "Workload not ready: $ns ($selector)" 2
         fi
+
         pass "✓ ${ns}/${selector} ready"
     done <<'PODS'
 rivulet:postgres:app.kubernetes.io/name=postgres
