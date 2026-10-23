@@ -1,16 +1,7 @@
 #!/usr/bin/env bash
-# chaos/lib.sh — Shared chaos helpers for AutoSRE Dataset v4 (14 incidents)
-#
-# This file is sourced by incidents.sh, reset.sh, and trigger.sh.
-# It provides port-forward management, chaos HTTP helpers, credential
-# retrieval, OpenObserve log injection, and deployment state management.
-#
-# Invariants:
-#   - All functions are safe to call multiple times (idempotent)
-#   - All functions fail gracefully (never exit the calling script)
-#   - State files are stored in $STATE_DIR with "chaos-" prefix
-#   - No function modifies application data (PostgreSQL rows, Valkey keys)
-#     except through chaos endpoints or explicit Valkey operations
+# =============================================================================
+# chaos/lib.sh — Shared chaos helpers for AutoSRE Dataset v4
+# =============================================================================
 
 set -Eeuo pipefail
 
@@ -33,26 +24,25 @@ API_GATEWAY_REPLICAS="${API_GATEWAY_REPLICAS:-2}"
 INGESTION_WORKER_REPLICAS="${INGESTION_WORKER_REPLICAS:-2}"
 
 # O2 Config
-O2_URL="${O2_URL:-http://127.0.0.1:15080/api/default/app_logs/_json}"
 O2_AUTH="${O2_AUTH:-admin@autosre.local:StagingO2RootPass123!}"
 
 log()  { printf '[chaos] %s\n' "$*" >&2; }
 fail() { printf '[chaos] ERROR: %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# Port-forward management (Aggressive & Verified)
+# Port-forward management
 # ---------------------------------------------------------------------------
+
 _kill_pf() {
     local local_port=$1
     pkill -f "kubectl port-forward.*:${local_port}" 2>/dev/null || true
     rm -f "${STATE_DIR}/chaos-pf-${local_port}.pid" "${STATE_DIR}/chaos-pf-${local_port}.log"
-    sleep 1 # Let the kernel release the port
+    sleep 1
 }
 
 ensure_forward_pod() {
     local local_port=$1 remote_port=$2 label_selector=$3
 
-    # Always kill stale forwards first to prevent pointing to dead pods
     _kill_pf "$local_port"
 
     local pod
@@ -66,7 +56,6 @@ ensure_forward_pod() {
         < /dev/null >"${STATE_DIR}/chaos-pf-${local_port}.log" 2>&1 &
     echo $! > "${STATE_DIR}/chaos-pf-${local_port}.pid"
 
-    # Wait for /healthz to respond (proves the pod is actually alive)
     local attempt
     for attempt in $(seq 1 15); do
         if curl -sf --max-time 2 "http://127.0.0.1:${local_port}/healthz" >/dev/null 2>&1; then
@@ -102,6 +91,7 @@ ensure_forward_svc() {
 # ---------------------------------------------------------------------------
 # Chaos HTTP Helpers
 # ---------------------------------------------------------------------------
+
 chaos_post() {
     local url=$1 body=${2:-}
     local args=(-sS -X POST -o "${STATE_DIR}/chaos-resp.txt" -w '%{http_code}' --max-time 15)
@@ -119,6 +109,7 @@ chaos_post() {
 # ---------------------------------------------------------------------------
 # Credential Helpers
 # ---------------------------------------------------------------------------
+
 pg_env() {
     kubectl get secret postgres-rivulet-env -n "$NAMESPACE" \
         -o jsonpath="{.data.$1}" 2>/dev/null | base64 -d || true
@@ -130,13 +121,21 @@ valkey_password() {
 }
 
 # ---------------------------------------------------------------------------
-# OpenObserve Log Injection (Bulletproof)
+# OpenObserve Log Injection
 # ---------------------------------------------------------------------------
-# Usage: push_o2_logs <count> '<json_template_with___TIMESTAMP__>'
+# Usage: push_o2_logs <count> '<json_template>' [stream]
+#   stream defaults to "app_logs" if not specified
+#   Template supports __TIMESTAMP__ placeholder (replaced with ISO8601)
+#
+# Each template MUST include a "body" field containing the text the O2
+# alert condition matches on. K8s label fields (k8s_namespace_name,
+# k8s_pod_name) must also be present for multi-alert group_by.
 push_o2_logs() {
     local count="$1"
     local template="$2"
+    local stream="${3:-app_logs}"
     local ts i entry batch_file
+    local stream_url="http://127.0.0.1:15080/api/default/${stream}/_json"
 
     batch_file=$(mktemp) || return 0
     printf '[' > "$batch_file"
@@ -149,17 +148,18 @@ push_o2_logs() {
     done
     printf ']' >> "$batch_file"
 
-    curl -sf -u "$O2_AUTH" -X POST "$O2_URL" \
+    curl -sf -u "$O2_AUTH" -X POST "$stream_url" \
         -H "Content-Type: application/json" \
         --data-binary "@$batch_file" >/dev/null 2>&1 || true
 
     rm -f "$batch_file"
-    return 0 # Explicit return prevents set -e traps
+    return 0
 }
 
 # ---------------------------------------------------------------------------
 # Deployment State Management
 # ---------------------------------------------------------------------------
+
 save_deployment_image() {
     local deploy="$1"
     local img_file="${STATE_DIR}/chaos-${deploy}-image.txt"

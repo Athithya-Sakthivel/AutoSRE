@@ -85,3 +85,4 @@ __pycache__
 outputs.txt
 *.duckdb
 .coverage
+*.png

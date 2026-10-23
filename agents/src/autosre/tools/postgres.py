@@ -142,11 +142,20 @@ class GetConnectionStatsOutput(BaseModel):
 
 
 class TerminateBackendInput(ToolInputModel):
-    """Input for terminating a PostgreSQL backend."""
+    """Input for terminating PostgreSQL backend(s).
 
-    pid: int = Field(
+    When ``pid`` is omitted the tool self-discovers every idle-in-transaction
+    backend and terminates all of them. This makes the tool usable from
+    deterministic fallback paths that cannot know a PID in advance.
+    """
+
+    pid: int | None = Field(
+        default=None,
         gt=0,
-        description="PostgreSQL backend PID to terminate",
+        description=(
+            "PostgreSQL backend PID to terminate. Omit to terminate ALL "
+            "idle-in-transaction backends automatically."
+        ),
     )
     reason: str = Field(min_length=1, max_length=500)
 
@@ -163,9 +172,11 @@ class TerminateBackendInput(ToolInputModel):
 class TerminateBackendOutput(BaseModel):
     """Output for terminate_backend tool."""
 
-    pid: int
+    pid: int | None = None
     terminated: bool
     reason: str
+    terminated_pids: list[int] = Field(default_factory=list)
+    terminated_count: int = 0
     success: bool = True
     verification_passed: bool | None = None
 
@@ -403,23 +414,126 @@ async def _get_connection_stats(
 # ---------------------------------------------------------------------------
 # Tier 1: Reversible remediation
 # ---------------------------------------------------------------------------
+# Maximum backends terminated in one auto-discovery call. Bounds blast radius.
+_MAX_AUTO_TERMINATE = 50
+
+
+async def _terminate_idle_in_transaction(
+    reason: str,
+    context: SREContext,
+) -> TerminateBackendOutput:
+    """Discover and terminate all idle-in-transaction backends.
+
+    Safety filters (identical to the single-PID path):
+    - excludes the agent's own connection
+    - excludes superuser sessions
+    - excludes sessions without a login role
+    - capped at _MAX_AUTO_TERMINATE backends
+    """
+    candidates: list[tuple[int, Any]] = []
+
+    async with _connection(context) as conn, conn.cursor() as cur:
+        try:
+            await cur.execute(
+                """
+                SELECT
+                    activity.pid,
+                    activity.backend_start
+                FROM pg_stat_activity AS activity
+                LEFT JOIN pg_roles AS roles
+                  ON roles.rolname = activity.usename
+                WHERE activity.state IN (
+                          'idle in transaction',
+                          'idle in transaction (aborted)'
+                      )
+                  AND activity.pid <> pg_backend_pid()
+                  AND activity.usename IS NOT NULL
+                  AND COALESCE(roles.rolsuper, TRUE) = FALSE
+                ORDER BY activity.query_start ASC NULLS LAST, activity.pid
+                LIMIT %s
+                """,
+                (_MAX_AUTO_TERMINATE,),
+            )
+            rows = await cur.fetchall()
+        except Exception as exc:
+            raise ToolExecutionError("terminate_backend", exc) from exc
+
+        candidates = [(int(row[0]), row[1]) for row in rows]
+
+        if not candidates:
+            logger.info("No idle-in-transaction backends found; nothing to terminate")
+            return TerminateBackendOutput(
+                pid=None,
+                terminated=False,
+                reason=reason,
+                terminated_pids=[],
+                terminated_count=0,
+                success=True,
+                verification_passed=True,
+            )
+
+        terminated_pids: list[int] = []
+
+        for pid, _backend_start in candidates:
+            try:
+                await cur.execute("SELECT pg_terminate_backend(%s, %s)", (pid, 1000))
+                result_row = await cur.fetchone()
+                if result_row and bool(result_row[0]):
+                    terminated_pids.append(pid)
+            except Exception as exc:
+                logger.warning("Failed to terminate backend %d: %s", pid, exc)
+
+        # pg_terminate_backend reports intent, not completion.
+        await asyncio.sleep(0.5)
+
+        pids = [pid for pid, _ in candidates]
+        await cur.execute(
+            """
+            SELECT pid
+            FROM pg_stat_activity
+            WHERE pid = ANY(%s)
+              AND state IN (
+                  'idle in transaction',
+                  'idle in transaction (aborted)'
+              )
+            """,
+            (pids,),
+        )
+        still_present_rows = await cur.fetchall()
+
+    still_present = {int(row[0]) for row in still_present_rows}
+    verified = len(still_present) == 0
+
+    logger.info(
+        "Auto-terminate idle-in-tx: candidates=%d terminated=%d verified=%s",
+        len(candidates),
+        len(terminated_pids),
+        verified,
+    )
+
+    return TerminateBackendOutput(
+        pid=None,
+        terminated=len(terminated_pids) > 0,
+        reason=reason,
+        terminated_pids=terminated_pids,
+        terminated_count=len(terminated_pids),
+        success=True,
+        verification_passed=verified,
+    )
 
 
 async def _terminate_backend(
     args: TerminateBackendInput,
     context: SREContext,
 ) -> TerminateBackendOutput:
-    """Terminate one PostgreSQL backend and verify its disappearance.
+    """Terminate PostgreSQL backend(s) and verify disappearance.
 
-    Safety checks:
-    - Refuses to terminate the agent's own connection
-    - Refuses to terminate superuser sessions
-    - Refuses to terminate sessions without a login role
-
-    A PID that is already absent is treated as an already-satisfied desired
-    state. Verification compares `backend_start` as well as PID to avoid
-    treating a reused PostgreSQL PID as the original backend.
+    When ``args.pid`` is None, all idle-in-transaction backends are
+    auto-discovered and terminated (bounded, superuser-safe).
     """
+    if args.pid is None:
+        return await _terminate_idle_in_transaction(args.reason, context)
+
     async with _connection(context) as conn, conn.cursor() as cur:
         await cur.execute(
             """
@@ -443,6 +557,8 @@ async def _terminate_backend(
                 pid=args.pid,
                 terminated=False,
                 reason=args.reason,
+                terminated_pids=[],
+                terminated_count=0,
                 success=True,
                 verification_passed=True,
             )
@@ -484,8 +600,6 @@ async def _terminate_backend(
 
         termination_requested = bool(result_row[0]) if result_row else False
 
-        # pg_terminate_backend() reports whether termination was requested,
-        # not whether PostgreSQL has finished removing the backend.
         await asyncio.sleep(0.5)
 
         await cur.execute(
@@ -512,6 +626,8 @@ async def _terminate_backend(
         pid=args.pid,
         terminated=termination_requested and verified,
         reason=args.reason,
+        terminated_pids=[args.pid] if termination_requested and verified else [],
+        terminated_count=1 if termination_requested and verified else 0,
         success=True,
         verification_passed=verified,
     )

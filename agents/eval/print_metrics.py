@@ -26,8 +26,6 @@ def main() -> None:
     print(f"  Avg active MTTR:      {m['avg_mttr_seconds']}s")
     print(f"  Avg wall clock:       {m['avg_wall_clock_seconds']}s")
     print(f"  Avg backoff:          {m['avg_backoff_seconds']}s")
-    print(f"  Avg approval wait:    {m.get('avg_approval_wait_seconds', 0.0)}s")
-    print(f"  Avg LLM latency:      {m.get('avg_llm_latency_seconds', 0.0)}s")
     print(f"  Baseline MTTR:        {m['baseline_mttr_seconds']}s")
     print(f"  MTTR reduction:       {m['mttr_reduction_pct']}%")
     print()
@@ -40,12 +38,9 @@ def main() -> None:
 
     if m["per_incident"]:
         header = (
-            f"  {'ID':<10} {'Status':<12} {'Active':>8} {'Wall':>8} "
-            f"{'Backoff':>8} {'HITL':>7} {'LLM':>8} {'Cost':>10}"
+            f"  {'ID':<10} {'Status':<12} {'Active':>8} {'Wall':>8} {'Backoff':>8} {'Cost':>10}"
         )
-        rule = (
-            f"  {'-' * 10} {'-' * 12} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 7} {'-' * 8} {'-' * 10}"
-        )
+        rule = f"  {'-' * 10} {'-' * 12} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 7}"
         print(header)
         print(rule)
         for inc in m["per_incident"]:
@@ -63,8 +58,6 @@ def main() -> None:
                 f"{inc['mttr_seconds']:>7.1f}s "
                 f"{inc['wall_clock_seconds']:>7.1f}s "
                 f"{inc['backoff_seconds']:>7.1f}s "
-                f"{inc.get('approval_wait_seconds', 0.0):>6.1f}s "
-                f"{inc.get('llm_latency_seconds', 0.0):>7.1f}s "
                 f"${inc['cost_usd']:>9.4f}"
             )
         print()
