@@ -886,12 +886,6 @@ def _enrich_openobserve_alert(
         started_at=_as_str(raw_o2.get("started_at", "")),
         fingerprint=fingerprint,
         description=f"OpenObserve alert: {alert_name}",
-        labels={
-            "category": inc.get("category", "unknown"),
-            "eval_id": inc.get("id", ""),
-            "baseline_mttr_seconds": str(inc.get("baseline_mttr_seconds", 0)),
-            "triggered_by": "openobserve",
-        },
         annotations={
             "alert_count": _as_str(raw_o2.get("alert_count", "")),
             "alert_agg_value": _as_str(raw_o2.get("alert_agg_value", "")),

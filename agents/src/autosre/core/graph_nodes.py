@@ -128,10 +128,9 @@ FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
         "risk_tier": 1,
     },
     "stale_pod": {
-        "tool_name": "delete_pod",
+        "tool_name": "restart_deployment",
         "tool_args": {
-            "reason": "Pod stuck in Terminating; force delete to release resources",
-            "grace_period_seconds": 0,
+            "reason": "Pod stuck in Terminating; rolling restart replaces stuck pod",
         },
         "risk_tier": 1,
     },
@@ -191,6 +190,7 @@ FALLBACK_ACTIONS: dict[str, dict[str, Any]] = {
     "resource_quota": {
         "tool_name": "scale_deployment",
         "tool_args": {
+            "replicas": 2,
             "reason": "Resource quota exceeded; scale down to fit within quota limits",
         },
         "risk_tier": 2,
@@ -321,11 +321,52 @@ def _clamp_namespace(
     return {**tool_args, "namespace": incident_ns}
 
 
+async def _args_satisfy_schema(
+    registry: Any,
+    tool_name: str,
+    tool_args: dict[str, Any],
+) -> tuple[bool, str]:
+    """Validate proposed args against the tool's Pydantic input model.
+
+    Returns (is_valid, error_message). Fail-open when the tool cannot be
+    introspected so this guard never blocks a legitimate action.
+    """
+    try:
+        tools = await maybe_await(registry.list_tools())
+    except Exception:
+        return True, ""
+
+    tool = next(
+        (t for t in (tools or []) if getattr(t, "name", "") == tool_name),
+        None,
+    )
+
+    if tool is None:
+        return False, f"tool '{tool_name}' is not registered"
+
+    input_model = getattr(tool, "input_model", None)
+    if input_model is None:
+        return True, ""
+
+    try:
+        input_model.model_validate(dict(tool_args))
+    except Exception as exc:
+        return False, str(exc)
+
+    return True, ""
+
+
 def _build_fallback_args(
     fallback: dict[str, Any],
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build fallback tool_args with dynamic service name and namespace."""
+    """Build fallback tool_args that satisfy the tool's input schema.
+
+    Tool input models use extra="forbid" and strict=True, so a missing
+    required field or an unexpected field is a hard validation failure.
+    This function guarantees every required field is populated from the
+    fallback template or from incident metadata.
+    """
     base_args = fallback.get("tool_args", {})
     if not isinstance(base_args, Mapping):
         return {}
@@ -335,11 +376,25 @@ def _build_fallback_args(
     namespace = str(metadata.get("namespace", "")).strip()
     tool_name = str(fallback.get("tool_name", ""))
 
-    # 1. K8s deployment tools need the "name" field
-    if tool_name in ("restart_deployment", "scale_deployment") and service:
+    annotations = metadata.get("annotations")
+    annotations = annotations if isinstance(annotations, Mapping) else {}
+
+    # 1. K8s deployment tools take the deployment name from the service.
+    if tool_name in ("restart_deployment", "scale_deployment") and service and "name" not in args:
         args["name"] = service
 
-    # 2. ALL K8s tools require the "namespace" field. This was the missing piece.
+    # 2. delete_pod needs a concrete POD name, not the service name. Take it
+    #    from alert annotations when available; otherwise leave unset so the
+    #    schema guard in propose_node rejects the action instead of
+    #    dispatching a doomed call.
+    if tool_name == "delete_pod" and "name" not in args:
+        for key in ("pod_name", "pod", "stuck_pod", "target_pod"):
+            value = annotations.get(key)
+            if isinstance(value, str) and value.strip():
+                args["name"] = value.strip()
+                break
+
+    # 3. Namespace for every K8s tool that accepts it.
     if (
         tool_name
         in (
@@ -356,7 +411,11 @@ def _build_fallback_args(
     ):
         args["namespace"] = namespace
 
-    # 3. Ensure reason is always present (required by tool input models)
+    # 4. scale_deployment requires an explicit replica count.
+    if tool_name == "scale_deployment" and "replicas" not in args:
+        args["replicas"] = 2
+
+    # 5. Reason is required by every mutating tool input model.
     if "reason" not in args or not args["reason"]:
         args["reason"] = f"Auto-remediation for {tool_name}"
 
@@ -1512,6 +1571,28 @@ Executed actions (DO NOT REPEAT THESE):
     # Enforce namespace security boundary
     tool_args = _clamp_namespace(tool_args, incident_ns, tool_name=tool_name_str)
 
+    # SCHEMA GUARD: never dispatch an action whose args cannot validate.
+    # A doomed tool call produces status=failed and wastes an attempt; a
+    # clean no_action is honest and keeps the safety record accurate.
+    args_valid, validation_error = await _args_satisfy_schema(
+        registry,
+        tool_name_str,
+        tool_args,
+    )
+    if not args_valid:
+        logger.error(
+            "Proposed action '%s' for category '%s' has args that fail schema "
+            "validation; completing with no_action. Error: %s",
+            tool_name_str,
+            category,
+            validation_error,
+        )
+        return {
+            "current_phase": PHASE_COMPLETE,
+            "status": "no_action",
+            **usage_update,
+        }
+
     proposed = _build_proposed_action(
         tool_name=tool_name_str,
         tool_args=tool_args,
@@ -1589,10 +1670,12 @@ async def approve_node(
 
     proposed = proposed_actions[0]
 
+    metadata = _incident_metadata(state)
+
     interrupt_payload = {
         "question": "This action requires human approval before execution.",
-        "incident_id": state.get("incident_id", ""),
-        "alert_name": state.get("alert_name", ""),
+        "incident_id": metadata.get("incident_id", ""),
+        "alert_name": metadata.get("alert_name", ""),
         "proposed_action": {
             "tool_name": proposed.get("tool_name"),
             "tool_args": proposed.get("tool_args", {}),
@@ -1603,7 +1686,7 @@ async def approve_node(
 
     logger.info(
         "Pausing for HITL approval: incident=%s tool=%s tier=%d",
-        state.get("incident_id"),
+        metadata.get("incident_id"),
         proposed.get("tool_name"),
         proposed.get("risk_tier", 0),
     )

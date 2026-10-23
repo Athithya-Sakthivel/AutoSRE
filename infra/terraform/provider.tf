@@ -1,11 +1,6 @@
-# OpenObserve provider configuration.
-#
-# The endpoint is normally the localhost port-forward established by the
-# staging E2E script, for example:
-#   http://localhost:5080
-#
-# Stream lifecycle is intentionally NOT managed by this provider configuration.
-# Streams are created by scripts/staging/openobserve.sh before Terraform apply.
+# ==============================================================================
+# provider.tf — OpenObserve provider configuration
+# ==============================================================================
 
 provider "openobserve" {
   endpoint = var.o2_endpoint

@@ -64,6 +64,9 @@ O2_SERVICE_PORT="${O2_SERVICE_PORT:-5080}"
 # Temporary localhost port used only by this script for the stream API.
 O2_STREAM_API_LOCAL_PORT="${O2_STREAM_API_LOCAL_PORT:-15081}"
 
+# Cluster-internal DNS name used for alert URLs and internal API references.
+O2_WEB_URL="${O2_WEB_URL:-http://${O2_RELEASE}.${O2_NAMESPACE}.svc.cluster.local:${O2_SERVICE_PORT}}"
+
 # Local-disk storage configuration.
 O2_PVC_SIZE="${O2_PVC_SIZE:-20Gi}"
 O2_DATA_DIR="${O2_DATA_DIR:-/data/openobserve}"
@@ -417,7 +420,9 @@ networkPolicy:
   enabled: true
   additionalFrom: []
 
-extraEnv: []
+extraEnv:
+  - name: ZO_WEB_URL
+    value: "${O2_WEB_URL}"
 extraEnvFrom: []
 extraVolumes: []
 extraVolumeMounts: []

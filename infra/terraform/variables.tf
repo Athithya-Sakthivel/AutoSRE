@@ -1,6 +1,11 @@
+# ==============================================================================
+# variables.tf — Terraform variables
+# ==============================================================================
+
 variable "o2_endpoint" {
-  description = "OpenObserve HTTP(S) endpoint, for example http://localhost:5080"
+  description = "OpenObserve HTTP(S) endpoint"
   type        = string
+  default     = "http://localhost:5080"
 
   validation {
     condition     = can(regex("^https?://[^[:space:]]+$", var.o2_endpoint))
@@ -9,15 +14,17 @@ variable "o2_endpoint" {
 }
 
 variable "o2_email" {
-  description = "OpenObserve username/email used by the provider"
+  description = "OpenObserve username/email"
   type        = string
   sensitive   = true
+  default     = "admin@autosre.local"
 }
 
 variable "o2_password" {
-  description = "OpenObserve password used by the provider"
+  description = "OpenObserve password"
   type        = string
   sensitive   = true
+  default     = "StagingO2RootPass123!"
 }
 
 variable "o2_organization" {
@@ -32,7 +39,7 @@ variable "o2_organization" {
 }
 
 variable "agent_webhook_url" {
-  description = "URL that the OpenObserve alert destination POSTs alert notifications to."
+  description = "URL that OpenObserve POSTs alert notifications to (cluster DNS)"
   type        = string
   default     = "http://autosre-agent.sre.svc.cluster.local:8000/alerts"
 
