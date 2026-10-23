@@ -558,6 +558,15 @@ resource "openobserve_alert" "incidents" {
     fingerprint_fields  = each.value.fingerprint
   }
 
+  # WORKAROUND: The OpenObserve provider incorrectly reads back period/frequency
+  # as 5 instead of 1, causing a false "inconsistent result" error. Ignoring
+  # changes to this block prevents the provider from fighting the server state.
+  lifecycle {
+    ignore_changes = [
+      trigger_condition,
+    ]
+  }
+
   depends_on = [
     openobserve_alert_destination.autosre_webhook,
     openobserve_folder.reliability,
