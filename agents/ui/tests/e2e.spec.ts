@@ -51,6 +51,7 @@ async function navigateTo(page: Page, path: string): Promise<void> {
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
   await waitForAppReady(page);
 }
+
 /**
  * Wait for the incidents API query to complete (success or error).
  * Prevents race conditions where the test checks DOM before data loads.
@@ -354,9 +355,8 @@ test.describe("Approvals Page", () => {
     ).toBeVisible({ timeout: 15_000 });
 
     // Wait for the incidents query to settle before reading DOM text.
-    // The ApprovalsPage fetches /incidents and filters client-side, so
-    // we need a brief pause for React Query to resolve.
-    await page.waitForTimeout(1000);
+    // The ApprovalsPage fetches /incidents and filters client-side.
+    await waitForIncidentsQuery(page);
 
     const bodyText = await page.locator("body").innerText();
     const hasEmptyState = /no pending approvals/i.test(bodyText);
@@ -365,7 +365,6 @@ test.describe("Approvals Page", () => {
 
     expect(hasEmptyState || hasApprovals).toBe(true);
   });
-
 });
 
 // ---------------------------------------------------------------------------
