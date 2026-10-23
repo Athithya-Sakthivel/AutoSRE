@@ -186,37 +186,73 @@ jobs:
             infra/k8s/otel-daemonset,
             infra/k8s/otel-gateway
 
-      - name: Summarize Trivy report
+      - name: Print Trivy findings and diagnostics
         if: ${{ always() }}
         continue-on-error: true
         env:
           TRIVY_REPORT: ${{ runner.temp }}/trivy-results.json
+          TRIVY_OUTCOME: ${{ steps.trivy.outcome }}
         run: |
           set -euo pipefail
+
+          echo "============================================================"
+          echo " Trivy Report Diagnostics"
+          echo "============================================================"
+          echo "[INFO] Trivy step outcome: ${TRIVY_OUTCOME}"
+          echo "[INFO] Expected report: ${TRIVY_REPORT}"
+
           if [[ ! -s "$TRIVY_REPORT" ]]; then
-            echo "::warning::Trivy JSON report was not created. Inspect the Trivy step logs for a scanner or setup error."
+            echo "::error::Trivy did not create a non-empty JSON report. The cause is likely a scanner/setup error; open the preceding 'Run Trivy filesystem vulnerability and IaC scan' step for its stderr and diagnostic messages."
+            echo "[DIAGNOSTIC] No Trivy JSON report is available to print. Check the Trivy step above for database download, filesystem permission, parser, timeout, or scan errors."
             exit 0
           fi
 
-          critical_vulns="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$TRIVY_REPORT")"
-          critical_misconfigs="$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity == "CRITICAL")] | length' "$TRIVY_REPORT")"
+          if ! jq -e 'type == "object" and ((.Results == null) or (.Results | type == "array"))' "$TRIVY_REPORT" >/dev/null; then
+            echo "::error::Trivy report exists but is not valid JSON in the expected report format."
+            echo "[DIAGNOSTIC] First 80 lines of the report follow:"
+            sed -n '1,80p' "$TRIVY_REPORT"
+            exit 0
+          fi
+
+          critical_vulns="$(jq '[.Results[]? | (.Vulnerabilities // [])[]? | select(.Severity == "CRITICAL")] | length' "$TRIVY_REPORT")"
+          critical_misconfigs="$(jq '[.Results[]? | (.Misconfigurations // [])[]? | select(.Severity == "CRITICAL")] | length' "$TRIVY_REPORT")"
+          details_file="$RUNNER_TEMP/trivy-critical-findings.txt"
+
+          jq -r '
+            .Results[]? as $result
+            | (
+                (($result.Vulnerabilities // []) | map(. + {finding_kind: "vulnerability"}))
+                + (($result.Misconfigurations // []) | map(. + {finding_kind: "misconfiguration"}))
+              )[]?
+            | select(.Severity == "CRITICAL")
+            | "[CRITICAL] \(.finding_kind) | target=\($result.Target // "unknown target") | id=\(.VulnerabilityID // .ID // .Type // "unknown") | package=\(.PkgName // "-") | installed=\(.InstalledVersion // "-") | fixed=\(.FixedVersion // "-") | title=\(.Title // .Message // .Description // "No description" | gsub("[\r\n]+"; " "))"
+          ' "$TRIVY_REPORT" > "$details_file"
+
+          finding_count="$(wc -l < "$details_file" | tr -d '[:space:]')"
+          max_console_findings=200
 
           {
-            echo "### Trivy scan summary"
+            echo "### Trivy scan diagnostics"
+            echo "- Trivy step outcome: ${TRIVY_OUTCOME}"
             echo "- Critical vulnerabilities: ${critical_vulns}"
             echo "- Critical misconfigurations: ${critical_misconfigs}"
+            echo "- Critical findings listed below: ${finding_count}"
             echo ""
-            echo "Critical findings (up to 100):"
-            jq -r '
-              .Results[]? as $result
-              | (($result.Vulnerabilities // []) + ($result.Misconfigurations // []))[]
-              | select(.Severity == "CRITICAL")
-              | "- \(.Severity): \($result.Target // "unknown target") — \(.VulnerabilityID // .ID // .Type // "finding") — \(.Title // .Message // .Description // "No description")"
-            ' "$TRIVY_REPORT" | sed -n '1,100p'
-          } >> "$GITHUB_STEP_SUMMARY"
+            if [[ "$finding_count" -eq 0 ]]; then
+              echo "No CRITICAL findings were present in the JSON report. If the Trivy step still failed, inspect its logs for a scanner/runtime error."
+            else
+              echo "#### Critical findings (up to ${max_console_findings})"
+              sed -n "1,${max_console_findings}p" "$details_file"
+              if [[ "$finding_count" -gt "$max_console_findings" ]]; then
+                echo "[INFO] Console/summary output truncated to ${max_console_findings} of ${finding_count} findings. The full JSON report is uploaded as an artifact."
+              fi
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
-          echo "[INFO] Trivy critical vulnerabilities: ${critical_vulns}"
-          echo "[INFO] Trivy critical misconfigurations: ${critical_misconfigs}"
+          if [[ "$finding_count" -gt "$max_console_findings" ]]; then
+            echo "[INFO] Only the first ${max_console_findings} findings are printed to the console/step summary. See the uploaded trivy-security-report artifact for the complete JSON report."
+          fi
+          echo "============================================================"
 
       - name: Upload Trivy report
         if: ${{ always() }}
