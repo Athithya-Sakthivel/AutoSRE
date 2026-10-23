@@ -33,6 +33,7 @@ dependencies = [
     "openinference-instrumentation-litellm>=0.1.46",
     "openinference-instrumentation-langchain>=0.1.76",
     "openinference-semantic-conventions>=0.1.39",
+    "certifi>=2026.10.19",
 ]
 
 [project.optional-dependencies]
