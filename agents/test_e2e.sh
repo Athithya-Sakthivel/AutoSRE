@@ -347,16 +347,19 @@ if [[ "$MODE" != "ci" ]]; then
 
     # Single tolerant loop replaces the instantaneous grep gate AND the old
     # wait loop. kubectl wait polls until pods exist and are Ready, so it
-    # absorbs helm-install and image-pull races on cold CI runners.
+    # absorbs helm-install, image-pull, and transient-restart races on CI.
     while IFS=':' read -r ns _ selector; do
+        log "Waiting for ${ns}/${selector} to be Ready…"
         if ! kubectl wait --for=condition=Ready pod \
                 -n "$ns" -l "$selector" --timeout=180s >/dev/null 2>&1; then
             error "Workload not ready: $ns ($selector). Current state:"
             kubectl get pods -n "$ns" -o wide --no-headers >&2 || true
-            kubectl get events -n "$ns" --sort-by=.lastTimestamp 2>/dev/null \
+            echo "" >&2
+            kubectl get events -n "$ns" --sort-by='.lastTimestamp' 2>/dev/null \
                 | tail -15 >&2 || true
             fail "Workload not ready: $ns ($selector)" 2
         fi
+        pass "✓ ${ns}/${selector} ready"
     done <<'PODS'
 rivulet:postgres:app.kubernetes.io/name=postgres
 rivulet:valkey:app=valkey
@@ -364,7 +367,7 @@ rivulet:api-gateway:app.kubernetes.io/name=api-gateway
 rivulet:ingestion-worker:app.kubernetes.io/name=ingestion-worker
 openobserve:openobserve:app.kubernetes.io/name=open-observe-minimal
 PODS
-    pass "Rivulet + OpenObserve workloads ready"
+    pass "All workloads ready"
 
     log "Recycling stale port-forwards…"
     pkill -f "kubectl port-forward.*:15432" 2>/dev/null || true

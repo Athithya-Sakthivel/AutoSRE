@@ -825,8 +825,7 @@ def _load_dataset_index() -> dict[str, dict[str, Any]]:
 
     _dataset_cache = {}
 
-    # Try v4 first, then v3
-    for version in ("v4", "v3"):
+    for version in "v4":
         dataset_path = (
             Path(__file__).parent.parent.parent
             / "eval"
@@ -866,7 +865,8 @@ def _enrich_openobserve_alert(
          alert_threshold, alert_operator}
 
     We enrich it with service, namespace, severity, category, and fingerprint
-    from the dataset definition.
+    from the dataset definition. Labels are populated from the dataset, not
+    from the webhook payload, keeping the webhook minimal and production-grade.
     """
     index = _load_dataset_index()
     inc = index.get(alert_name)
@@ -886,6 +886,12 @@ def _enrich_openobserve_alert(
         started_at=_as_str(raw_o2.get("started_at", "")),
         fingerprint=fingerprint,
         description=f"OpenObserve alert: {alert_name}",
+        labels={
+            "category": inc.get("category", "unknown"),
+            "eval_id": inc.get("id", ""),
+            "baseline_mttr_seconds": str(inc.get("baseline_mttr_seconds", 0)),
+            "triggered_by": "openobserve",
+        },
         annotations={
             "alert_count": _as_str(raw_o2.get("alert_count", "")),
             "alert_agg_value": _as_str(raw_o2.get("alert_agg_value", "")),
