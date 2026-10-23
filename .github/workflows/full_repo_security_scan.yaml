@@ -17,7 +17,7 @@ defaults:
     shell: bash
 
 env:
-  TRIVY_VERSION: v0.74.0
+  TRIVY_VERSION: v0.76.1
   TRIVY_SEVERITY: CRITICAL
 
   GITLEAKS_VERSION: v8.30.1
@@ -39,51 +39,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Set up Java and restore Maven cache
-        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
-        with:
-          distribution: temurin
-          java-version: "25"
-          cache: maven
-          cache-dependency-path: |
-            rivulet/api-gateway/pom.xml
-            rivulet/api-gateway/.mvn/wrapper/maven-wrapper.properties
-
-      - name: Populate local Maven repository for Trivy
-        run: |
-          set -euo pipefail
-
-          test -f "$MAVEN_PROJECT"
-          test -x "$MAVEN_WRAPPER"
-
-          echo "============================================================"
-          echo " Maven Dependency Preparation"
-          echo "============================================================"
-
-          echo "[INFO] Java:"
-          java -version
-
-          echo "[INFO] Maven:"
-          "$MAVEN_WRAPPER" --version
-
-          echo "[INFO] Resolving Maven dependencies into ~/.m2/repository"
-          echo "[INFO] Trivy will perform offline Java dependency resolution."
-
-          "$MAVEN_WRAPPER" \
-            --batch-mode \
-            --no-transfer-progress \
-            --file "$MAVEN_PROJECT" \
-            dependency:resolve
-
-          echo "[INFO] Maven dependency resolution completed."
-
+      # Run the Git-history secret scan before any Maven setup, so Maven issues
+      # cannot prevent Gitleaks from scanning the checked-out repository.
       - name: Install Gitleaks
+        id: gitleaks_install
+        continue-on-error: true
         run: |
           set -euo pipefail
-
           version="${GITLEAKS_VERSION#v}"
           tmp_dir="$(mktemp -d)"
-
           cleanup() {
             rm -rf "$tmp_dir"
           }
@@ -97,9 +61,7 @@ jobs:
           echo "============================================================"
           echo " Gitleaks Installation"
           echo "============================================================"
-
           echo "[INFO] Downloading Gitleaks ${GITLEAKS_VERSION}"
-
           curl \
             --proto '=https' \
             --tlsv1.2 \
@@ -115,46 +77,26 @@ jobs:
             "$url"
 
           echo "[INFO] Verifying Gitleaks SHA-256"
-
-          printf '%s  %s\n' \
-            "$GITLEAKS_SHA256" \
-            "$archive" \
-            | sha256sum --check --status
+          printf '%s  %s\n' "$GITLEAKS_SHA256" "$archive" | sha256sum --check --status
 
           install -d -m 0755 "$install_dir"
-
-          tar \
-            --extract \
-            --gzip \
-            --file "$archive" \
-            --directory "$tmp_dir" \
-            --no-same-owner
-
+          tar --extract --gzip --file "$archive" --directory "$tmp_dir" --no-same-owner
           test -f "$tmp_dir/gitleaks"
-
-          install -m 0755 \
-            "$tmp_dir/gitleaks" \
-            "$gitleaks_bin"
-
-          # GITHUB_PATH affects subsequent steps only.
+          install -m 0755 "$tmp_dir/gitleaks" "$gitleaks_bin"
           echo "$install_dir" >> "$GITHUB_PATH"
-
-          # Make the binary available immediately in this step as well.
           export PATH="$install_dir:$PATH"
-
           test -x "$gitleaks_bin"
           "$gitleaks_bin" version
 
       - name: Run Gitleaks full Git history scan
         id: gitleaks
+        if: ${{ always() && steps.gitleaks_install.outcome == 'success' }}
         continue-on-error: true
         run: |
           set -euo pipefail
-
           echo "============================================================"
           echo " Gitleaks - Full Git History"
           echo "============================================================"
-
           gitleaks \
             git \
             --log-opts="--all --full-history" \
@@ -163,15 +105,53 @@ jobs:
             --exit-code 1 \
             .
 
+      - name: Set up Java and restore Maven cache
+        id: java_setup
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+          cache-dependency-path: |
+            rivulet/api-gateway/pom.xml
+            rivulet/api-gateway/.mvn/wrapper/maven-wrapper.properties
+
+      - name: Populate local Maven repository for Trivy
+        id: maven_deps
+        if: ${{ always() && steps.java_setup.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          test -f "$MAVEN_PROJECT"
+          test -x "$MAVEN_WRAPPER"
+
+          echo "============================================================"
+          echo " Maven Dependency Preparation"
+          echo "============================================================"
+          echo "[INFO] Java:"
+          java -version
+          echo "[INFO] Maven:"
+          "$MAVEN_WRAPPER" --version
+          echo "[INFO] Resolving dependencies into ~/.m2/repository"
+          echo "[INFO] Trivy will use offline Java dependency resolution."
+
+          "$MAVEN_WRAPPER" \
+            --batch-mode \
+            --no-transfer-progress \
+            --file "$MAVEN_PROJECT" \
+            dependency:resolve
+
+          echo "[INFO] Maven dependency resolution completed."
+
       - name: Run Trivy filesystem vulnerability and IaC scan
         id: trivy
+        if: ${{ always() && steps.java_setup.outcome == 'success' }}
         continue-on-error: true
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
-          # Trivy Java scanning must use the local Maven repository and must
-          # not make remote Maven Central lookups that can trigger rate limits.
+          # Prevent remote Maven artifact lookups. Maven dependencies are prepared
+          # above; missing local dependencies are reported as a preparation/coverage risk.
           TRIVY_OFFLINE_SCAN: "true"
-
         with:
           version: ${{ env.TRIVY_VERSION }}
           scan-type: fs
@@ -180,20 +160,15 @@ jobs:
           severity: ${{ env.TRIVY_SEVERITY }}
           ignore-unfixed: true
           exit-code: "1"
+          format: json
+          output: ${{ runner.temp }}/trivy-results.json
           timeout: 15m
           cache: true
 
-          # Exclude generated/dependency/build directories that are not
-          # application source and do not provide useful security coverage.
-          #
-          # The following three Helm directories are intentionally excluded
-          # because they are source templates deployed by scripts/*-deploy.sh.
-          # They do not contain the complete runtime values.yaml that exists
-          # during deployment, so Trivy's Helm parser currently produces
-          # schema/nil-pointer errors instead of actionable security findings.
-          #
-          # Keep the rest of infra/ scanned, including Terraform, Cilium,
-          # External Secrets, and generated Kubernetes manifests.
+          # Exclude generated/dependency/build directories that are not application source.
+          # These Helm template directories are excluded because they are deployed with
+          # runtime values supplied by scripts/*-deploy.sh and are not complete charts.
+          # Keep the rest of infra/ included in the scan.
           skip-dirs: >-
             .git,
             **/.git,
@@ -211,35 +186,98 @@ jobs:
             infra/k8s/otel-daemonset,
             infra/k8s/otel-gateway
 
-      - name: Evaluate security scan results
+      - name: Summarize Trivy report
         if: ${{ always() }}
+        continue-on-error: true
+        env:
+          TRIVY_REPORT: ${{ runner.temp }}/trivy-results.json
         run: |
           set -euo pipefail
+          if [[ ! -s "$TRIVY_REPORT" ]]; then
+            echo "::warning::Trivy JSON report was not created. Inspect the Trivy step logs for a scanner or setup error."
+            exit 0
+          fi
 
+          critical_vulns="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$TRIVY_REPORT")"
+          critical_misconfigs="$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity == "CRITICAL")] | length' "$TRIVY_REPORT")"
+
+          {
+            echo "### Trivy scan summary"
+            echo "- Critical vulnerabilities: ${critical_vulns}"
+            echo "- Critical misconfigurations: ${critical_misconfigs}"
+            echo ""
+            echo "Critical findings (up to 100):"
+            jq -r '
+              .Results[]? as $result
+              | (($result.Vulnerabilities // []) + ($result.Misconfigurations // []))[]
+              | select(.Severity == "CRITICAL")
+              | "- \(.Severity): \($result.Target // "unknown target") — \(.VulnerabilityID // .ID // .Type // "finding") — \(.Title // .Message // .Description // "No description")"
+            ' "$TRIVY_REPORT" | sed -n '1,100p'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "[INFO] Trivy critical vulnerabilities: ${critical_vulns}"
+          echo "[INFO] Trivy critical misconfigurations: ${critical_misconfigs}"
+
+      - name: Upload Trivy report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trivy-security-report
+          path: ${{ runner.temp }}/trivy-results.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Evaluate security scan results
+        if: ${{ always() }}
+        env:
+          GITLEAKS_INSTALL_OUTCOME: ${{ steps.gitleaks_install.outcome }}
+          GITLEAKS_OUTCOME: ${{ steps.gitleaks.outcome }}
+          JAVA_SETUP_OUTCOME: ${{ steps.java_setup.outcome }}
+          MAVEN_DEPS_OUTCOME: ${{ steps.maven_deps.outcome }}
+          TRIVY_OUTCOME: ${{ steps.trivy.outcome }}
+        run: |
+          set -euo pipefail
           failed=0
 
           echo "============================================================"
           echo " Security Scan Summary"
           echo "============================================================"
 
-          if [[ "${{ steps.gitleaks.outcome }}" == "success" ]]; then
+          if [[ "$GITLEAKS_INSTALL_OUTCOME" != "success" ]]; then
+            echo "[FAIL] Gitleaks installation failed."
+            failed=1
+          elif [[ "$GITLEAKS_OUTCOME" == "success" ]]; then
             echo "[PASS] Gitleaks"
           else
-            echo "[FAIL] Gitleaks reported findings or failed."
+            echo "[FAIL] Gitleaks reported findings or did not complete successfully."
             failed=1
           fi
 
-          if [[ "${{ steps.trivy.outcome }}" == "success" ]]; then
-            echo "[PASS] Trivy"
+          if [[ "$JAVA_SETUP_OUTCOME" != "success" ]]; then
+            echo "[FAIL] Java setup failed; Trivy could not be run reliably."
+            failed=1
+          fi
+
+          if [[ "$MAVEN_DEPS_OUTCOME" != "success" ]]; then
+            echo "[FAIL] Maven dependency preparation failed; offline Java scan coverage may be incomplete."
+            failed=1
           else
-            echo "[FAIL] Trivy reported findings or failed."
+            echo "[PASS] Maven dependency preparation"
+          fi
+
+          if [[ "$TRIVY_OUTCOME" == "success" ]]; then
+            echo "[PASS] Trivy"
+          elif [[ "$TRIVY_OUTCOME" == "skipped" ]]; then
+            echo "[FAIL] Trivy was skipped."
+            failed=1
+          else
+            echo "[FAIL] Trivy reported blocking findings or encountered a scanner error. See the report and Trivy logs."
             failed=1
           fi
 
           echo "============================================================"
-
           if [[ "$failed" -ne 0 ]]; then
-            echo "[ERROR] One or more security scanners reported findings or failed."
+            echo "[ERROR] One or more security checks failed."
             exit 1
           fi
 
