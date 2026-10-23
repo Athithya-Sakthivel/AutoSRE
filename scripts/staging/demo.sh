@@ -11,9 +11,9 @@
 #   - Port-forwards: only for local browser access and chaos log push
 #
 # Usage:
-#   bash demo.sh                          # Default: INC-013 with 90s wait
-#   bash demo.sh --incident INC-004       # Different incident
-#   bash demo.sh --skip-wait              # Skip O2 evaluation wait
+#   bash scripts/staging/demo.sh                          # Default: INC-013 with 90s wait
+#   bash scripts/staging/demo.sh --incident INC-004       # Different incident
+#   bash scripts/staging/demo.sh --skip-wait              # Skip O2 evaluation wait
 # =============================================================================
 
 set -Eeuo pipefail
