@@ -1,37 +1,34 @@
 {
   "incident_id": "INC-013",
-  "completed_at": "2026-10-20T07:47:09Z",
+  "completed_at": "2026-10-24T13:45:31Z",
   "result": {
-    "incident_id": "8d9cf08b-3f93-44a2-b963-7187f4d16be3",
+    "incident_id": "910f0383-8bc3-4996-a2f6-01de54f20494",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "ValkeyEvictionUnderPressure",
     "service": "api-gateway",
     "namespace": "rivulet",
     "severity": "sev2",
-    "started_at": "2026-10-20T07:47:00Z",
+    "started_at": "2026-10-24T13:45:03Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "The Valkey cache instance for api-gateway in namespace rivulet is experiencing high memory pressure due to a low maxmemory limit of 2MB, causing cache evictions of 3241 keys and a degraded hit rate of 45.2%.",
-        "confidence": 0.8,
+        "description": "The Valkey cache instance for api-gateway in namespace rivulet is experiencing high memory pressure due to a low maxmemory configuration (2 MB), leading to a 100% memory usage and 3241 evicted keys.",
+        "confidence": 0.5,
         "evidence": [
-          "evicted_keys: 3241",
-          "hit_rate_pct: 45.2",
-          "maxmemory_mb: 2",
-          "memory_usage_pct: 100",
-          "Tool get_valkey_stats({}) status=succeeded output={\"stats\": {\"connected_clients\": 10, \"evicted_keys\": 2042, \"hit_rate_pct\": 10.45, \"maxmemory_mb\": 2.0, \"memory_usage_pct\": 64.68, \"total_keys\": 0, \"used_memory_mb\": 1.29}}"
+          "Alert: ValkeyEvictionUnderProvider",
+          "Annotations: maxmemory_mb=2, memory_usage_pct=100, evicted_keys=3241",
+          "Tool get_valkey_stats({}) status=succeeded output={\"stats\": {\"connected_clients\": 14, \"evicted_keys\": 3238, \"hit_rate_pct\": 1.12, \"maxmemory_mb\": 2.0, \"memory_usage_pct\": 67.78, \"total_keys\": 0, \"used_memory_mb\": 1.36}}"
         ],
         "status": "proposed"
       },
       {
         "id": "H2",
-        "description": "An unexpected surge in traffic or a missing Time-To-Live (TTL) on cached objects in the api-gateway service has exhausted the 2MB memory allocation, triggering mass evictions.",
-        "confidence": 0.5,
+        "description": "An unexpected influx of traffic or a cache stampede has caused the hit rate to drop to 45.2% while exhausting the constrained 2 MB memory limit, forcing rapid key eviction.",
+        "confidence": 0.3,
         "evidence": [
-          "memory_usage_pct: 100",
-          "evicted_keys: 3241",
-          "Tool get_valkey_stats({}) status=succeeded output={\"stats\": {\"connected_clients\": 10, \"evicted_keys\": 2042, \"hit_rate_pct\": 10.45, \"maxmemory_mb\": 2.0, \"memory_usage_pct\": 64.68, \"total_keys\": 0, \"used_memory_mb\": 1.29}}"
+          "Annotations: hit_rate_pct=45.2, evicted_keys=3241, memory_usage_pct=100",
+          "Tool get_valkey_stats({}) status=succeeded output={\"stats\": {\"connected_clients\": 14, \"evicted_keys\": 3238, \"hit_rate_pct\": 1.12, \"maxmemory_mb\": 2.0, \"memory_usage_pct\": 67.78, \"total_keys\": 0, \"used_memory_mb\": 1.36}}"
         ],
         "status": "proposed"
       }
@@ -40,10 +37,10 @@
       {
         "tool_name": "flush_all",
         "tool_args": {
-          "reason": "Valkey cache is experiencing a cache eviction storm and high memory pressure due to low maxmemory limits, requiring a flush to clear evicted and stale keys."
+          "reason": "Valkey eviction under memory pressure; FLUSHALL to reclaim memory"
         },
         "risk_tier": 2,
-        "rationale": "The top hypothesis indicates a cache eviction storm and severe memory pressure on the Valkey instance. According to the decision framework, cache eviction storms must be remediated using flush_all (Tier 2). Restarting the deployment is explicitly discouraged for cache eviction issues.",
+        "rationale": "Fallback action for category 'cache_eviction' (LLM unavailable or low confidence). Top hypothesis: The Valkey cache instance for api-gateway in namespace rivulet is experiencing high memory pressure ",
         "requires_approval": false
       }
     ],
@@ -51,33 +48,35 @@
       {
         "tool_name": "flush_all",
         "tool_args": {
-          "reason": "Valkey cache is experiencing a cache eviction storm and high memory pressure due to low maxmemory limits, requiring a flush to clear evicted and stale keys."
+          "reason": "Valkey eviction under memory pressure; FLUSHALL to reclaim memory"
         },
-        "tool_call_id": "call_1792482426529",
+        "tool_call_id": "call_1792849528228",
         "result": {
           "flushed": true,
-          "reason": "Valkey cache is experiencing a cache eviction storm and high memory pressure due to low maxmemory limits, requiring a flush to clear evicted and stale keys.",
+          "reason": "Valkey eviction under memory pressure; FLUSHALL to reclaim memory",
+          "keys_before": 0,
+          "keys_after": 0,
           "success": true,
           "verification_passed": true
         },
         "success": true,
-        "executed_at": "2026-10-20T07:47:06Z",
+        "executed_at": "2026-10-24T13:45:28Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 7172,
-    "prompt_tokens": 6197,
-    "completion_tokens": 975,
-    "cost_usd": 0.0042966,
-    "estimated_paid_cost_usd": 0.0042966,
+    "tokens_used": 7110,
+    "prompt_tokens": 6008,
+    "completion_tokens": 1102,
+    "cost_usd": 0.0033468,
+    "estimated_paid_cost_usd": 0.0058227999999999995,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
         "calls": 4,
-        "tokens": 7172
+        "tokens": 7323
       }
     },
-    "wall_clock_seconds": 6.294,
-    "active_seconds": 6.294,
+    "wall_clock_seconds": 24.668,
+    "active_seconds": 24.668,
     "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
     "iterations": 1,

@@ -1,17 +1,20 @@
 /**
- * Root application component with routing, readiness bootstrap,
- * live agent health indicator, and global sync indicator.
+ * Root application component with routing, readiness bootstrap, and
+ * live agent health indicator.
  *
  * Component hierarchy:
- *   <ErrorBoundary>              catches render errors, logs to console
+ *   <ErrorBoundary>              catches render errors
  *     <ReadyGate>                polls /readyz, blocks until backend is ready
  *       <BrowserRouter>          client-side routing
  *         <DocumentTitle>        keeps browser tab title synchronized
  *         <Routes>               page components
  *
- * Live indicators:
- *   AgentHealthIndicator polls /healthz every 10 seconds.
- *   SyncIndicator shows a pulsing dot when any React Query is fetching.
+ * Agent health:
+ *   The header's AgentHealthIndicator polls /healthz every 10 seconds.
+ *   It reflects three states:
+ *     online    — backend responds with status: "ok", paused: false
+ *     paused    — backend responds, paused: true
+ *     offline   — request fails or times out
  */
 
 import { useEffect, useState } from "react";
@@ -26,7 +29,7 @@ import {
   Routes,
   useLocation,
 } from "react-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { DashboardPage } from "./pages/Dashboard";
@@ -71,13 +74,9 @@ function ReadyGate({ children }: { children: ReactNode }): ReactElement {
     return (
       <div className="flex min-h-screen items-center justify-center bg-surface-0">
         <div className="flex flex-col items-center gap-4">
-          <div className="flex items-center gap-2">
-            <span
-              className="inline-block h-2.5 w-2.5 animate-pulse rounded-full bg-status-running"
-              aria-hidden="true"
-            />
-            <span className="text-sm font-medium text-slate-300">AutoSRE</span>
-          </div>
+          <span className="text-sm font-medium tracking-tight text-slate-300">
+            AutoSRE
+          </span>
           <div className="flex items-center gap-2 text-xs text-slate-500">
             <svg
               className="h-4 w-4 animate-spin"
@@ -181,45 +180,6 @@ function DocumentTitle(): null {
 }
 
 // ---------------------------------------------------------------------------
-// Sync indicator — shows when any query is actively fetching
-// ---------------------------------------------------------------------------
-
-function SyncIndicator(): ReactElement | null {
-  const queryClient = useQueryClient();
-  const [isSyncing, setIsSyncing] = useState(false);
-
-  useEffect(() => {
-    const check = (): void => {
-      const queries = queryClient.getQueryCache().getAll();
-      setIsSyncing(queries.some((q) => q.state.fetchStatus === "fetching"));
-    };
-
-    // Check immediately
-    check();
-
-    // Subscribe to cache changes
-    const unsubscribe = queryClient.getQueryCache().subscribe(check);
-    return unsubscribe;
-  }, [queryClient]);
-
-  if (!isSyncing) return null;
-
-  return (
-    <span
-      className="inline-flex items-center gap-1.5 text-[10px] text-slate-500"
-      role="status"
-      aria-label="Syncing data"
-    >
-      <span
-        className="h-1.5 w-1.5 animate-pulse rounded-full bg-status-running"
-        aria-hidden="true"
-      />
-      syncing
-    </span>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // App shell
 // ---------------------------------------------------------------------------
 
@@ -230,12 +190,8 @@ function AppShell(): ReactElement {
         <div className="mx-auto flex max-w-7xl items-center gap-8 px-6 py-3">
           <Link
             to="/dashboard"
-            className="flex items-center gap-2 text-lg font-semibold tracking-tight text-white"
+            className="text-lg font-semibold tracking-tight text-white transition-colors hover:text-slate-200"
           >
-            <span
-              className="inline-block h-2.5 w-2.5 rounded-full bg-status-resolved"
-              aria-hidden="true"
-            />
             AutoSRE
           </Link>
 
@@ -248,8 +204,7 @@ function AppShell(): ReactElement {
             <TopNavLink to="/metrics">Metrics</TopNavLink>
           </nav>
 
-          <div className="ml-auto flex items-center gap-3 text-xs text-slate-400">
-            <SyncIndicator />
+          <div className="ml-auto text-xs text-slate-400">
             <AgentHealthIndicator />
           </div>
         </div>
@@ -315,33 +270,36 @@ function useAgentHealth(): AgentHealth {
 
   return query.data.paused ? "paused" : "online";
 }
-
 function AgentHealthIndicator(): ReactElement {
   const health = useAgentHealth();
 
   const config: Record<
     AgentHealth,
-    { label: string; dot: string; text: string }
+    { label: string; statusWord: string; dot: string; badge: string }
   > = {
     connecting: {
       label: "agent: connecting",
-      dot: "bg-slate-500",
-      text: "text-slate-400",
+      statusWord: "CONNECTING",
+      dot: "bg-slate-400",
+      badge: "border-slate-700/60 bg-slate-800/40 text-slate-400",
     },
     online: {
       label: "agent: online",
-      dot: "bg-status-resolved",
-      text: "text-slate-300",
+      statusWord: "ONLINE",
+      dot: "bg-emerald-400",
+      badge: "border-emerald-500/25 bg-emerald-500/5 text-emerald-400",
     },
     paused: {
       label: "agent: paused",
-      dot: "bg-status-awaiting",
-      text: "text-status-awaiting",
+      statusWord: "PAUSED",
+      dot: "bg-amber-400",
+      badge: "border-amber-500/25 bg-amber-500/5 text-amber-400",
     },
     offline: {
       label: "agent: offline",
-      dot: "bg-status-failed",
-      text: "text-status-failed",
+      statusWord: "OFFLINE",
+      dot: "bg-red-400",
+      badge: "border-red-500/25 bg-red-500/5 text-red-400",
     },
   };
 
@@ -349,16 +307,17 @@ function AgentHealthIndicator(): ReactElement {
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 ${state.text}`}
+      className={`inline-flex items-center gap-2 rounded-md border px-2 py-1 font-mono text-[10px] font-medium tracking-wider ${state.badge}`}
       aria-label={state.label}
       role="status"
       aria-live="polite"
+      title={state.label}
     >
       <span
         className={`h-1.5 w-1.5 rounded-full ${state.dot}`}
         aria-hidden="true"
       />
-      <span>{state.label}</span>
+      <span>{state.statusWord}</span>
     </span>
   );
 }
@@ -399,13 +358,7 @@ function NotFoundPage(): ReactElement {
 
 export function App(): ReactElement {
   return (
-    <ErrorBoundary
-      onError={(error, info) => {
-        // Surface render errors to console for debugging
-        // In production, replace with structured logging endpoint
-        console.error("[ErrorBoundary]", error, info.componentStack);
-      }}
-    >
+    <ErrorBoundary>
       <ReadyGate>
         <BrowserRouter>
           <DocumentTitle />

@@ -4,9 +4,71 @@
  * All status/severity formatters accept the union types from `./types.ts`
  * but gracefully degrade unknown values to the raw string. This prevents
  * UI breakage if the backend adds new status values before the UI is updated.
+ *
+ * Timezone policy
+ * ---------------
+ * Every wall-clock time is displayed in Asia/Kolkata (IST, UTC+05:30),
+ * which is correct for all of India (Chennai, Mumbai, Delhi, Bengaluru).
+ * India has a single timezone and has never observed DST, so the IANA
+ * identifier is stable and DST-safe.
+ *
+ * The AutoSRE backend currently serialises datetimes without a timezone
+ * designator (e.g. "2026-10-24T12:38:15" instead of "2026-10-24T12:38:15Z").
+ * ECMAScript parses such strings as *local* time, silently shifting them
+ * by the browser's UTC offset — a 5.5h error in IST. To stay correct
+ * until the backend is fixed, `parseServerTime` assumes UTC when no
+ * designator is present and emits a console.warn so the regression is
+ * visible in dev tools. Once the backend emits proper RFC 3339 with `Z`,
+ * the warning stops firing and normalisation becomes a no-op.
  */
 
 import type { IncidentStatus, GraphPhase } from "./types";
+
+// ---------------------------------------------------------------------------
+// Timestamp parsing + timezone constants
+// ---------------------------------------------------------------------------
+
+/** All wall-clock displays are pinned to this zone. */
+export const DISPLAY_TIMEZONE = "Asia/Kolkata";
+
+/**
+ * Parse an ISO-ish timestamp from the AutoSRE backend.
+ *
+ * Contract: the backend should emit RFC 3339 (e.g. "2026-10-24T12:38:15Z").
+ * Reality: naive strings ("2026-10-24T12:38:15") are also seen. Because
+ * ECMAScript parses naive date-times as *local* time, we normalise naive
+ * strings to UTC before handing them to Date.
+ *
+ * Returns null on empty/invalid input so callers can render "—" uniformly.
+ */
+export function parseServerTime(isoString: string): Date | null {
+  if (!isoString) {
+    return null;
+  }
+
+  // Date-only strings ("2026-10-24") are already parsed as UTC by spec.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(isoString)) {
+    const date = new Date(isoString);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  // Matches "Z", "z", "+05:30", "+0530", "-08:00", etc.
+  const hasTz = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(isoString);
+
+  // Strip fractional seconds beyond milliseconds (browser parsers disagree
+  // on precision), then append Z when there is no designator.
+  const normalized = hasTz ? isoString : `${isoString.replace(/\.\d+$/, "")}Z`;
+
+  if (!hasTz) {
+    console.warn(
+      `[autosre] Timestamp has no timezone designator, assuming UTC: ${isoString}. ` +
+        `Fix the backend serializer to emit RFC 3339 with a trailing Z.`,
+    );
+  }
+
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
 
 // ---------------------------------------------------------------------------
 // Numeric / duration / cost formatters
@@ -51,84 +113,86 @@ export function formatCount(count: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// Timestamp formatters
+// Timestamp formatters — all pinned to Asia/Kolkata
 // ---------------------------------------------------------------------------
 
+/**
+ * Compact timestamp: "Oct 24, 06:08 pm".
+ * Used in card/detail metadata where space matters; zone is implied by
+ * formatDateTime on the detail page.
+ */
 export function formatTimestamp(isoString: string): string {
-  if (!isoString) {
+  const date = parseServerTime(isoString);
+  if (!date) {
     return "—";
   }
-  try {
-    const date = new Date(isoString);
-    if (Number.isNaN(date.getTime())) {
-      return "—";
-    }
-    return date.toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return "—";
-  }
+  return date.toLocaleString("en-IN", {
+    timeZone: DISPLAY_TIMEZONE,
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
+/**
+ * Full timestamp: "Oct 24, 2026, 06:08:15 pm IST".
+ * Used on the incident detail page where the zone should be unambiguous.
+ * Includes `timeZoneName: "short"` so users don't have to guess.
+ */
 export function formatDateTime(isoString: string): string {
-  if (!isoString) {
+  const date = parseServerTime(isoString);
+  if (!date) {
     return "—";
   }
-  try {
-    const date = new Date(isoString);
-    if (Number.isNaN(date.getTime())) {
-      return "—";
-    }
-    return date.toLocaleString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  } catch {
-    return "—";
-  }
+  return date.toLocaleString("en-IN", {
+    timeZone: DISPLAY_TIMEZONE,
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+  });
 }
 
+/**
+ * Relative time: "just now", "30m ago", "2h ago", "3d ago", or a date.
+ * Epoch arithmetic is timezone-agnostic, so once parseServerTime has the
+ * correct instant, this renders correctly regardless of display zone.
+ */
 export function formatRelativeTime(isoString: string): string {
-  if (!isoString) {
+  const date = parseServerTime(isoString);
+  if (!date) {
     return "—";
   }
-  try {
-    const date = new Date(isoString);
-    if (Number.isNaN(date.getTime())) {
-      return "—";
-    }
 
-    const now = Date.now();
-    const diffMs = now - date.getTime();
-    const diffSec = Math.floor(diffMs / 1000);
-    const diffMin = Math.floor(diffSec / 60);
-    const diffHour = Math.floor(diffMin / 60);
-    const diffDay = Math.floor(diffHour / 24);
+  const now = Date.now();
+  const diffMs = now - date.getTime();
+  const diffSec = Math.floor(diffMs / 1000);
+  const diffMin = Math.floor(diffSec / 60);
+  const diffHour = Math.floor(diffMin / 60);
+  const diffDay = Math.floor(diffHour / 24);
 
-    if (diffSec < 60) {
-      return "just now";
-    }
-    if (diffMin < 60) {
-      return `${diffMin}m ago`;
-    }
-    if (diffHour < 24) {
-      return `${diffHour}h ago`;
-    }
-    if (diffDay < 7) {
-      return `${diffDay}d ago`;
-    }
-    return date.toLocaleDateString();
-  } catch {
-    return "—";
+  if (diffSec < 60) {
+    return "just now";
   }
+  if (diffMin < 60) {
+    return `${diffMin}m ago`;
+  }
+  if (diffHour < 24) {
+    return `${diffHour}h ago`;
+  }
+  if (diffDay < 7) {
+    return `${diffDay}d ago`;
+  }
+  return date.toLocaleDateString("en-IN", {
+    timeZone: DISPLAY_TIMEZONE,
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }
 
 export function formatConfidence(confidence: number): string {
@@ -179,7 +243,6 @@ export function getStatusLabel(status: IncidentStatus | string): string {
   if (status in STATUS_LABELS) {
     return STATUS_LABELS[status as IncidentStatus];
   }
-  // Graceful degradation for unknown statuses from future API versions
   return String(status)
     .replace(/_/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
@@ -191,7 +254,6 @@ export function getStatusClasses(status: IncidentStatus | string): string {
   if (status in STATUS_CLASSES) {
     return STATUS_CLASSES[status as IncidentStatus];
   }
-  // Default fallback styling for unknown statuses
   return "bg-slate-500/10 text-slate-400 border-slate-500/20";
 }
 
@@ -201,10 +263,6 @@ export const statusClasses = getStatusClasses;
 // Severity labels and classes
 // ---------------------------------------------------------------------------
 
-/**
- * Severity labels accept a plain string because the API transports severity
- * as a free-form string; the union `IncidentSeverity` is a UI-side hint only.
- */
 const SEVERITY_LABELS: Record<string, string> = {
   sev1: "SEV-1 Critical",
   sev2: "SEV-2 High",
@@ -274,10 +332,6 @@ export const phaseLabel = getPhaseLabel;
 // Status classification helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Terminal statuses — the incident lifecycle is over and no further
- * transitions will occur.
- */
 const TERMINAL_STATUSES: ReadonlySet<IncidentStatus> = new Set([
   "resolved",
   "failed",
@@ -285,10 +339,6 @@ const TERMINAL_STATUSES: ReadonlySet<IncidentStatus> = new Set([
   "blocked",
 ]);
 
-/**
- * Active statuses — the agent is currently working on the incident
- * or waiting for human input.
- */
 const ACTIVE_STATUSES: ReadonlySet<IncidentStatus> = new Set([
   "running",
   "investigating",

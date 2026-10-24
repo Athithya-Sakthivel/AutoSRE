@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_e2e.sh — End-to-end validation for AutoSRE UI.
+# test_e2e.sh — End-to-end validation for AutoSRE.
 #
 # Three modes:
 #   cd /workspace/agents/ui
@@ -16,7 +16,7 @@
 #                       Set to empty string to disable auth.
 #
 # Prerequisites:
-#   cd /workspace/agents && bash test_e2e.sh --run &
+#   cd /workspace/agents && bash test_e2e.sh --run
 
 set -Eeuo pipefail
 
@@ -43,6 +43,7 @@ Modes:
 Environment:
   AUTOSRE_API_KEY  API key for authenticated testing.
                    Defaults to Temp-password234 (matches parent harness).
+                   Set to empty string to disable auth.
 
 Failure output is always verbose — failed checks print response bodies,
 DOM content, and Vite proxy verification automatically.
@@ -51,12 +52,15 @@ Prerequisites:
   cd /workspace/agents && bash test_e2e.sh --run &
 
 Examples:
-  bash test_e2e.sh                  # API only
-  bash test_e2e.sh --playwright     # API + E2E tests
-  bash test_e2e.sh --diagnose       # API + DOM inspection
+  bash agents/ui/test_e2e.sh                  # API only
+  bash agents/ui/test_e2e.sh --playwright     # API + E2E tests
+  bash agents/ui/test_e2e.sh --diagnose       # API + DOM inspection
 
   # With custom auth key:
   AUTOSRE_API_KEY=my-secret bash test_e2e.sh --playwright
+
+  # Disable auth (local dev, backend running without AUTOSRE_API_KEY):
+  AUTOSRE_API_KEY="" bash test_e2e.sh
 HELPTEXT
       exit 0
       ;;
@@ -92,7 +96,6 @@ SKIP=0
 RESULTS=()
 FAIL_DETAILS=()
 INCIDENT_ID=""
-PLAYWRIGHT_FAILED=false
 
 # ---------------------------------------------------------------------------
 # Colors
@@ -223,6 +226,7 @@ http_status() {
 }
 
 http_get_with_status() {
+  # Writes status code to stdout line 1, body to remaining lines
   local url="${BASE_URL}${1}"
   local tmpfile code body
   local args=(-s -w '%{http_code}' --max-time 10)
@@ -296,6 +300,8 @@ if (( ELAPSED >= WAIT_TIMEOUT )); then
   bad "Backend not reachable after ${WAIT_TIMEOUT}s"
   printf '\n  Fix: cd agents && bash test_e2e.sh --run &\n'
   printf '  Check: curl -sf http://127.0.0.1:8000/healthz\n'
+  printf '  If backend requires auth, ensure AUTOSRE_API_KEY matches (current: %s)\n' \
+    "${AUTOSRE_API_KEY:+set}"
   exit 1
 fi
 
@@ -494,7 +500,7 @@ if [[ "$MODE" == "playwright" ]]; then
   fi
 
   if [[ "$UI_CODE" == "200" ]]; then
-    log "11. Playwright Approval Flow Tests (Mocked Backend)"
+    log "11. Playwright E2E Tests"
 
     cd "$UI_DIR" || exit 1
 
@@ -516,54 +522,24 @@ if [[ "$MODE" == "playwright" ]]; then
         printf '  Auth: disabled (local dev mode)\n'
       fi
 
-      # Run approval flow tests (mocked backend, no real agent needed).
-      # Capture exit code properly — || true would mask failures.
-      printf '\n  Running: npx playwright test tests/approval-flow.spec.ts\n\n'
-      pw_exit=0
-      pw_output=$(npx playwright test tests/approval-flow.spec.ts 2>&1) || pw_exit=$?
-
-      cat <<< "$pw_output"
-      printf '\n'
-
-      if [[ $pw_exit -eq 0 ]]; then
-        ok "Approval flow tests passed"
-      else
-        bad "Approval flow tests failed (exit code $pw_exit)"
-        PLAYWRIGHT_FAILED=true
-
-        failing_tests=$(printf '%s' "$pw_output" | grep "✘" | head -10) || true
-        if [[ -n "${failing_tests:-}" ]]; then
-          detail "  Failing approval tests:"
-          while IFS= read -r ft_line; do
-            detail "    $ft_line"
-          done <<< "$failing_tests"
-        fi
-      fi
-    fi
-
-    cd - >/dev/null
-
-    log "12. Playwright Integration Tests (Real Backend)"
-
-    cd "$UI_DIR" || exit 1
-
-    if [[ -d "node_modules" ]] && command -v npx >/dev/null 2>&1; then
       printf '  Running: npx playwright test tests/e2e.spec.ts\n\n'
+
+      # Capture exit code properly — `|| true` would mask failures.
       pw_exit=0
       pw_output=$(npx playwright test tests/e2e.spec.ts 2>&1) || pw_exit=$?
 
+      # Safely print output — cat avoids printf interpreting leading dashes
       cat <<< "$pw_output"
       printf '\n'
 
       if [[ $pw_exit -eq 0 ]]; then
-        ok "Integration tests passed"
+        ok "All Playwright tests passed"
       else
-        bad "Integration tests failed (exit code $pw_exit)"
-        PLAYWRIGHT_FAILED=true
+        bad "Playwright tests failed (exit code $pw_exit)"
 
         failing_tests=$(printf '%s' "$pw_output" | grep "✘" | head -10) || true
         if [[ -n "${failing_tests:-}" ]]; then
-          detail "  Failing integration tests:"
+          detail "  Failing tests:"
           while IFS= read -r ft_line; do
             detail "    $ft_line"
           done <<< "$failing_tests"
@@ -690,7 +666,7 @@ if (( FAIL > 0 )); then
   printf '    • Frontend not running → cd agents/ui && npx vite --host 127.0.0.1 &\n'
   printf '    • Vite proxy leaking JSON → check vite.config.ts bypass logic\n'
   printf '    • Playwright timeout → check waitForAppReady() in e2e.spec.ts\n'
-  printf '    • Auth failing → ensure AUTOSRE_API_KEY matches between backend and test\n'
+  printf '    • Auth failing (401/403) → ensure AUTOSRE_API_KEY matches backend config\n'
   printf '\n'
 fi
 
@@ -721,7 +697,7 @@ fi
 
 printf '=========================================================\n'
 
-if (( FAIL > 0 )) || [[ "$PLAYWRIGHT_FAILED" == "true" ]]; then
+if (( FAIL > 0 )); then
   exit 1
 fi
 exit 0

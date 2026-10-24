@@ -8,7 +8,33 @@
 - `get_connection_stats`: Aggregate client-connection counts and utilisation vs max_connections
 
 ### Tier 1 — Reversible Remediation (1 tool)
-- `terminate_backend`: Terminate a PostgreSQL backend with pg_terminate_backend
+- `terminate_backend`: Terminate PostgreSQL backend(s) with pg_terminate_backend
+
+## terminate_backend operating modes
+
+The tool has two modes, selected by whether ``pid`` is supplied:
+
+### Targeted mode (``pid`` supplied)
+Terminates exactly one backend. Conservative safety checks apply — the tool
+refuses to kill the agent's own connection, superuser sessions, and sessions
+without a login role. Use this when the LLM has identified a specific PID.
+
+### Auto-discovery mode (``pid`` omitted)
+Discovers every ``idle in transaction`` / ``idle in transaction (aborted)``
+client backend and terminates all of them. This is the mode used by the
+deterministic fallback path for the ``db_connection_exhaustion`` category,
+which cannot know a PID in advance.
+
+Auto-discovery is bounded and self-protecting:
+- only ``backend_type = 'client backend'`` (never autovacuum/walwriter/etc.)
+- never the agent's own connection (``pid <> pg_backend_pid()``)
+- never sessions whose ``application_name`` looks like the agent's own pool
+- never role-less background sessions (``usename IS NOT NULL``)
+- capped at ``_MAX_AUTO_TERMINATE`` backends per call
+- superuser sessions ARE eligible: an idle-in-transaction session is by
+  definition doing no useful work while holding a connection slot and locks.
+  During a sev1 pool-exhaustion outage, refusing to act guarantees the outage
+  continues. The state filter (never ``active``) is the real safety control.
 
 ## Contracts
 
@@ -20,6 +46,9 @@ Every Tier-1 tool output model includes:
 
 For `terminate_backend`, the tool explicitly rechecks whether the targeted
 backend identity has disappeared before reporting verification success.
+Diagnostic counters (``candidates_found``, ``terminated_count``,
+``still_idle_in_transaction``) distinguish "nothing to do" from "tried and
+failed", which is essential for evaluating remediation quality.
 
 ### SREContext Contract
 The PostgreSQL connection pool is accessed via `context.pg_pool`. It must be
@@ -29,14 +58,13 @@ an `psycopg_pool.AsyncConnectionPool` instance or a compatible object exposing
 ### Error Handling Contract
 All psycopg queries are wrapped in async context managers and exceptions are
 re-raised as `ToolExecutionError` with the tool name and original exception.
+Per-backend termination failures in auto-discovery mode are logged and skipped
+rather than aborting the whole batch.
 
-### Safety Contract (terminate_backend)
-The terminate_backend tool refuses to kill:
-- The agent's own connection (is_self)
-- Superuser sessions (is_superuser)
-- Sessions without a login role (usename is None)
-
-This prevents accidental termination of critical infrastructure.
+### Compatibility Contract
+`pg_terminate_backend(pid)` is called with a single argument. The two-argument
+form `pg_terminate_backend(pid, timeout)` requires PostgreSQL 14+; the
+single-argument form works on every supported version.
 """
 
 from __future__ import annotations
@@ -170,13 +198,29 @@ class TerminateBackendInput(ToolInputModel):
 
 
 class TerminateBackendOutput(BaseModel):
-    """Output for terminate_backend tool."""
+    """Output for terminate_backend tool.
+
+    Attributes:
+        pid: Targeted PID, or None in auto-discovery mode.
+        terminated: True if at least one backend was terminated.
+        reason: Caller-supplied justification.
+        terminated_pids: PIDs PostgreSQL confirmed termination for.
+        terminated_count: Length of terminated_pids.
+        candidates_found: Backends matched by auto-discovery (0 in targeted
+            mode). Distinguishes "nothing to do" from "tried and failed".
+        still_idle_in_transaction: Candidates still idle-in-tx after the
+            termination round.
+        success: True if the tool executed without error.
+        verification_passed: True if the desired end state was reached.
+    """
 
     pid: int | None = None
     terminated: bool
     reason: str
     terminated_pids: list[int] = Field(default_factory=list)
     terminated_count: int = 0
+    candidates_found: int = 0
+    still_idle_in_transaction: int = 0
     success: bool = True
     verification_passed: bool | None = None
 
@@ -210,6 +254,57 @@ def _connection(context: SREContext) -> Any:
         )
 
     return connection()
+
+
+# Maximum backends terminated in one auto-discovery call. Bounds blast radius.
+_MAX_AUTO_TERMINATE = 50
+
+# Milliseconds to wait before re-checking pg_stat_activity after termination.
+_VERIFY_DELAY_SECONDS = 0.5
+
+# Candidate selection for auto-discovery mode.
+#
+# Safety filters, in order of importance:
+#   1. backend_type = 'client backend'  -> never touch autovacuum, walwriter,
+#                                          checkpointer, bgwriter, etc.
+#   2. state IN (idle in transaction*)  -> never touch a session that is
+#                                          actively running a query
+#   3. pid <> pg_backend_pid()          -> never kill our own connection
+#   4. application_name NOT ILIKE ...   -> never kill the agent's own pool
+#   5. usename IS NOT NULL              -> never kill role-less internals
+#
+# Superuser sessions ARE eligible. An idle-in-transaction session is doing no
+# useful work while holding a connection slot and locks; refusing to terminate
+# it during a pool-exhaustion outage guarantees the outage continues.
+_IDLE_TX_CANDIDATE_SQL = """
+    SELECT
+        activity.pid,
+        activity.backend_start,
+        COALESCE(activity.usename, '') AS usename
+    FROM pg_stat_activity AS activity
+    WHERE activity.backend_type = 'client backend'
+      AND activity.state IN (
+              'idle in transaction',
+              'idle in transaction (aborted)'
+          )
+      AND activity.pid <> pg_backend_pid()
+      AND activity.usename IS NOT NULL
+      AND COALESCE(activity.application_name, '') NOT ILIKE '%%autosre%%'
+      AND COALESCE(activity.application_name, '') NOT ILIKE '%%sre-agent%%'
+    ORDER BY activity.query_start ASC NULLS LAST, activity.pid
+    LIMIT %s
+"""
+
+# Re-check which candidates are still idle-in-transaction after termination.
+_IDLE_TX_STILL_PRESENT_SQL = """
+    SELECT pid
+    FROM pg_stat_activity
+    WHERE pid = ANY(%s)
+      AND state IN (
+              'idle in transaction',
+              'idle in transaction (aborted)'
+          )
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -414,60 +509,38 @@ async def _get_connection_stats(
 # ---------------------------------------------------------------------------
 # Tier 1: Reversible remediation
 # ---------------------------------------------------------------------------
-# Maximum backends terminated in one auto-discovery call. Bounds blast radius.
-_MAX_AUTO_TERMINATE = 50
 
 
 async def _terminate_idle_in_transaction(
     reason: str,
     context: SREContext,
 ) -> TerminateBackendOutput:
-    """Discover and terminate all idle-in-transaction backends.
+    """Discover and terminate all idle-in-transaction client backends.
 
-    Safety filters (identical to the single-PID path):
-    - excludes the agent's own connection
-    - excludes superuser sessions
-    - excludes sessions without a login role
-    - capped at _MAX_AUTO_TERMINATE backends
+    Bounded by ``_MAX_AUTO_TERMINATE``. See the module docstring for the full
+    list of safety filters. Per-backend failures are logged and skipped so one
+    un-killable session cannot abort the whole batch.
     """
-    candidates: list[tuple[int, Any]] = []
-
     async with _connection(context) as conn, conn.cursor() as cur:
         try:
-            await cur.execute(
-                """
-                SELECT
-                    activity.pid,
-                    activity.backend_start
-                FROM pg_stat_activity AS activity
-                LEFT JOIN pg_roles AS roles
-                  ON roles.rolname = activity.usename
-                WHERE activity.state IN (
-                          'idle in transaction',
-                          'idle in transaction (aborted)'
-                      )
-                  AND activity.pid <> pg_backend_pid()
-                  AND activity.usename IS NOT NULL
-                  AND COALESCE(roles.rolsuper, TRUE) = FALSE
-                ORDER BY activity.query_start ASC NULLS LAST, activity.pid
-                LIMIT %s
-                """,
-                (_MAX_AUTO_TERMINATE,),
-            )
+            await cur.execute(_IDLE_TX_CANDIDATE_SQL, (_MAX_AUTO_TERMINATE,))
             rows = await cur.fetchall()
         except Exception as exc:
             raise ToolExecutionError("terminate_backend", exc) from exc
 
-        candidates = [(int(row[0]), row[1]) for row in rows]
+        candidates: list[tuple[int, Any]] = [(int(row[0]), row[1]) for row in rows]
+        candidates_found = len(candidates)
 
         if not candidates:
-            logger.info("No idle-in-transaction backends found; nothing to terminate")
+            logger.info("No idle-in-transaction backends found; desired state already reached")
             return TerminateBackendOutput(
                 pid=None,
                 terminated=False,
                 reason=reason,
                 terminated_pids=[],
                 terminated_count=0,
+                candidates_found=0,
+                still_idle_in_transaction=0,
                 success=True,
                 verification_passed=True,
             )
@@ -476,38 +549,41 @@ async def _terminate_idle_in_transaction(
 
         for pid, _backend_start in candidates:
             try:
-                await cur.execute("SELECT pg_terminate_backend(%s, %s)", (pid, 1000))
+                # Single-argument form: works on every PostgreSQL version.
+                await cur.execute("SELECT pg_terminate_backend(%s)", (pid,))
                 result_row = await cur.fetchone()
                 if result_row and bool(result_row[0]):
                     terminated_pids.append(pid)
+                else:
+                    logger.warning(
+                        "pg_terminate_backend(%d) returned false; backend may have already exited",
+                        pid,
+                    )
             except Exception as exc:
                 logger.warning("Failed to terminate backend %d: %s", pid, exc)
 
         # pg_terminate_backend reports intent, not completion.
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(_VERIFY_DELAY_SECONDS)
 
+        still_present: set[int] = set()
         pids = [pid for pid, _ in candidates]
-        await cur.execute(
-            """
-            SELECT pid
-            FROM pg_stat_activity
-            WHERE pid = ANY(%s)
-              AND state IN (
-                  'idle in transaction',
-                  'idle in transaction (aborted)'
-              )
-            """,
-            (pids,),
-        )
-        still_present_rows = await cur.fetchall()
 
-    still_present = {int(row[0]) for row in still_present_rows}
-    verified = len(still_present) == 0
+        try:
+            await cur.execute(_IDLE_TX_STILL_PRESENT_SQL, (pids,))
+            still_present = {int(row[0]) for row in await cur.fetchall()}
+        except Exception as exc:
+            logger.warning(
+                "Post-termination verification query failed: %s",
+                exc,
+            )
+
+    verified = not still_present
 
     logger.info(
-        "Auto-terminate idle-in-tx: candidates=%d terminated=%d verified=%s",
-        len(candidates),
+        "Auto-terminate idle-in-tx: candidates=%d terminated=%d still_present=%d verified=%s",
+        candidates_found,
         len(terminated_pids),
+        len(still_present),
         verified,
     )
 
@@ -517,6 +593,8 @@ async def _terminate_idle_in_transaction(
         reason=reason,
         terminated_pids=terminated_pids,
         terminated_count=len(terminated_pids),
+        candidates_found=candidates_found,
+        still_idle_in_transaction=len(still_present),
         success=True,
         verification_passed=verified,
     )
@@ -528,8 +606,10 @@ async def _terminate_backend(
 ) -> TerminateBackendOutput:
     """Terminate PostgreSQL backend(s) and verify disappearance.
 
-    When ``args.pid`` is None, all idle-in-transaction backends are
-    auto-discovered and terminated (bounded, superuser-safe).
+    When ``args.pid`` is None, all idle-in-transaction client backends are
+    auto-discovered and terminated (bounded, self-protecting). When a PID is
+    supplied, only that backend is targeted and the conservative safety checks
+    apply.
     """
     if args.pid is None:
         return await _terminate_idle_in_transaction(args.reason, context)
@@ -559,6 +639,8 @@ async def _terminate_backend(
                 reason=args.reason,
                 terminated_pids=[],
                 terminated_count=0,
+                candidates_found=0,
+                still_idle_in_transaction=0,
                 success=True,
                 verification_passed=True,
             )
@@ -588,8 +670,8 @@ async def _terminate_backend(
 
         try:
             await cur.execute(
-                "SELECT pg_terminate_backend(%s, %s)",
-                (args.pid, 1000),
+                "SELECT pg_terminate_backend(%s)",
+                (args.pid,),
             )
             result_row = await cur.fetchone()
         except Exception as exc:
@@ -600,8 +682,11 @@ async def _terminate_backend(
 
         termination_requested = bool(result_row[0]) if result_row else False
 
-        await asyncio.sleep(0.5)
+        # pg_terminate_backend reports intent, not completion.
+        await asyncio.sleep(_VERIFY_DELAY_SECONDS)
 
+        # Compare backend_start as well as PID so a reused PostgreSQL PID is
+        # not mistaken for the original backend.
         await cur.execute(
             """
             SELECT 1
@@ -622,12 +707,16 @@ async def _terminate_backend(
             verified,
         )
 
+    terminated_ok = termination_requested and verified
+
     return TerminateBackendOutput(
         pid=args.pid,
-        terminated=termination_requested and verified,
+        terminated=terminated_ok,
         reason=args.reason,
-        terminated_pids=[args.pid] if termination_requested and verified else [],
-        terminated_count=1 if termination_requested and verified else 0,
+        terminated_pids=[args.pid] if terminated_ok else [],
+        terminated_count=1 if terminated_ok else 0,
+        candidates_found=1,
+        still_idle_in_transaction=1 if still_present else 0,
         success=True,
         verification_passed=verified,
     )
@@ -693,8 +782,11 @@ def register(
         Tool(
             name="terminate_backend",
             description=(
-                "Terminate one PostgreSQL backend with pg_terminate_backend; "
-                "refuses superuser, self, and background backends."
+                "Terminate PostgreSQL backend(s) with pg_terminate_backend. "
+                "Pass pid to terminate one specific backend (refuses superuser, "
+                "self, and role-less backends). Omit pid to auto-discover and "
+                "terminate ALL idle-in-transaction client backends — use this "
+                "for connection pool exhaustion."
             ),
             input_model=TerminateBackendInput,
             output_model=TerminateBackendOutput,

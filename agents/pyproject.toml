@@ -1,6 +1,6 @@
 [project]
 name = "autosre-agent"
-version = "0.1.5"
+version = "0.1.6"
 description = "Autonomous SRE Investigation & Remediation Engine"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"

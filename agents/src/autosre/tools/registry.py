@@ -23,10 +23,17 @@
 
 ### Risk Tier Contract
 - 0: Read-only diagnostics (no mutations)
-- 1: Reversible mutations (restart, terminate, delete single resource)
-- 2: Requires human approval (scaling, feature flags)
-- 3: Irreversible mutations (not currently used)
-- 4: Prohibited (delete_namespace, flush_all, drop_table)
+- 1: Reversible mutations (restart_deployment, delete_pod, terminate_backend,
+     delete_valkey_key)
+- 2: Requires human approval (scale_deployment, flush_all)
+- 3: Irreversible but bounded mutations (not currently used)
+- 4: Prohibited — hard-blocked regardless of approval (delete_namespace,
+     drop_table)
+
+Note: ``flush_all`` is Tier 2, NOT Tier 4. It is the only correct remediation
+for a cache eviction storm; the HITL gate in the graph is the safety control.
+The authoritative hard-block list lives in
+``autosre.safety.policy._HARD_BLOCKED_TOOLS``.
 
 ### Thread Safety
 - The registry uses RLock for all mutations and reads

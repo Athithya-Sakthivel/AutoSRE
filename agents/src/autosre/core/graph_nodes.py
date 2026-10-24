@@ -1362,6 +1362,7 @@ Executed actions (DO NOT REPEAT THESE):
 
     tool_name_str: str | None = None
     tool_args: dict[str, Any] = {}
+
     rationale: str = ""
     risk_tier: int = 1
     requires_approval: bool = False
@@ -1379,6 +1380,10 @@ Executed actions (DO NOT REPEAT THESE):
 
         tool_args_raw = parsed.get("tool_args")
         tool_args = dict(tool_args_raw) if isinstance(tool_args_raw, dict) else {}
+        # Strip namespace from non-K8s tools (LLMs sometimes add it by mistake).
+        # Valkey, Postgres, and observability tools don't accept namespace.
+        if tool_name_str not in _TOOLS_WITH_NAMESPACE:
+            tool_args.pop("namespace", None)
 
         rationale = str(parsed.get("rationale", ""))
 
