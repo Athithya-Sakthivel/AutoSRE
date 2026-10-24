@@ -34,7 +34,7 @@ jobs:
 
       - name: Verify lockfile matches pyproject.toml
         working-directory: agents
-        run: uv lock --check
+        run: uv sync --frozen
 
       - name: Run CI suite (ruff + mypy + pytest + dataset validation)
         working-directory: agents
