@@ -82,6 +82,8 @@ if [[ -n "$INCIDENT_ID" && "$MODE" == "ci" ]]; then
     exit 2
 fi
 
+find . -path "*/node_modules" -prune -o -type d -name "__pycache__" -exec rm -rf {} +
+
 # -----------------------------------------------------------------------------
 # Paths and constants
 # -----------------------------------------------------------------------------
@@ -323,7 +325,12 @@ log "Coordinator:    $AUTOSRE_LLM__MODEL_COORDINATOR"
 log "Worker:         $AUTOSRE_LLM__MODEL_WORKER"
 log "Max retries:    $AUTOSRE_LLM__MAX_RETRIES"
 log "Backoff:        ${AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS}s..${AUTOSRE_LLM__MAX_BACKOFF_SECONDS}s"
-log "Auth:           ${AUTOSRE_API_KEY:+enabled}${AUTOSRE_API_KEY:-disabled}"
+if [[ -n "${AUTOSRE_API_KEY:-}" ]]; then
+    log "Auth:           enabled"
+else
+    log "Auth:           disabled"
+fi
+
 if [[ "$MODE" != "run" ]]; then
     log "Judge model:    $AUTOSRE_EVAL__JUDGE_MODEL"
 fi
@@ -331,6 +338,7 @@ fi
 # =============================================================================
 # PHASE 2 -- Infrastructure + port-forwards (NOT in --ci)
 # =============================================================================
+
 if [[ "$MODE" != "ci" ]]; then
     header "PHASE 2: Infrastructure"
 
@@ -338,58 +346,28 @@ if [[ "$MODE" != "ci" ]]; then
     kubectl cluster-info >/dev/null 2>&1 || fail "Kind cluster not reachable" 2
     pass "Kind cluster reachable"
 
-    log "Verifying workloads (waiting up to 300s per component)…"
+    log "Verifying workloads…"
+    for app in api-gateway postgres ingestion-worker; do
+        kubectl get pods -n rivulet -l "app.kubernetes.io/name=$app" --no-headers 2>/dev/null \
+            | grep -q Running || fail "Rivulet workload not running: $app" 2
+    done
+    kubectl get pods -n rivulet -l app=valkey --no-headers 2>/dev/null \
+        | grep -q Running || fail "Rivulet workload not running: valkey" 2
+    kubectl get pods -n openobserve --no-headers 2>/dev/null \
+        | grep -q Running || fail "OpenObserve not running" 2
+    pass "Rivulet + OpenObserve workloads running"
 
-    # Namespace must exist before we can wait on its pods.
-    kubectl get namespace openobserve >/dev/null 2>&1 \
-        || fail "Namespace 'openobserve' missing — deploy OpenObserve before the\nharness" 2
-
-    # Single tolerant loop with extended timeout for slow CI runners.
-    # Diagnostics go to stdout so they're captured in CI logs.
+    log "Waiting for ready pods…"
     while IFS=':' read -r ns _ selector; do
-        log "Waiting for ${ns}/${selector} to be Ready (300s timeout)…"
-
-        if ! kubectl wait --for=condition=Ready pod \
-                -n "$ns" -l "$selector" --timeout=300s >/dev/null 2>&1; then
-
-            echo ""
-            error "Workload not ready: $ns ($selector)"
-            echo ""
-            echo "=== Pod states in namespace ${ns} ==="
-            kubectl get pods -n "$ns" -o wide --no-headers || true
-            echo ""
-
-            echo "=== Pod descriptions (matching ${selector}) ==="
-            kubectl get pods -n "$ns" -l "$selector" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | while read -r pod; do
-                if [[ -n "$pod" ]]; then
-                    echo "--- $pod ---"
-                    kubectl describe pod "$pod" -n "$ns" | grep -A 20 "Conditions:" || true
-                    echo ""
-                    echo "Container statuses:"
-                    kubectl get pod "$pod" -n "$ns" -o jsonpath='{range .status.containerStatuses[*]}{.name}: ready={.ready} state={.state}{"\n"}{end}' || true
-                    echo ""
-                    echo "Last 30 lines of logs:"
-                    kubectl logs "$pod" -n "$ns" --tail=30 || true
-                    echo ""
-                fi
-            done
-
-            echo "=== Recent events in namespace ${ns} ==="
-            kubectl get events -n "$ns" --sort-by='.lastTimestamp' | tail -20 || true
-            echo ""
-
-            fail "Workload not ready: $ns ($selector)" 2
-        fi
-
-        pass "✓ ${ns}/${selector} ready"
+        kubectl wait --for=condition=ready pod \
+            -n "$ns" -l "$selector" --timeout=60s >/dev/null 2>&1 \
+            || fail "Pod not ready: $ns ($selector)" 2
     done <<'PODS'
 rivulet:postgres:app.kubernetes.io/name=postgres
 rivulet:valkey:app=valkey
-rivulet:api-gateway:app.kubernetes.io/name=api-gateway
-rivulet:ingestion-worker:app.kubernetes.io/name=ingestion-worker
 openobserve:openobserve:app.kubernetes.io/name=open-observe-minimal
 PODS
-    pass "All workloads ready"
+    pass "All pods ready"
 
     log "Recycling stale port-forwards…"
     pkill -f "kubectl port-forward.*:15432" 2>/dev/null || true
@@ -417,6 +395,7 @@ PODS
 else
     header "PHASE 2: Infrastructure (skipped -- ci mode)"
 fi
+
 # =============================================================================
 # PHASE 3 -- Static checks (all modes except --run)
 # =============================================================================
@@ -458,6 +437,8 @@ from pathlib import Path
 
 # Try v4 first, fall back to v3
 p = Path("eval/dataset/AutoSRE-Dataset-v4.json")
+if not p.is_file():
+    p = Path("eval/dataset/AutoSRE-Dataset-v3.json")
 if not p.is_file():
     print("FATAL: No dataset file found", file=sys.stderr)
     sys.exit(1)
