@@ -1,105 +1,87 @@
 {
   "incident_id": "INC-001",
-  "completed_at": "2026-10-19T23:44:39Z",
+  "completed_at": "2026-10-24T07:31:48Z",
   "result": {
-    "incident_id": "f0dac206-9684-4ce3-b5ec-cd9facb61ab3",
+    "incident_id": "707e8e67-3d51-4853-a101-a58a77bf6c77",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "DatabaseConnectionPoolExhausted",
     "service": "api-gateway",
     "namespace": "rivulet",
     "severity": "sev1",
-    "started_at": "2026-10-19T23:44:20Z",
+    "started_at": "2026-10-24T07:31:14Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "Database connection pool exhaustion caused by queries stuck in 'idle in transaction' state holding active connections.",
+        "description": "The api-gateway service in the rivulet namespace is experiencing database connection exhaustion due to a high volume of active connections (18 out of a maximum of 20), leading to a pool utilization of 90%.",
         "confidence": 0.2,
         "evidence": [
           "active_connections: 18",
-          "idle_in_transaction: 5",
           "max_connections: 20",
           "pool_utilization_pct: 90",
           "Tool get_connection_stats({}) status=succeeded output={\"stats\": {\"active\": 1, \"idle\": 11, \"idle_in_transaction\": 10, \"max_connections\": 100, \"total_connections\": 22, \"utilisation_pct\": 22.0}}",
-          "Tool get_active_queries({\"min_duration_seconds\": 1, \"exclude_idle\": false}) status=succeeded output={\"queries\": [], \"total_running\": 0}"
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 16274.6, \"name\": \"api-gateway-76976c4568-7cx8s\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 315.6, \"name\": \"api-gateway-76976c4568-hxnxd\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 285.6, \"name\": \"api-gateway-migrate-bfd9w\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Succeeded\"}, {\"age_seconds\": 16236.6, \"name\": \"frontend-557cbdb47c-5dzq5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 16236.6, \"name\": \"frontend-557cbdb47c-z2xpz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 50.6, \"name\": \"ingestion-worker-dfd94ffd4-7lqjn\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 46.6, \"name\": \"ingestion-worker-dfd94ffd4-dd87k\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 16438.6, \"name\": \"postgres-6b4c959c9-47rtr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 16369.6, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 9}"
         ],
-        "status": "proposed"
+        "status": "refuted"
       },
       {
         "id": "H2",
-        "description": "Sudden traffic spike or increased concurrency leading to rapid consumption of available database connections up to the maximum limit.",
+        "description": "Database connection pool exhaustion in the api-gateway service is being prolonged by connections left idle in transaction, consuming 5 of the available connections.",
         "confidence": 0.2,
         "evidence": [
-          "active_connections: 18",
-          "max_connections: 20",
-          "pool_utilization_pct: 90",
-          "Tool get_connection_stats({}) status=succeeded output={\"stats\": {\"active\": 1, \"idle\": 11, \"idle_in_transaction\": 10, \"max_connections\": 100, \"total_connections\": 22, \"utilisation_pct\": 22.0}}",
-          "Tool get_active_queries({\"min_duration_seconds\": 1, \"exclude_idle\": false}) status=succeeded output={\"queries\": [], \"total_running\": 0}"
-        ],
-        "status": "proposed"
-      },
-      {
-        "id": "H3",
-        "description": "Slow database queries preventing connection release and returning to the pool in a timely manner, resulting in high utilization.",
-        "confidence": 0.2,
-        "evidence": [
-          "pool_utilization_pct: 90",
-          "active_connections: 18",
+          "idle_in_transaction: 5",
           "max_connections: 20",
           "Tool get_connection_stats({}) status=succeeded output={\"stats\": {\"active\": 1, \"idle\": 11, \"idle_in_transaction\": 10, \"max_connections\": 100, \"total_connections\": 22, \"utilisation_pct\": 22.0}}",
-          "Tool get_active_queries({\"min_duration_seconds\": 1, \"exclude_idle\": false}) status=succeeded output={\"queries\": [], \"total_running\": 0}"
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 16274.6, \"name\": \"api-gateway-76976c4568-7cx8s\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 315.6, \"name\": \"api-gateway-76976c4568-hxnxd\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 285.6, \"name\": \"api-gateway-migrate-bfd9w\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Succeeded\"}, {\"age_seconds\": 16236.6, \"name\": \"frontend-557cbdb47c-5dzq5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 16236.6, \"name\": \"frontend-557cbdb47c-z2xpz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 50.6, \"name\": \"ingestion-worker-dfd94ffd4-7lqjn\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 46.6, \"name\": \"ingestion-worker-dfd94ffd4-dd87k\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 16438.6, \"name\": \"postgres-6b4c959c9-47rtr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 16369.6, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 9}"
         ],
-        "status": "proposed"
+        "status": "refuted"
       }
     ],
     "proposed_actions": [
       {
-        "tool_name": "restart_deployment",
+        "tool_name": "terminate_backend",
         "tool_args": {
-          "reason": "Connection pool exhaustion; restart to release stuck connections",
-          "name": "api-gateway",
-          "namespace": "rivulet"
+          "reason": "Connection pool exhaustion; terminate idle-in-transaction backends"
         },
         "risk_tier": 1,
-        "rationale": "Fallback action for category 'db_connection_exhaustion' (LLM unavailable or low confidence). Top hypothesis: Database connection pool exhaustion caused by queries stuck in 'idle in transaction' state holding a",
+        "rationale": "Fallback action for category 'db_connection_exhaustion' (LLM unavailable or low confidence). Top hypothesis: The api-gateway service in the rivulet namespace is experiencing database connection exhaustion due ",
         "requires_approval": false
       }
     ],
     "executed_actions": [
       {
-        "tool_name": "restart_deployment",
+        "tool_name": "terminate_backend",
         "tool_args": {
-          "reason": "Connection pool exhaustion; restart to release stuck connections",
-          "name": "api-gateway",
-          "namespace": "rivulet"
+          "reason": "Connection pool exhaustion; terminate idle-in-transaction backends"
         },
-        "tool_call_id": "call_1792453478450",
+        "tool_call_id": "call_1792827106631",
         "result": {
-          "name": "api-gateway",
-          "namespace": "rivulet",
-          "restarted": true,
-          "reason": "Connection pool exhaustion; restart to release stuck connections",
+          "pid": null,
+          "terminated": false,
+          "reason": "Connection pool exhaustion; terminate idle-in-transaction backends",
+          "terminated_pids": [],
+          "terminated_count": 0,
           "success": true,
-          "verification_passed": null
+          "verification_passed": true
         },
         "success": true,
-        "executed_at": "2026-10-19T23:44:38Z",
+        "executed_at": "2026-10-24T07:31:46Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 11704,
-    "prompt_tokens": 9737,
-    "completion_tokens": 1967,
-    "cost_usd": 0.0068679,
-    "estimated_paid_cost_usd": 0.008854899999999999,
+    "tokens_used": 13668,
+    "prompt_tokens": 10944,
+    "completion_tokens": 2724,
+    "cost_usd": 0.0087005,
+    "estimated_paid_cost_usd": 0.0115495,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
         "calls": 6,
-        "tokens": 11919
+        "tokens": 14001
       }
     },
-    "wall_clock_seconds": 18.3,
-    "active_seconds": 18.3,
+    "wall_clock_seconds": 31.901,
+    "active_seconds": 31.901,
     "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
     "iterations": 2,

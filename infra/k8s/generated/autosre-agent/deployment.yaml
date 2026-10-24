@@ -55,7 +55,7 @@ spec:
             limits:   { cpu: 100m, memory: 32Mi }
       containers:
         - name: autosre-agent
-          image: ghcr.io/athithya-sakthivel/autosre-agent:2026-10-23-19-23-27--b3d3766
+          image: ghcr.io/athithya-sakthivel/autosre-agent:2026-10-24-05-07-44--5065402
           imagePullPolicy: IfNotPresent
           env:
             # ================================================================

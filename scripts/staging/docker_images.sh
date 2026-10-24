@@ -203,9 +203,9 @@ TAG="${BUILD_TIMESTAMP}--${GIT_SHA}"
 
 IMAGES=(
     "agents|autosre-agent|GIT_VERSION=${GIT_SHA},BUILD_ENV=production"
-    "rivulet/api-gateway|rivulet-api-gateway|"
-    "rivulet/ingestion-worker|rivulet-ingestion-worker|"
-    "rivulet/frontend|rivulet-frontend|VITE_GIT_VERSION=${GIT_SHA},VITE_ENVIRONMENT=evaluation,VITE_OTEL_ENDPOINT=http://otel-gateway.openobserve.svc:4318/v1/traces"
+#    "rivulet/api-gateway|rivulet-api-gateway|"
+#    "rivulet/ingestion-worker|rivulet-ingestion-worker|"
+#    "rivulet/frontend|rivulet-frontend|VITE_GIT_VERSION=${GIT_SHA},VITE_ENVIRONMENT=evaluation,VITE_OTEL_ENDPOINT=http://otel-gateway.openobserve.svc:4318/v1/traces"
 )
 
 # -----------------------------------------------------------------------------
