@@ -11,8 +11,8 @@ const BACKEND_TARGET = "http://localhost:8000";
  * Build auth headers for the dev proxy from the process environment.
  *
  * When AUTOSRE_API_KEY is set, the Vite dev server injects X-API-Key into
- * every proxied request to the backend. This keeps the secret server-side
- * only — it never reaches the browser bundle.
+ * every proxied request to a protected backend route. The secret stays
+ * server-side only — it is never exposed to the browser bundle.
  *
  * In production, the API key is injected into the HTML by the backend's
  * render_index_with_key() helper and read by src/lib/api.ts at runtime.
@@ -30,12 +30,14 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       // Simple prefix proxies — no client route conflicts.
-      // Auth headers injected for protected routes.
+      // /api/sign-approval is protected, so auth is injected.
       "/api": {
         target: BACKEND_TARGET,
         changeOrigin: true,
         headers: authHeaders(),
       },
+
+      // Health checks are public — no auth header.
       "/healthz": { target: BACKEND_TARGET, changeOrigin: true },
       "/readyz": { target: BACKEND_TARGET, changeOrigin: true },
 

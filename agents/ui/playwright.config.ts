@@ -18,9 +18,13 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
-    // Pass AUTOSRE_API_KEY to the Playwright request context so that
-    // direct fetch() calls and request.get() in tests can authenticate
-    // against the backend when the middleware is enabled.
+    // Propagate AUTOSRE_API_KEY to the Playwright request context so that
+    // direct APIRequestContext calls (request.get in diagnose-ui.spec.ts
+    // and tests) authenticate against the backend when the middleware is on.
+    //
+    // Note: browser-side XHRs go through the Vite proxy which injects the
+    // header server-side; the header on the browser is harmless and gets
+    // replaced by the proxy.
     extraHTTPHeaders: process.env.AUTOSRE_API_KEY
       ? { "X-API-Key": process.env.AUTOSRE_API_KEY }
       : {},

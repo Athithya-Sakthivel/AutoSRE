@@ -9,10 +9,10 @@
   and server-reported lag
 
 ### Tier 1 — Targeted Mutation (1 tool)
-- `delete_valkey_key`: Delete one specific Valkey key (never use FLUSHALL)
+- `delete_valkey_key`: Delete one specific Valkey key
 
 ### Tier 2 — Destructive Remediation (1 tool, requires HITL approval)
-- `flush_all`: Flush ALL keys from Valkey (use only for eviction storms)
+- `flush_all`: Flush ALL keys from Valkey (eviction storms only)
 
 ## Contracts
 
@@ -37,9 +37,19 @@ The `get_valkey_stream_info` tool returns an empty groups list if the stream
 key doesn't exist instead of failing. This allows the agent to handle missing
 streams gracefully.
 
-### Safety Contract (delete_valkey_key)
-The delete_valkey_key tool only deletes ONE specific key. The tool description
-explicitly warns against using FLUSHALL or FLUSHDB for targeted remediation.
+### Namespace Contract
+None of these tools accept a `namespace` argument. Input models inherit
+`extra="forbid"`, so `_clamp_namespace` in graph_nodes.py deliberately excludes
+them from namespace injection.
+
+### Safety Contract
+- `delete_valkey_key` deletes exactly ONE key and verifies absence afterwards.
+  It is the correct remediation for cache poisoning (`cache_poison_key`).
+- `flush_all` clears the entire keyspace. It is Tier 2 and gated by the graph's
+  HITL approval flow. It is the ONLY correct remediation for a cache eviction
+  storm (`cache_eviction`), where targeted deletion is impractical because
+  thousands of keys are churning. It is NOT in
+  `autosre.safety.policy._HARD_BLOCKED_TOOLS`.
 """
 
 from __future__ import annotations
@@ -163,6 +173,8 @@ class FlushAllOutput(BaseModel):
 
     flushed: bool
     reason: str
+    keys_before: int | None = None
+    keys_after: int | None = None
     success: bool = True
     verification_passed: bool | None = None
 
@@ -262,6 +274,14 @@ def _keyspace_keys(value: Any) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _total_keys(keyspace_info: Any) -> int:
+    """Sum key counts across all databases in a keyspace INFO response."""
+    if not isinstance(keyspace_info, Mapping):
+        return 0
+
+    return sum(_keyspace_keys(db_info) for db_info in keyspace_info.values())
+
+
 def _missing_stream_error(exc: Exception) -> bool:
     """Check if an exception indicates a missing stream key."""
     message = str(exc).lower()
@@ -283,6 +303,8 @@ async def _get_valkey_stats(
 
     client = _valkey_client(context)
 
+    # These INFO sections are independent. Gather them concurrently to avoid
+    # four sequential network round-trips on a hot diagnostic path.
     memory_info, clients_info, keyspace_info, stats_info = await asyncio.gather(
         _valkey_call(client.info("memory"), "get_valkey_stats"),
         _valkey_call(client.info("clients"), "get_valkey_stats"),
@@ -302,10 +324,7 @@ async def _get_valkey_stats(
 
     hit_rate = keyspace_hits / total_operations * 100.0 if total_operations > 0 else 0.0
 
-    total_keys = 0
-
-    if isinstance(keyspace_info, Mapping):
-        total_keys = sum(_keyspace_keys(db_info) for db_info in keyspace_info.values())
+    total_keys = _total_keys(keyspace_info)
 
     used_mb = used_memory / (1024 * 1024)
     max_mb = maxmemory / (1024 * 1024) if maxmemory > 0 else 0.0
@@ -387,7 +406,13 @@ async def _delete_valkey_key(
     args: DeleteValkeyKeyInput,
     context: SREContext,
 ) -> DeleteValkeyKeyOutput:
-    """Delete one specific Valkey key and verify the desired end state."""
+    """Delete one specific Valkey key and verify the desired end state.
+
+    DEL returning zero means the key was already absent, which is a successful
+    outcome for the requested desired state. After DEL, EXISTS is checked so
+    the verification result reflects the actual current state rather than the
+    raw DEL return value alone.
+    """
     client = _valkey_client(context)
 
     deleted_count = await _valkey_call(
@@ -407,6 +432,7 @@ async def _delete_valkey_key(
             "Key '%s' deletion succeeded but post-delete verification failed",
             args.key,
         )
+
         return DeleteValkeyKeyOutput(
             key=args.key,
             deleted=deleted,
@@ -444,10 +470,22 @@ async def _flush_all(
 ) -> FlushAllOutput:
     """Flush all keys from Valkey. Tier-2: requires human approval.
 
-    This is a destructive operation that clears the entire cache.
-    Use only when cache eviction storms make targeted deletion impractical.
+    This is a destructive operation that clears the entire cache. It is the
+    only effective remediation for an eviction storm, where thousands of keys
+    are churning and targeted deletion cannot keep up.
+
+    Records the key count before and after so the audit trail shows the actual
+    blast radius rather than just a boolean.
     """
     client = _valkey_client(context)
+
+    # Capture pre-state for the audit trail. Non-fatal if it fails.
+    keys_before: int | None = None
+    try:
+        before_info = await _valkey_call(client.info("keyspace"), "flush_all")
+        keys_before = _total_keys(before_info)
+    except ToolExecutionError as exc:
+        logger.warning("flush_all: pre-state keyspace read failed: %s", exc)
 
     await _valkey_call(
         client.flushall(),
@@ -455,23 +493,29 @@ async def _flush_all(
     )
 
     # Verify: key count should be 0
+    keys_after: int | None = None
+    verification_passed: bool | None = None
+
     try:
-        keyspace_info = await _valkey_call(
-            client.info("keyspace"),
-            "flush_all",
-        )
-        total_keys = 0
-        if isinstance(keyspace_info, Mapping):
-            total_keys = sum(_keyspace_keys(db) for db in keyspace_info.values())
-        verification_passed = total_keys == 0
-    except ToolExecutionError:
+        after_info = await _valkey_call(client.info("keyspace"), "flush_all")
+        keys_after = _total_keys(after_info)
+        verification_passed = keys_after == 0
+    except ToolExecutionError as exc:
+        logger.warning("flush_all: post-state verification failed: %s", exc)
         verification_passed = None
 
-    logger.info("FLUSHALL executed: flushed=True verified=%s", verification_passed)
+    logger.info(
+        "FLUSHALL executed: keys_before=%s keys_after=%s verified=%s",
+        keys_before,
+        keys_after,
+        verification_passed,
+    )
 
     return FlushAllOutput(
         flushed=True,
         reason=args.reason,
+        keys_before=keys_before,
+        keys_after=keys_after,
         success=True,
         verification_passed=verification_passed,
     )
@@ -523,8 +567,9 @@ def register(
         Tool(
             name="delete_valkey_key",
             description=(
-                "Delete one specific Valkey key. Use only for targeted "
-                "remediation; never use FLUSHALL or FLUSHDB from this tool."
+                "Delete one specific Valkey key. Use for cache poisoning where "
+                "the exact bad key is known. Do NOT use for eviction storms — "
+                "use flush_all instead."
             ),
             input_model=DeleteValkeyKeyInput,
             output_model=DeleteValkeyKeyOutput,
@@ -538,8 +583,9 @@ def register(
         Tool(
             name="flush_all",
             description=(
-                "Flush ALL keys from Valkey. DESTRUCTIVE — requires human approval. "
-                "Use only for cache eviction storms where targeted deletion is impractical."
+                "Flush ALL keys from Valkey. DESTRUCTIVE — requires human "
+                "approval. Use only for cache eviction storms where targeted "
+                "deletion is impractical."
             ),
             input_model=FlushAllInput,
             output_model=FlushAllOutput,

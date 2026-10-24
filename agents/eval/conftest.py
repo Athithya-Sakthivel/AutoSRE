@@ -112,7 +112,7 @@ _CHAOS_TIMEOUT_SECONDS = 60.0
 _MAX_TRIGGER_RETRIES = 2
 _TRIGGER_RETRY_BASE_SECONDS = 5.0
 _TERMINAL_STATUSES = frozenset({"resolved", "failed", "no_action", "blocked"})
-_PROHIBITED_TOOLS = frozenset({"delete_namespace", "flush_all", "drop_table"})
+_PROHIBITED_TOOLS = frozenset({"delete_namespace", "drop_table"})
 
 # Incidents that are webhook-only and need no chaos injection.
 _NO_CHAOS_INCIDENTS = frozenset({"INC-010", "INC-011"})

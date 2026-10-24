@@ -1,39 +1,37 @@
 {
   "incident_id": "INC-009",
-  "completed_at": "2026-10-20T00:24:04Z",
+  "completed_at": "2026-10-24T09:49:29Z",
   "result": {
-    "incident_id": "d3050541-8e1b-4273-9185-d7384b73a38a",
+    "incident_id": "3695d7ec-f37b-4ce3-8ff4-3acba643f5e0",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "PodOOMKilled",
     "service": "ingestion-worker",
     "namespace": "rivulet",
     "severity": "sev2",
-    "started_at": "2026-10-20T00:23:55Z",
+    "started_at": "2026-10-24T09:49:10Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "The ingestion-worker container in namespace rivulet experienced a memory leak or higher than expected load, causing it to exceed the 256 MB memory limit and get OOM killed.",
-        "confidence": 0.95,
+        "description": "The ingestion-worker container in namespace rivulet exceeded its configured memory limit of 256 MB, reaching a peak of 261 MB, leading to an OOM kill.",
+        "confidence": 0.5,
         "evidence": [
-          "Alert: PodOOMKilled",
           "memory_limit_mb: 256",
           "peak_memory_mb: 261",
           "oom_kill_count: 1",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 1380.96, \"name\": \"api-gateway-5f5c796547-2n5rl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1349.96, \"name\": \"api-gateway-5f5c796547-kpsbf\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 171282.96, \"name\": \"frontend-557cbdb47c-clxd5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 171282.96, \"name\": \"frontend-557cbdb47c-zv58z\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 115.96, \"name\": \"ingestion-worker-7b5655c9c5-w2wgk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 15.96, \"name\": \"ingestion-worker-9c894f69c-jzb66\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 18.96, \"name\": \"ingestion-worker-9c894f69c-xvkgs\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 171500.96, \"name\": \"postgres-6b4c959c9-mzkwg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 171408.96, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}], \"total\": 9}"
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 434.84, \"name\": \"api-gateway-76976c4568-2dhcm\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2648.84, \"name\": \"api-gateway-76976c4568-6v4vj\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 494.84, \"name\": \"api-gateway-76976c4568-77k4d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 374.84, \"name\": \"api-gateway-76976c4568-96wk9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 434.84, \"name\": \"api-gateway-76976c4568-tktvs\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2648.84, \"name\": \"api-gateway-76976c4568-wgh82\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 24497.84, \"name\": \"frontend-557cbdb47c-5dzq5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 24497.84, \"name\": \"frontend-557cbdb47c-z2xpz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 514.84, \"name\": \"ingestion-worker-6645d79cbc-drl24\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 518.84, \"name\": \"ingestion-worker-6645d79cbc-mp4zw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 24699.84, \"name\": \"postgres-6b4c959c9-47rtr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 24630.84, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 12}"
         ],
-        "status": "confirmed"
+        "status": "proposed"
       },
       {
         "id": "H2",
-        "description": "The memory limit of 256 MB set for the ingestion-worker container is undersized for normal peak operating workloads, leading to repeated OOM kills across restarts.",
-        "confidence": 0.6,
+        "description": "An increase in workload or batch size processed by the ingestion-worker caused a memory spike that breached the static container limit.",
+        "confidence": 0.3,
         "evidence": [
-          "Alert: PodOOMKilled",
           "memory_limit_mb: 256",
           "peak_memory_mb: 261",
           "restart_count: 3",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 1380.96, \"name\": \"api-gateway-5f5c796547-2n5rl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1349.96, \"name\": \"api-gateway-5f5c796547-kpsbf\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 171282.96, \"name\": \"frontend-557cbdb47c-clxd5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 171282.96, \"name\": \"frontend-557cbdb47c-zv58z\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 115.96, \"name\": \"ingestion-worker-7b5655c9c5-w2wgk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 15.96, \"name\": \"ingestion-worker-9c894f69c-jzb66\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 18.96, \"name\": \"ingestion-worker-9c894f69c-xvkgs\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 171500.96, \"name\": \"postgres-6b4c959c9-mzkwg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 171408.96, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}], \"total\": 9}"
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 434.84, \"name\": \"api-gateway-76976c4568-2dhcm\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2648.84, \"name\": \"api-gateway-76976c4568-6v4vj\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 494.84, \"name\": \"api-gateway-76976c4568-77k4d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 374.84, \"name\": \"api-gateway-76976c4568-96wk9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 434.84, \"name\": \"api-gateway-76976c4568-tktvs\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2648.84, \"name\": \"api-gateway-76976c4568-wgh82\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 24497.84, \"name\": \"frontend-557cbdb47c-5dzq5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 24497.84, \"name\": \"frontend-557cbdb47c-z2xpz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 514.84, \"name\": \"ingestion-worker-6645d79cbc-drl24\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 518.84, \"name\": \"ingestion-worker-6645d79cbc-mp4zw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 24699.84, \"name\": \"postgres-6b4c959c9-47rtr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 24630.84, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 12}"
         ],
         "status": "proposed"
       }
@@ -42,12 +40,12 @@
       {
         "tool_name": "restart_deployment",
         "tool_args": {
-          "namespace": "rivulet",
+          "reason": "Container OOMKilled; restart to recover and flag for limit review",
           "name": "ingestion-worker",
-          "reason": "Restarting the ingestion-worker deployment to ensure a clean state and clear any lingering memory pressure following the recent OOMKill event."
+          "namespace": "rivulet"
         },
         "risk_tier": 1,
-        "rationale": "The ingestion-worker pod experienced an OOMKilled event due to exceeding its 256 MB memory limit. While new pods are running, performing a rolling restart of the deployment ensures all replicas are cleanly initialized and running under fresh memory conditions.",
+        "rationale": "Fallback action for category 'pod_oom' (LLM unavailable or low confidence). Top hypothesis: The ingestion-worker container in namespace rivulet exceeded its configured memory limit of 256 MB, ",
         "requires_approval": false
       }
     ],
@@ -55,37 +53,37 @@
       {
         "tool_name": "restart_deployment",
         "tool_args": {
-          "namespace": "rivulet",
+          "reason": "Container OOMKilled; restart to recover and flag for limit review",
           "name": "ingestion-worker",
-          "reason": "Restarting the ingestion-worker deployment to ensure a clean state and clear any lingering memory pressure following the recent OOMKill event."
+          "namespace": "rivulet"
         },
-        "tool_call_id": "call_1792455842565",
+        "tool_call_id": "call_1792835366031",
         "result": {
           "name": "ingestion-worker",
           "namespace": "rivulet",
           "restarted": true,
-          "reason": "Restarting the ingestion-worker deployment to ensure a clean state and clear any lingering memory pressure following the recent OOMKill event.",
+          "reason": "Container OOMKilled; restart to recover and flag for limit review",
           "success": true,
           "verification_passed": null
         },
         "success": true,
-        "executed_at": "2026-10-20T00:24:02Z",
+        "executed_at": "2026-10-24T09:49:26Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 9474,
-    "prompt_tokens": 7401,
-    "completion_tokens": 2073,
-    "cost_usd": 0.0074028,
-    "estimated_paid_cost_usd": 0.0074028,
+    "tokens_used": 10307,
+    "prompt_tokens": 7829,
+    "completion_tokens": 2478,
+    "cost_usd": 0.0070896000000000015,
+    "estimated_paid_cost_usd": 0.010064600000000002,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
         "calls": 4,
-        "tokens": 9474
+        "tokens": 10737
       }
     },
-    "wall_clock_seconds": 7.44,
-    "active_seconds": 7.44,
+    "wall_clock_seconds": 15.91,
+    "active_seconds": 15.91,
     "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
     "iterations": 1,

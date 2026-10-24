@@ -1,34 +1,29 @@
 {
   "incident_id": "INC-005",
-  "completed_at": "2026-10-20T00:07:47Z",
+  "completed_at": "2026-10-24T09:28:18Z",
   "result": {
-    "incident_id": "cedb7de8-ac58-4cf5-81cb-51566a5cc135",
+    "incident_id": "01ec3c63-2f0c-4854-a9df-9ba15fd1d5c8",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "ConsumerLagSpike",
     "service": "ingestion-worker",
     "namespace": "rivulet",
     "severity": "sev2",
-    "started_at": "2026-10-20T00:07:28Z",
+    "started_at": "2026-10-24T09:28:05Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "The ingestion-worker service experienced a sudden increase in consumer lag due to a temporary spike in incoming message volume on the rivulet.orders.in stream.",
-        "confidence": 0.2,
-        "evidence": [
-          "Tool get_valkey_stream_info({\"stream_key\": \"rivulet.orders.in\"}) status=succeeded output={\"groups\": [], \"stream_key\": \"rivulet.orders.in\", \"stream_length\": 500}",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 403.2, \"name\": \"api-gateway-5f5c796547-2n5rl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 372.2, \"name\": \"api-gateway-5f5c796547-kpsbf\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 170305.2, \"name\": \"frontend-557cbdb47c-clxd5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 170305.2, \"name\": \"frontend-557cbdb47c-zv58z\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 58.2, \"name\": \"ingestion-worker-67548bb477-ps7q9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 54.2, \"name\": \"ingestion-worker-67548bb477-v2zg4\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 170523.2, \"name\": \"postgres-6b4c959c9-mzkwg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 170431.2, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}], \"total\": 8}"
-        ],
-        "status": "proposed"
+        "confidence": 0.1,
+        "status": "refuted"
       },
       {
         "id": "H2",
-        "description": "Processing latency increased in the ingestion-worker consumer group for rivulet.orders.in, leading to 500 pending messages and a 120-second lag.",
+        "confidence": 0.1,
+        "status": "refuted"
+      },
+      {
+        "id": "H3",
         "confidence": 0.2,
-        "evidence": [
-          "Tool get_valkey_stream_info({\"stream_key\": \"rivulet.orders.in\"}) status=succeeded output={\"groups\": [], \"stream_key\": \"rivulet.orders.in\", \"stream_length\": 500}",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 403.2, \"name\": \"api-gateway-5f5c796547-2n5rl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 372.2, \"name\": \"api-gateway-5f5c796547-kpsbf\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 170305.2, \"name\": \"frontend-557cbdb47c-clxd5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 170305.2, \"name\": \"frontend-557cbdb47c-zv58z\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 58.2, \"name\": \"ingestion-worker-67548bb477-ps7q9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 54.2, \"name\": \"ingestion-worker-67548bb477-v2zg4\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 170523.2, \"name\": \"postgres-6b4c959c9-mzkwg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 170431.2, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}], \"total\": 8}"
-        ],
         "status": "proposed"
       }
     ],
@@ -41,7 +36,7 @@
           "namespace": "rivulet"
         },
         "risk_tier": 1,
-        "rationale": "Fallback action for category 'consumer_lag' (LLM unavailable or low confidence). Top hypothesis: The ingestion-worker service experienced a sudden increase in consumer lag due to a temporary spike ",
+        "rationale": "Fallback action for category 'consumer_lag' (LLM unavailable or low confidence). Top hypothesis: ",
         "requires_approval": false
       }
     ],
@@ -53,7 +48,7 @@
           "name": "ingestion-worker",
           "namespace": "rivulet"
         },
-        "tool_call_id": "call_1792454864925",
+        "tool_call_id": "call_1792834095470",
         "result": {
           "name": "ingestion-worker",
           "namespace": "rivulet",
@@ -63,23 +58,23 @@
           "verification_passed": null
         },
         "success": true,
-        "executed_at": "2026-10-20T00:07:44Z",
+        "executed_at": "2026-10-24T09:28:15Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 12291,
-    "prompt_tokens": 10000,
-    "completion_tokens": 2291,
-    "cost_usd": 0.007594200000000001,
-    "estimated_paid_cost_usd": 0.009912200000000001,
+    "tokens_used": 12387,
+    "prompt_tokens": 11171,
+    "completion_tokens": 1216,
+    "cost_usd": 0.0052632,
+    "estimated_paid_cost_usd": 0.0075712,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
         "calls": 6,
-        "tokens": 12649
+        "tokens": 12525
       }
     },
-    "wall_clock_seconds": 16.053,
-    "active_seconds": 16.053,
+    "wall_clock_seconds": 9.574,
+    "active_seconds": 9.574,
     "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
     "iterations": 2,

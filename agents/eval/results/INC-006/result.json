@@ -1,36 +1,39 @@
 {
   "incident_id": "INC-006",
-  "completed_at": "2026-10-20T00:11:28Z",
+  "completed_at": "2026-10-24T09:31:40Z",
   "result": {
-    "incident_id": "60e9007c-8f92-4f7e-8561-77f2634486f4",
+    "incident_id": "e0022751-6340-48e4-9d41-49071ba789bf",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "StalePodStuckTerminating",
     "service": "ingestion-worker",
     "namespace": "rivulet",
     "severity": "sev3",
-    "started_at": "2026-10-20T00:11:18Z",
+    "started_at": "2026-10-24T09:31:30Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "The ingestion-worker pods in namespace rivulet are stuck in Terminating state due to an unresolved custom finalizer 'autosre.io/test-finalizer' blocking resource deletion.",
+        "description": "The ingestion-worker pod in namespace rivulet is stuck in Terminating status because the custom finalizer 'autosre.io/test-finalizer' is failing to complete or be removed.",
         "confidence": 0.5,
         "evidence": [
           "Alert: StalePodStuckTerminating",
-          "Service: ingestion-worker in namespace rivulet",
-          "Annotations: finalizer=autosre.io/test-finalizer, pod_status=Terminating, stuck_duration_seconds=300",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 626.54, \"name\": \"api-gateway-5f5c796547-2n5rl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 595.54, \"name\": \"api-gateway-5f5c796547-kpsbf\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 170528.54, \"name\": \"frontend-557cbdb47c-clxd5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 170528.54, \"name\": \"frontend-557cbdb47c-zv58z\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 15.54, \"name\": \"ingestion-worker-69cc7ff54-9km6w\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 31.54, \"name\": \"ingestion-worker-69cc7ff54-hblgl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 27.54, \"name\": \"ingestion-worker-69cc7ff54-kmm8v\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 170746.54, \"name\": \"postgres-6b4c959c9-mzkwg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 170654.54, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}], \"total\": 9}"
+          "Namespace: rivulet",
+          "Service: ingestion-worker",
+          "Annotation finalizer: autosre.io/test-finalizer",
+          "Annotation pod_status: Terminating",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 17.44, \"name\": \"api-gateway-76976c4568-6sf9x\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1585.44, \"name\": \"api-gateway-76976c4568-6v4vj\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1585.44, \"name\": \"api-gateway-76976c4568-wgh82\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 23434.44, \"name\": \"frontend-557cbdb47c-5dzq5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 23434.44, \"name\": \"frontend-557cbdb47c-z2xpz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 31.44, \"name\": \"ingestion-worker-6dbd96bfd4-4wc78\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 14.44, \"name\": \"ingestion-worker-6dbd96bfd4-plqpb\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 28.44, \"name\": \"ingestion-worker-6dbd96bfd4-pptcm\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 23636.44, \"name\": \"postgres-6b4c959c9-47rtr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 23567.44, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 10}"
         ],
         "status": "proposed"
       },
       {
         "id": "H2",
-        "description": "An external controller or automation associated with 'autosre.io/test-finalizer' has failed or is unresponsive, preventing Kubernetes garbage collection from completing the termination of the ingestion-worker pods.",
+        "description": "External cleanup operations or controllers responsible for releasing the 'autosre.io/test-finalizer' on the ingestion-worker pod are unresponsive or failing, preventing Kubernetes garbage collection.",
         "confidence": 0.4,
         "evidence": [
           "Alert: StalePodStuckTerminating",
-          "Annotations: finalizer=autosre.io/test-finalizer, stuck_duration_seconds=300",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 626.54, \"name\": \"api-gateway-5f5c796547-2n5rl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 595.54, \"name\": \"api-gateway-5f5c796547-kpsbf\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 170528.54, \"name\": \"frontend-557cbdb47c-clxd5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 170528.54, \"name\": \"frontend-557cbdb47c-zv58z\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 15.54, \"name\": \"ingestion-worker-69cc7ff54-9km6w\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 31.54, \"name\": \"ingestion-worker-69cc7ff54-hblgl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 27.54, \"name\": \"ingestion-worker-69cc7ff54-kmm8v\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 170746.54, \"name\": \"postgres-6b4c959c9-mzkwg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}, {\"age_seconds\": 170654.54, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 5, \"status\": \"Running\"}], \"total\": 9}"
+          "Annotation finalizer: autosre.io/test-finalizer",
+          "Annotation stuck_duration_seconds: 300",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 17.44, \"name\": \"api-gateway-76976c4568-6sf9x\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1585.44, \"name\": \"api-gateway-76976c4568-6v4vj\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1585.44, \"name\": \"api-gateway-76976c4568-wgh82\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 23434.44, \"name\": \"frontend-557cbdb47c-5dzq5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 23434.44, \"name\": \"frontend-557cbdb47c-z2xpz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 31.44, \"name\": \"ingestion-worker-6dbd96bfd4-4wc78\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 14.44, \"name\": \"ingestion-worker-6dbd96bfd4-plqpb\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 28.44, \"name\": \"ingestion-worker-6dbd96bfd4-pptcm\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 23636.44, \"name\": \"postgres-6b4c959c9-47rtr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 23567.44, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 10}"
         ],
         "status": "proposed"
       }
@@ -44,7 +47,7 @@
           "namespace": "rivulet"
         },
         "risk_tier": 1,
-        "rationale": "Fallback action for category 'stale_pod' (LLM unavailable or low confidence). Top hypothesis: The ingestion-worker pods in namespace rivulet are stuck in Terminating state due to an unresolved c",
+        "rationale": "Fallback action for category 'stale_pod' (LLM unavailable or low confidence). Top hypothesis: The ingestion-worker pod in namespace rivulet is stuck in Terminating status because the custom fina",
         "requires_approval": false
       }
     ],
@@ -56,7 +59,7 @@
           "name": "ingestion-worker",
           "namespace": "rivulet"
         },
-        "tool_call_id": "call_1792455087757",
+        "tool_call_id": "call_1792834299523",
         "result": {
           "name": "ingestion-worker",
           "namespace": "rivulet",
@@ -66,23 +69,23 @@
           "verification_passed": null
         },
         "success": true,
-        "executed_at": "2026-10-20T00:11:27Z",
+        "executed_at": "2026-10-24T09:31:39Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 8995,
-    "prompt_tokens": 6950,
-    "completion_tokens": 2045,
-    "cost_usd": 0.006035800000000001,
-    "estimated_paid_cost_usd": 0.008412800000000002,
+    "tokens_used": 9911,
+    "prompt_tokens": 7574,
+    "completion_tokens": 2337,
+    "cost_usd": 0.006687800000000001,
+    "estimated_paid_cost_usd": 0.0096078,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
         "calls": 4,
-        "tokens": 9374
+        "tokens": 10283
       }
     },
-    "wall_clock_seconds": 8.902,
-    "active_seconds": 8.902,
+    "wall_clock_seconds": 8.95,
+    "active_seconds": 8.95,
     "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
     "iterations": 1,

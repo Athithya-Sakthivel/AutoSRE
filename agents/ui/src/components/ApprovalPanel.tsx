@@ -2,12 +2,6 @@ import { useState } from "react";
 import type { JSX } from "react";
 import type { Incident } from "../lib/types";
 import { useApproveIncident } from "../hooks/useApproval";
-import { Toast } from "./Toast";
-
-interface ToastState {
-  type: "success" | "error";
-  message: string;
-}
 
 export function ApprovalPanel({
   incident,
@@ -16,9 +10,10 @@ export function ApprovalPanel({
 }): JSX.Element | null {
   const [comment, setComment] = useState("");
   const [showComment, setShowComment] = useState(false);
-  const [toast, setToast] = useState<ToastState | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
   const mutation = useApproveIncident();
 
+  // Only show panel when awaiting approval
   if (incident.status !== "awaiting_approval") {
     return null;
   }
@@ -32,11 +27,9 @@ export function ApprovalPanel({
 
   const isPending = mutation.isPending;
 
-  const dismissToast = (): void => {
-    setToast(null);
-  };
-
   const handleAction = async (approved: boolean): Promise<void> => {
+    setLocalError(null);
+
     const approvalComment =
       comment.trim() || (approved ? "" : "Rejected by operator");
 
@@ -49,15 +42,14 @@ export function ApprovalPanel({
         },
       });
 
-      setToast({
-        type: "success",
-        message: approved
-          ? "Action approved — agent is executing"
-          : "Action rejected",
-      });
+      // Force reload after short delay to ensure backend state is updated
+      setTimeout(() => {
+        window.location.reload();
+      }, 2000);
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      setToast({ type: "error", message: `Failed: ${errorMsg}` });
+      console.error("[ApprovalPanel] Approval failed:", errorMsg, error);
+      setLocalError(errorMsg);
     }
   };
 
@@ -75,16 +67,6 @@ export function ApprovalPanel({
           Tier {latestProposal.risk_tier}
         </span>
       </div>
-
-      {/* Toast notification */}
-      {toast && (
-        <Toast
-          type={toast.type}
-          message={toast.message}
-          durationMs={toast.type === "success" ? 3000 : 5000}
-          onDismiss={dismissToast}
-        />
-      )}
 
       <div className="mt-3 rounded-md bg-surface-1 p-3">
         <div className="font-mono text-xs font-semibold text-white">
@@ -126,7 +108,7 @@ export function ApprovalPanel({
       <div className="mt-4 flex gap-2">
         <button
           type="button"
-          onClick={() => void handleAction(true)}
+          onClick={() => handleAction(true)}
           disabled={isPending}
           className="flex-1 rounded-md bg-status-resolved px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-status-resolved/80 disabled:cursor-not-allowed disabled:opacity-50"
         >
@@ -135,13 +117,23 @@ export function ApprovalPanel({
 
         <button
           type="button"
-          onClick={() => void handleAction(false)}
+          onClick={() => handleAction(false)}
           disabled={isPending}
           className="flex-1 rounded-md border border-status-failed/40 bg-status-failed/10 px-4 py-2.5 text-sm font-semibold text-status-failed transition-colors hover:bg-status-failed/20 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isPending ? "Rejecting..." : "✗ Reject"}
         </button>
       </div>
+
+      {(localError || mutation.isError) && (
+        <div className="mt-3 rounded-md bg-status-failed/10 p-2.5 text-xs text-status-failed">
+          <span className="font-medium">Approval failed: </span>
+          {localError ||
+            (mutation.error instanceof Error
+              ? mutation.error.message
+              : "Unknown error. Please try again.")}
+        </div>
+      )}
     </div>
   );
 }

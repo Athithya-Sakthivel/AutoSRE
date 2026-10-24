@@ -5,9 +5,16 @@
  *   LineChart          - time-series line with area fill
  *   BarChart           - time-series vertical bars
  *   HorizontalBarChart - category breakdown horizontal bars
+ *
+ * All x-axis timestamps are rendered in Asia/Kolkata (IST) via the shared
+ * parseServerTime helper, matching the rest of the UI. The naive-UTC
+ * assumption is centralised there so a future backend fix only needs to
+ * change one place.
  */
 
 import type { ReactElement, ReactNode } from "react";
+
+import { DISPLAY_TIMEZONE, parseServerTime } from "../lib/utils";
 
 interface ChartMargins {
   top: number;
@@ -46,7 +53,6 @@ function normalizeChartHeight(height: number): number {
   if (!Number.isFinite(height)) {
     return DEFAULT_HEIGHT;
   }
-
   return Math.max(120, Math.trunc(height));
 }
 
@@ -58,50 +64,53 @@ function formatAxisNumber(value: number): string {
   if (!Number.isFinite(value) || value === 0) {
     return "0";
   }
-
   if (Math.abs(value) >= 1000) {
     return `${(value / 1000).toFixed(1)}k`;
   }
-
   if (Math.abs(value) < 1) {
     return value.toFixed(2);
   }
-
   if (Math.abs(value) < 10) {
     return value.toFixed(1);
   }
-
   return Math.round(value).toString();
 }
 
+/**
+ * Axis label: "HH:MM" in IST, or just the day number at IST midnight
+ * (charts spanning multiple days are easier to read when midnight shows
+ * as the day boundary instead of 00:00).
+ */
 function formatShortTime(iso: string): string {
-  const date = new Date(iso);
-
-  if (Number.isNaN(date.getTime())) {
+  const date = parseServerTime(iso);
+  if (!date) {
     return "";
   }
 
-  const hour = date.getHours();
-  const minute = date.getMinutes();
+  const time = date.toLocaleTimeString("en-GB", {
+    timeZone: DISPLAY_TIMEZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
 
-  if (hour === 0 && minute === 0) {
-    return date.getDate().toString();
+  if (time === "00:00") {
+    return date.toLocaleDateString("en-GB", {
+      timeZone: DISPLAY_TIMEZONE,
+      day: "2-digit",
+    });
   }
 
-  return `${hour.toString().padStart(2, "0")}:${minute
-    .toString()
-    .padStart(2, "0")}`;
+  return time;
 }
 
 function getLabelIndexes(length: number): number[] {
   if (length <= 0) {
     return [];
   }
-
   if (length === 1) {
     return [0];
   }
-
   return [0, Math.floor((length - 1) / 2), length - 1].filter(
     (value, index, values) => values.indexOf(value) === index,
   );
@@ -188,14 +197,8 @@ export function LineChart({
 
   const points = series.map((item, index) => {
     const x = m.left + (index / Math.max(series.length - 1, 1)) * plotW;
-
     const y = m.top + plotH - ((item.value - minVal) / valueRange) * plotH;
-
-    return {
-      x,
-      y,
-      ...item,
-    };
+    return { x, y, ...item };
   });
 
   const firstPoint = points[0];
@@ -238,7 +241,6 @@ export function LineChart({
       ))}
 
       <path d={areaD} fill={hex} fillOpacity={0.1} />
-
       <path d={pathD} fill="none" stroke={hex} strokeWidth={2} />
 
       {points.map((point) => (
@@ -266,13 +268,10 @@ export function LineChart({
 
       {xLabelIndexes.map((index) => {
         const item = series[index];
-
         if (!item) {
           return null;
         }
-
         const x = m.left + (index / Math.max(series.length - 1, 1)) * plotW;
-
         return (
           <text
             key={`x-label-${item.timestamp}-${x}`}
@@ -355,11 +354,8 @@ export function BarChart({
 
       {series.map((item, index) => {
         const barH = (item.value / maxVal) * plotH;
-
         const x = m.left + index * slotWidth + gap / 2;
-
         const y = m.top + plotH - barH;
-
         return (
           <rect
             key={`bar-${x}`}
@@ -388,13 +384,10 @@ export function BarChart({
 
       {xLabelIndexes.map((index) => {
         const item = series[index];
-
         if (!item) {
           return null;
         }
-
         const x = m.left + index * slotWidth + gap / 2 + barWidth / 2;
-
         return (
           <text
             key={`x-label-${item.timestamp}-${x}`}
@@ -461,7 +454,6 @@ export function HorizontalBarChart({
       {sorted.map((item, index) => {
         const y = index * rowH + 8;
         const barW = (item.count / maxCount) * barAreaW;
-
         const displayCategory =
           item.category.length > 16
             ? `${item.category.slice(0, 15)}…`

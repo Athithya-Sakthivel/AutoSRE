@@ -18,17 +18,12 @@
 
 set -Eeuo pipefail
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
 AGENTS_DIR="/workspace/agents"
 AGENT_PORT=18000
 AGENT_POD_LABEL="app.kubernetes.io/name=autosre-agent"
 O2_API="http://localhost:5080"
 O2_AUTH="admin@autosre.local:StagingO2RootPass123!"
-ALERT_WAIT="${ALERT_WAIT:-90}"
-SKIP_WAIT=0
+ALERT_WAIT=90
 INCIDENT="INC-013"
 
 PORT_FORWARDS=(
@@ -45,12 +40,7 @@ C_YELLOW=$'\033[1;33m'
 C_CYAN=$'\033[0;36m'
 C_RED=$'\033[0;31m'
 C_BOLD=$'\033[1m'
-C_DIM=$'\033[2m'
 C_RESET=$'\033[0m'
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 
 log()     { printf "${C_CYAN}[+]${C_RESET} %s\n" "$*" >&2; }
 success() { printf "${C_GREEN}[✓]${C_RESET} %s\n" "$*" >&2; }
@@ -58,35 +48,36 @@ warn()    { printf "${C_YELLOW}[!]${C_RESET} %s\n" "$*" >&2; }
 error()   { printf "${C_RED}[✗]${C_RESET} %s\n" "$*" >&2; }
 header()  { printf "\n${C_BOLD}=== %s ===${C_RESET}\n" "$*" >&2; }
 
-# ---------------------------------------------------------------------------
-# Argument parsing
-# ---------------------------------------------------------------------------
-
+# Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --skip-wait) SKIP_WAIT=1; shift ;;
         --incident) INCIDENT="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: bash demo.sh [--skip-wait] [--incident INC-XXX]"
-            echo "Default: INC-013 (Valkey eviction + HITL approval)"
+            echo "Usage: bash demo.sh [--incident INC-XXX]"
+            echo "Default: INC-013 (Valkey eviction + HITL)"
             exit 0 ;;
         *) error "Unknown option: $1"; exit 2 ;;
     esac
 done
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# Incident → Alert mapping
+declare -A ALERT_MAP=(
+    ["INC-004"]="CachePoisonKey"
+    ["INC-013"]="ValkeyEvictionUnderPressure"
+    ["INC-014"]="ResourceQuotaExceeded"
+)
 
-agent_curl() {
-    if [[ -n "${API_KEY:-}" ]]; then
-        curl -sf -H "X-API-Key: ${API_KEY}" "$@"
-    else
-        curl -sf "$@"
-    fi
+ALERT_NAME="${ALERT_MAP[${INCIDENT}]:-${INCIDENT}}"
+
+cleanup() {
+    log "Cleaning up port-forwards..."
+    for pid in "${PF_PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    pkill -f "[k]ubectl.*port-forward" 2>/dev/null || true
 }
 
-o2_curl() { curl -sf -u "${O2_AUTH}" "$@"; }
+trap cleanup EXIT
 
 ensure_pf() {
     local local_port="$1" ns="$2" svc="$3" remote_port="$4" label="$5"
@@ -110,86 +101,45 @@ ensure_pf() {
             return 0
         fi
         if ! kill -0 "${pf_pid}" 2>/dev/null; then
-            error "Port-forward ${local_port}:${remote_port} (${label}) died:"
-            cat "${log_file}" >&2
+            error "Port-forward ${local_port}:${remote_port} died"
             return 1
         fi
         sleep 1
     done
-    error "Port-forward ${local_port}:${remote_port} (${label}) not ready:"
-    cat "${log_file}" >&2
+    error "Port-forward ${local_port}:${remote_port} not ready"
     return 1
 }
 
-o2_triggers_query() {
-    local alert_name="${1:-}" minutes="${2:-60}"
-    local now_us start_us sql result
-
-    now_us=$(($(date +%s) * 1000000))
-    start_us=$((now_us - minutes * 60 * 1000000))
-
-    if [[ -n "${alert_name}" ]]; then
-        sql="SELECT * FROM triggers WHERE module_key LIKE '%${alert_name}%' OR alert_name='${alert_name}' ORDER BY _timestamp DESC LIMIT 20"
+agent_curl() {
+    if [[ -n "${API_KEY:-}" ]]; then
+        curl -sf -H "X-API-Key: ${API_KEY}" "$@"
     else
-        sql="SELECT * FROM triggers ORDER BY _timestamp DESC LIMIT 20"
-    fi
-
-    result=$(o2_curl -X POST "${O2_API}/api/default/_search?type=logs" \
-        -H "Content-Type: application/json" \
-        -d "{\"query\":{\"sql\":\"${sql}\",\"start_time\":${start_us},\"end_time\":${now_us},\"size\":20}}" \
-        2>/dev/null) || true
-
-    if [[ -z "${result}" || "${result}" == "null" ]]; then
-        echo '{"hits":[]}'
-    else
-        echo "${result}"
+        curl -sf "$@"
     fi
 }
-
-cleanup() {
-    local pid
-    log "Cleaning up port-forwards..."
-    for pid in "${PF_PIDS[@]}"; do
-        kill "${pid}" 2>/dev/null || true
-    done
-    pkill -f "[k]ubectl.*port-forward" 2>/dev/null || true
-}
-
-trap cleanup EXIT
-
-# ---------------------------------------------------------------------------
-# Incident → Alert name mapping
-# ---------------------------------------------------------------------------
-
-declare -A ALERT_MAP=(
-    ["INC-001"]="DatabaseConnectionPoolExhausted"
-    ["INC-002"]="HighCPUUtilization"
-    ["INC-003"]="IdleInTransactionBacklog"
-    ["INC-004"]="CachePoisonKey"
-    ["INC-005"]="ConsumerLagSpike"
-    ["INC-006"]="StalePodStuckTerminating"
-    ["INC-007"]="PodCrashLoopBackOff"
-    ["INC-008"]="MemoryPressure"
-    ["INC-009"]="PodOOMKilled"
-    ["INC-012"]="ImagePullBackOff"
-    ["INC-013"]="ValkeyEvictionUnderPressure"
-    ["INC-014"]="ResourceQuotaExceeded"
-)
-
-ALERT_NAME="${ALERT_MAP[${INCIDENT}]:-${INCIDENT}}"
 
 # ===========================================================================
-# Phase 1: Pre-flight
+# Phase 1: Restart Agent (Clear Dedup Cache)
 # ===========================================================================
 
 cd "${AGENTS_DIR}"
-header "Phase 1: Pre-flight"
+header "Phase 1: Restart Agent (Clear Dedup Cache)"
 
-kubectl cluster-info >/dev/null 2>&1 || { error "Kind cluster not reachable"; exit 1; }
-success "Kind cluster reachable"
+log "Deleting agent pod to clear fingerprint cache..."
+kubectl delete pod -n sre -l "${AGENT_POD_LABEL}" --grace-period=10
+log "Waiting for new pod to be ready..."
+kubectl rollout status deployment/autosre-agent -n sre --timeout=120s
 
-kubectl get deployment autosre-agent -n sre >/dev/null 2>&1 || { error "Agent deployment not found"; exit 1; }
-success "Agent deployment exists"
+AGENT_POD=$(kubectl get pods -n sre -l "${AGENT_POD_LABEL}" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+[[ -n "${AGENT_POD}" ]] || { error "Agent pod not found after restart"; exit 1; }
+success "New agent pod: ${AGENT_POD}"
+
+# ===========================================================================
+# Phase 2: Pre-flight
+# ===========================================================================
+
+header "Phase 2: Pre-flight"
 
 log "Establishing port-forwards..."
 for entry in "${PORT_FORWARDS[@]}"; do
@@ -207,11 +157,6 @@ success "OpenObserve healthy"
 curl -sf "http://localhost:${AGENT_PORT}/healthz" >/dev/null 2>&1 || { error "Agent not healthy"; exit 1; }
 success "Agent healthy"
 
-AGENT_POD=$(kubectl get pods -n sre -l "${AGENT_POD_LABEL}" \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-[[ -n "${AGENT_POD}" ]] || { error "Agent pod not found"; exit 1; }
-log "Agent pod: ${AGENT_POD}"
-
 API_KEY=$(kubectl get secret autosre-agent-secrets -n sre \
     -o jsonpath='{.data.AUTOSRE_API_KEY}' 2>/dev/null | base64 -d || true)
 [[ -n "${API_KEY}" ]] && success "API key loaded" || warn "No API key"
@@ -221,16 +166,11 @@ BASELINE=$(agent_curl "http://localhost:${AGENT_PORT}/incidents" 2>/dev/null \
 BASELINE="${BASELINE:-0}"
 log "Baseline incidents: ${BASELINE}"
 
-DATASET_EXISTS=$(kubectl exec -n sre "${AGENT_POD}" -- \
-    test -f /app/.venv/lib/python3.14/site-packages/eval/dataset/AutoSRE-Dataset-v4.json \
-    && echo "yes" || echo "no" 2>/dev/null || echo "no")
-[[ "${DATASET_EXISTS}" == "yes" ]] && success "Dataset v4 present" || warn "Dataset v4 missing"
-
 # ===========================================================================
-# Phase 2: Trigger Chaos
+# Phase 3: Trigger Chaos
 # ===========================================================================
 
-header "Phase 2: Trigger Chaos (${INCIDENT})"
+header "Phase 3: Trigger Chaos (${INCIDENT})"
 
 log "Running chaos/incidents.sh ${INCIDENT} trigger..."
 bash chaos/incidents.sh "${INCIDENT}" trigger 2>&1 | sed 's/^/  /' || true
@@ -247,52 +187,28 @@ if [[ -n "${VALKEY_PW}" ]]; then
 fi
 
 # ===========================================================================
-# Phase 3: Wait for O2 Alert
+# Phase 4: Wait for O2 Alert
 # ===========================================================================
 
-if [[ "${SKIP_WAIT}" == "0" ]]; then
-    header "Phase 3: Wait for O2 Alert (1 min evaluation cycle)"
-    log "Waiting up to ${ALERT_WAIT}s for O2 scheduler..."
+header "Phase 4: Wait for O2 Alert (1 min evaluation cycle)"
+log "Waiting up to ${ALERT_WAIT}s for O2 scheduler..."
 
-    countdown="${ALERT_WAIT}"
-    while [[ "${countdown}" -gt 0 ]]; do
-        printf "\r  ${C_CYAN}[%3ds]${C_RESET} Waiting for O2 scheduler..." "${countdown}"
-        sleep 10
-        countdown=$((countdown - 10))
-    done
-    echo ""
-    success "Wait complete"
-else
-    header "Phase 3: Wait (SKIPPED)"
-fi
+countdown="${ALERT_WAIT}"
+while [[ "${countdown}" -gt 0 ]]; do
+    printf "\r  ${C_CYAN}[%3ds]${C_RESET} Waiting for O2 scheduler..." "${countdown}"
+    sleep 10
+    countdown=$((countdown - 10))
+done
+echo ""
+success "Wait complete"
 
 # ===========================================================================
-# Phase 4: Verify Alert Fired
+# Phase 5: Verify Alert Fired
 # ===========================================================================
 
-header "Phase 4: Verify Alert"
+header "Phase 5: Verify Alert"
 
 log "Checking triggers for: ${ALERT_NAME}"
-
-TRIGGERS=$(o2_triggers_query "${ALERT_NAME}" 120)
-
-TRIGGER_COUNT=$(echo "${TRIGGERS}" | jq '.hits | length' 2>/dev/null || echo "0")
-FIRED_COUNT=$(echo "${TRIGGERS}" | jq \
-    '[.hits[]? | select(.status == "fired" or .status == "completed")] | length' 2>/dev/null || echo "0")
-NOT_MET_COUNT=$(echo "${TRIGGERS}" | jq \
-    '[.hits[]? | select(.status == "condition_not_met" or .status == "normal")] | length' 2>/dev/null || echo "0")
-
-log "Trigger evaluations: ${TRIGGER_COUNT}"
-log "  Fired/completed: ${FIRED_COUNT}"
-log "  Condition not met: ${NOT_MET_COUNT}"
-
-if [[ "${FIRED_COUNT}" -gt 0 ]]; then
-    success "O2 alert fired ${FIRED_COUNT} time(s)"
-elif [[ "${NOT_MET_COUNT}" -gt 0 ]]; then
-    warn "Alert evaluated but condition not met (${NOT_MET_COUNT} time(s))"
-else
-    warn "No evaluations found"
-fi
 
 WEBHOOK_COUNT=$(kubectl logs -n sre "${AGENT_POD}" --tail=200 2>/dev/null \
     | grep -c "Received OpenObserve webhook" || true)
@@ -300,21 +216,23 @@ WEBHOOK_COUNT="${WEBHOOK_COUNT:-0}"
 
 [[ "${WEBHOOK_COUNT}" -gt 0 ]] && success "Agent received webhook: ${WEBHOOK_COUNT} time(s)" || warn "No webhooks received"
 
-ENRICH_ERRORS=$(kubectl logs -n sre "${AGENT_POD}" --tail=200 2>/dev/null \
-    | grep -c "No dataset file found" || true)
-ENRICH_ERRORS="${ENRICH_ERRORS:-0}"
-[[ "${ENRICH_ERRORS}" -gt 0 ]] && error "Dataset enrichment failed (${ENRICH_ERRORS} errors)"
-
 # ===========================================================================
-# Phase 5: Agent Investigation
+# Phase 6: Agent Investigation
 # ===========================================================================
 
-header "Phase 5: Agent Investigation"
+header "Phase 6: Agent Investigation"
+
+echo ""
+printf "${C_BOLD}${C_GREEN}╔═══════════════════════════════════════════════════╗${C_RESET}\n"
+printf "${C_BOLD}${C_GREEN}║  Open http://localhost:%-5d in your browser       ║${C_RESET}\n" "${AGENT_PORT}"
+printf "${C_BOLD}${C_GREEN}║  Watch the incident progress in real-time        ║${C_RESET}\n"
+printf "${C_BOLD}${C_GREEN}╚═══════════════════════════════════════════════════╝${C_RESET}\n"
+echo ""
 
 log "Streaming agent logs (60s)..."
 kubectl logs -n sre "${AGENT_POD}" -f --tail=50 2>/dev/null \
     | grep --line-buffered -E \
-        "POST /alerts|Alert received|get_valkey_stats|evicted_keys|flush_all|awaiting_approval|proposal|hypothesis|fallback|Pausing for HITL" \
+        "POST /alerts|Alert received|get_valkey_stats|evicted_keys|flush_all|awaiting_approval|proposal|hypothesis|Pausing for HITL" \
     | head -30 &
 LOG_PID=$!
 
@@ -324,10 +242,10 @@ wait "${LOG_PID}" 2>/dev/null || true
 echo ""
 
 # ===========================================================================
-# Phase 6: HITL Approval
+# Phase 7: Check Incident Status
 # ===========================================================================
 
-header "Phase 6: Check Incident Status"
+header "Phase 7: Check Incident Status"
 
 CURRENT=$(agent_curl "http://localhost:${AGENT_PORT}/incidents" 2>/dev/null \
     | jq -r '.total // 0' 2>/dev/null || echo "0")
@@ -352,10 +270,7 @@ if [[ "${NEW_COUNT}" -gt 0 ]]; then
     if [[ "${STATUS}" == "awaiting_approval" ]]; then
         success "Incident requires human approval (Tier 2)"
         echo ""
-        printf "${C_BOLD}${C_GREEN}╔═══════════════════════════════════════════════════╗${C_RESET}\n"
-        printf "${C_BOLD}${C_GREEN}║  Open http://localhost:%-5d in your browser       ║${C_RESET}\n" "${AGENT_PORT}"
-        printf "${C_BOLD}${C_GREEN}║  Click the incident → Review evidence → Approve  ║${C_RESET}\n"
-        printf "${C_BOLD}${C_GREEN}╚═══════════════════════════════════════════════════╝${C_RESET}\n"
+        printf "${C_BOLD}${C_YELLOW}>>> APPROVE NOW in your browser: http://localhost:%-5d${C_RESET}\n" "${AGENT_PORT}"
         echo ""
         log "Polling for approval (timeout: 300s)..."
 
@@ -381,7 +296,7 @@ if [[ "${NEW_COUNT}" -gt 0 ]]; then
                 error "Incident failed"
                 break
             fi
-            printf "\r  ${C_DIM}Waiting for approval... (%d/60)${C_RESET}" "${i}"
+            printf "\r  Waiting for approval... (%d/60)" "${i}"
         done
 
         [[ "${approved}" == "false" ]] && { echo ""; warn "Approval not received within timeout"; }
@@ -393,17 +308,14 @@ if [[ "${NEW_COUNT}" -gt 0 ]]; then
     fi
 else
     warn "No new incidents created"
-    warn "Possible causes:"
-    warn "  - Alert in silence window"
-    warn "  - Condition not met"
-    warn "  - Webhook not received"
+    warn "Check agent logs: kubectl logs -n sre ${AGENT_POD} --tail=50"
 fi
 
 # ===========================================================================
-# Phase 7: Cleanup
+# Phase 8: Cleanup
 # ===========================================================================
 
-header "Phase 7: Cleanup"
+header "Phase 8: Cleanup"
 
 log "Running chaos/incidents.sh ${INCIDENT} cleanup..."
 bash chaos/incidents.sh "${INCIDENT}" cleanup 2>&1 | sed 's/^/  /' || true

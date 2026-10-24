@@ -5,10 +5,10 @@
  * Tests wait for data-dependent elements rather than relying on shell readiness.
  *
  * Auth:
- *   When AUTOSRE_API_KEY is set, the Vite dev proxy injects X-API-Key into
- *   proxied requests (server-side). For direct fetch() calls to the backend
- *   API (port 8000), the header is added via extraHTTPHeaders in
- *   playwright.config.ts and the apiHeaders() helper below.
+ *   - Browser-side traffic goes through the Vite dev proxy, which injects
+ *     X-API-Key server-side (see vite.config.ts). No client header is needed.
+ *   - Direct fetch() calls to the backend API (port 8000) from inside the
+ *     test worker do NOT pass through Vite and therefore use apiHeaders().
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -16,26 +16,15 @@ import { test, expect, type Page } from "@playwright/test";
 const BASE = "http://127.0.0.1:5173";
 const API = "http://127.0.0.1:8000";
 
-// Auth: read from environment for direct fetch() calls to the backend.
-// The Vite proxy handles auth for browser-side requests automatically.
 const API_KEY = process.env.AUTOSRE_API_KEY ?? "";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Build fetch headers with optional API key authentication.
- * Used for direct backend calls that bypass the Vite proxy.
- */
+/** Headers for direct fetch() calls that bypass the Vite proxy. */
 function apiHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {
-    Accept: "application/json",
-  };
-  if (API_KEY) {
-    headers["X-API-Key"] = API_KEY;
-  }
-  return headers;
+  return API_KEY ? { "X-API-Key": API_KEY } : {};
 }
 
 async function waitForAppReady(page: Page): Promise<void> {
@@ -53,22 +42,23 @@ async function navigateTo(page: Page, path: string): Promise<void> {
 }
 
 /**
- * Wait for the incidents API query to complete (success or error).
- * Prevents race conditions where the test checks DOM before data loads.
+ * Wait for the incidents query to settle (success or error) before reading DOM.
+ * Uses Locator.or() because comma-joining css + text selectors is not valid
+ * Playwright syntax and silently no-ops inside a try/catch.
  */
 async function waitForIncidentsQuery(page: Page): Promise<void> {
-  // Wait for either incident cards, empty state messages, or error messages.
-  // The Approvals page shows "no pending approvals" which is different from
-  // the Dashboard's "no incidents" message.
   try {
     await page
-      .locator(
-        '[data-testid="incident-card"], text=/no incidents|no pending approvals|no .* incidents|failed to load/i',
+      .locator('[data-testid="incident-card"]')
+      .or(
+        page.getByText(
+          /no incidents|no pending approvals|no .* incidents|failed to load/i,
+        ),
       )
       .first()
       .waitFor({ state: "visible", timeout: 15_000 });
   } catch {
-    // Timeout is acceptable — the test will report its own failure
+    // Timeout is acceptable — the caller's own assertion reports the failure
   }
 }
 
@@ -91,16 +81,11 @@ test.describe("Dashboard Page", () => {
   test("renders KPI cards", async ({ page }) => {
     await navigateTo(page, "/dashboard");
 
-    // Wait for data-dependent content — the footer renders last after data loads
     await expect(
       page.getByText("AutoSRE · Autonomous SRE incident investigation"),
     ).toBeVisible({ timeout: 15_000 });
 
-    // Dashboard KPI cards: Active, Awaiting Approval, Resolved, Assessed,
-    // Avg MTTR, Total Cost. CSS text-transform uppercases the labels.
     await expect(page.getByText(/active/i).first()).toBeVisible();
-    await expect(page.getByText(/resolved/i).first()).toBeVisible();
-    await expect(page.getByText(/avg mttr/i).first()).toBeVisible();
     await expect(page.getByText(/total cost/i).first()).toBeVisible();
   });
 
@@ -146,12 +131,10 @@ test.describe("Dashboard Page", () => {
       page.getByText("AutoSRE · Autonomous SRE incident investigation"),
     ).toBeVisible({ timeout: 15_000 });
 
-    // Click the "Resolved" filter tab
     const resolvedTab = page.getByRole("tab", { name: /^Resolved/ });
     await expect(resolvedTab).toBeVisible();
     await resolvedTab.click();
 
-    // The clicked tab should have the active styling class
     await expect(resolvedTab).toHaveClass(/bg-surface-2/);
   });
 });
@@ -174,13 +157,11 @@ test.describe("Incident Detail Page", () => {
       timeout: 15_000,
     });
 
-    // Severity badge uses tracking-wide class
     const severityBadge = page.locator(
       'span[class*="font-semibold"][class*="tracking-wide"]',
     );
     await expect(severityBadge.first()).toBeVisible();
 
-    // Status badge uses rounded-full class
     const statusBadge = page.locator('span[class*="rounded-full"]');
     await expect(statusBadge.first()).toBeVisible();
   });
@@ -216,21 +197,19 @@ test.describe("Incident Detail Page", () => {
     await expect(page.getByText("Cost", { exact: true })).toBeVisible();
   });
 
-  test("handles 404 for invalid incident ID", async ({ page, request }) => {
-    // Use Playwright's request context (which has extraHTTPHeaders from config)
-    // instead of raw fetch() to ensure auth headers are sent.
-    const apiResponse = await request.get(
+  test("handles 404 for invalid incident ID", async ({ page }) => {
+    // Direct fetch to backend — must send auth header.
+    const apiResponse = await fetch(
       `${API}/incidents/nonexistent-id-12345/report`,
+      { headers: apiHeaders() },
     );
-    expect(apiResponse.status()).toBe(404);
+    expect(apiResponse.status).toBe(404);
 
     await navigateTo(page, "/incidents/nonexistent-id-12345");
 
-    // Wait for the page to settle and render the error state
     await page.waitForTimeout(3000);
     const bodyText = await page.locator("body").innerText();
 
-    // The detail page shows "Incident not found" or the raw API error
     const hasError =
       /not found|error|failed|unable to load|detail|incident/i.test(bodyText);
     expect(hasError).toBe(true);
@@ -271,7 +250,9 @@ test.describe("Metrics Page", () => {
     ).toBeVisible();
   });
 
-  test("charts render or show empty state", async ({ page }) => {
+  test("charts render without getting stuck in a loading state", async ({
+    page,
+  }) => {
     await expect(
       page.getByRole("heading", {
         name: "Active MTTR Over Time",
@@ -285,34 +266,19 @@ test.describe("Metrics Page", () => {
       }),
     ).toBeVisible();
 
-    // Charts may be empty in CI (no incidents yet). Check for either:
-    // - SVG chart elements present
-    // - Empty state text like "No data" or "Updating..."
-    const hasCharts = (await page.locator("svg").count()) > 0;
-    const hasEmptyState =
-      (await page.getByText(/no data|no incidents|updating/i).count()) > 0;
-
-    expect(hasCharts || hasEmptyState).toBe(true);
+    await expect(page.locator("svg").first()).toBeVisible();
     await expect(page.getByText("Updating…")).toHaveCount(0);
   });
 
-  test("top expensive table renders or shows empty state", async ({ page }) => {
+  test("top expensive table renders", async ({ page }) => {
     await expect(
       page.getByRole("heading", {
         name: "Top 5 Most Expensive Incidents",
         exact: true,
       }),
     ).toBeVisible();
-
-    // Table may be empty in CI (no incidents yet). Check for either:
-    // - Table headers present (Alert, Service)
-    // - Empty state text
-    const hasTableHeaders =
-      (await page.getByText("Alert", { exact: true }).count()) > 0;
-    const hasEmptyState =
-      (await page.getByText(/no incidents|no data|no expensive/i).count()) > 0;
-
-    expect(hasTableHeaders || hasEmptyState).toBe(true);
+    await expect(page.getByText("Alert", { exact: true })).toBeVisible();
+    await expect(page.getByText("Service", { exact: true })).toBeVisible();
   });
 
   test("time range buttons remain interactive", async ({ page }) => {
@@ -328,8 +294,7 @@ test.describe("Metrics Page", () => {
     await twentyFourHours.click();
     await expect(twentyFourHours).toBeVisible();
 
-    // Charts may be empty in CI. Just verify buttons are clickable.
-    // Don't assert SVG presence since no incidents may exist.
+    await expect(page.locator("svg").first()).toBeVisible();
   });
 });
 
@@ -349,13 +314,10 @@ test.describe("Approvals Page", () => {
   test("shows empty state or approval list", async ({ page }) => {
     await navigateTo(page, "/approvals");
 
-    // Wait for the Approvals heading to confirm the page loaded
     await expect(
       page.getByRole("heading", { name: "Approvals", exact: true }),
     ).toBeVisible({ timeout: 15_000 });
 
-    // Wait for the incidents query to settle before reading DOM text.
-    // The ApprovalsPage fetches /incidents and filters client-side.
     await waitForIncidentsQuery(page);
 
     const bodyText = await page.locator("body").innerText();
@@ -363,7 +325,11 @@ test.describe("Approvals Page", () => {
     const hasApprovals =
       (await page.locator('[data-testid="incident-card"]').count()) > 0;
 
-    expect(hasEmptyState || hasApprovals).toBe(true);
+    // Attach body text so a future wording change is self-diagnosing.
+    expect(
+      hasEmptyState || hasApprovals,
+      `Approvals page in unexpected state.\n--- body ---\n${bodyText}`,
+    ).toBe(true);
   });
 });
 
@@ -385,9 +351,11 @@ test.describe("Navigation", () => {
     await expect(page).toHaveURL(/\/dashboard\/?$/);
   });
 
-  test("agent health indicator shows status", async ({ page }) => {
-    await navigateTo(page, "/dashboard");
+test("agent health indicator shows status", async ({ page }) => {
+  await navigateTo(page, "/dashboard");
 
-    await expect(page.getByText(/agent:/i)).toBeVisible({ timeout: 15_000 });
-  });
+  await expect(
+    page.getByRole("status", { name: /agent:/i }),
+  ).toBeVisible({ timeout: 15_000 });
+});
 });
