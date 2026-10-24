@@ -51,7 +51,7 @@ jobs:
         run: uv python install 3.14
       - name: Verify lockfile matches pyproject.toml
         working-directory: agents
-        run: uv lock --check
+        run: uv sync --frozen
       - name: Install Node.js 24
         uses: actions/setup-node@v4
         with:
