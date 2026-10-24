@@ -32,9 +32,9 @@ jobs:
       - name: Install Python 3.14
         run: uv python install 3.14
 
-      - name: Verify lockfile matches pyproject.toml
+      - name: Verify lockfile + install dev deps
         working-directory: agents
-        run: uv sync --frozen
+        run: uv sync --locked --extra dev
 
       - name: Run CI suite (ruff + mypy + pytest + dataset validation)
         working-directory: agents
