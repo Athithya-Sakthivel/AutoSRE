@@ -34,7 +34,6 @@ RUN uv sync \
     --no-dev \
     --no-install-workspace
 
-# Copy source AND dataset for wheel build
 COPY src/ src/
 COPY eval/dataset/ eval/dataset/
 COPY README.md ./
@@ -49,6 +48,15 @@ FROM docker.io/library/python:3.14.8-slim-trixie@sha256:f85c5697265c178cc6887276
 
 ARG APP_UID=10001
 ARG APP_GID=10001
+
+# Patch the base image's system pip so its vendored `certifi` is no longer
+# vulnerable. The slim-trixie base ships pip 26.2.1, which vendors
+# certifi 2026.6.17 → flagged by Trivy as GHSA-6q48-6c7w-9gw2 (CRITICAL).
+# pip >= 26.2.2 vendors certifi 2026.10.19, which is the fixed version.
+# The application itself runs from /app/.venv and never invokes system pip
+# at runtime — this step exists solely to remove the vendored vulnerable copy.
+RUN python -m pip install --no-cache-dir --upgrade 'pip>=26.2.2' \
+    && python -m pip --version
 
 RUN groupadd --gid "${APP_GID}" app \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home --home-dir /home/app --shell /usr/sbin/nologin app
