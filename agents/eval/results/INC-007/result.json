@@ -1,52 +1,45 @@
 {
   "incident_id": "INC-007",
-  "completed_at": "2026-10-24T09:53:53Z",
+  "completed_at": "2026-10-25T04:04:34Z",
   "result": {
-    "incident_id": "739b6d91-caed-457f-8578-6098f6d82aff",
+    "incident_id": "304e6850-9385-425d-bdae-c0ed071fe82b",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "PodCrashLoopBackOff",
     "service": "api-gateway",
     "namespace": "rivulet",
     "severity": "sev2",
-    "started_at": "2026-10-24T09:53:22Z",
+    "started_at": "2026-10-25T04:04:18Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "The api-gateway service in namespace rivulet is experiencing a crash loop due to an application-level failure upon startup, resulting in exit code 1 and repeated restarts every 30 seconds.",
+        "description": "The api-gateway service in namespace rivulet is experiencing a crash loop due to an application-level failure upon startup, indicated by a non-zero exit code of 1 and a short crash interval of 30 seconds.",
         "confidence": 0.2,
         "evidence": [
           "Alert: PodCrashLoopBackOff",
-          "Service: api-gateway in namespace rivulet",
-          "Annotations: last_exit_code=1, restart_count=8, crash_interval_seconds=30",
+          "Namespace: rivulet",
+          "Service: api-gateway",
+          "Last exit code: 1",
+          "Crash interval seconds: 30",
+          "Restart count: 8",
           "Tool list_pods({\"namespace\": \"rivulet\", \"label_selector\": \"app=api-gateway\"}) status=succeeded output={\"pods\": [], \"total\": 0}",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 693.74, \"name\": \"api-gateway-76976c4568-2dhcm\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2907.74, \"name\": \"api-gateway-76976c4568-6v4vj\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 633.74, \"name\": \"api-gateway-76976c4568-96wk9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 693.74, \"name\": \"api-gateway-76976c4568-tktvs\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2907.74, \"name\": \"api-gateway-76976c4568-wgh82\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 24756.74, \"name\": \"frontend-557cbdb47c-5dzq5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 24756.74, \"name\": \"frontend-557cbdb47c-z2xpz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 773.74, \"name\": \"ingestion-worker-6645d79cbc-drl24\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 777.74, \"name\": \"ingestion-worker-6645d79cbc-mp4zw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 24958.74, \"name\": \"postgres-6b4c959c9-47rtr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 24889.74, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 11}"
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 3089.73, \"name\": \"api-gateway-557d8dc689-2nktk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3057.73, \"name\": \"api-gateway-557d8dc689-nxhgh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 4754.73, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 4754.73, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2825.73, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 94.73, \"name\": \"ingestion-worker-85cc48dd5b-7r6mr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 4981.73, \"name\": \"postgres-6b4c959c9-v8x2d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 4928.73, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}], \"total\": 8}"
         ],
-        "status": "refuted"
+        "status": "proposed"
       },
       {
         "id": "H2",
-        "description": "A misconfigured environment variable or missing secret required by the api-gateway service during initialization is causing it to immediately exit with code 1.",
+        "description": "A misconfigured startup or liveness probe is causing the kubelet to repeatedly kill the api-gateway container in the rivulet namespace after it starts, resulting in the observed CrashLoopBackOff state.",
         "confidence": 0.2,
         "evidence": [
           "Alert: PodCrashLoopBackOff",
-          "Annotations: last_exit_code=1",
+          "Namespace: rivulet",
+          "Service: api-gateway",
+          "Restart count: 8",
           "Tool list_pods({\"namespace\": \"rivulet\", \"label_selector\": \"app=api-gateway\"}) status=succeeded output={\"pods\": [], \"total\": 0}",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 693.74, \"name\": \"api-gateway-76976c4568-2dhcm\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2907.74, \"name\": \"api-gateway-76976c4568-6v4vj\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 633.74, \"name\": \"api-gateway-76976c4568-96wk9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 693.74, \"name\": \"api-gateway-76976c4568-tktvs\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2907.74, \"name\": \"api-gateway-76976c4568-wgh82\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 24756.74, \"name\": \"frontend-557cbdb47c-5dzq5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 24756.74, \"name\": \"frontend-557cbdb47c-z2xpz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 773.74, \"name\": \"ingestion-worker-6645d79cbc-drl24\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 777.74, \"name\": \"ingestion-worker-6645d79cbc-mp4zw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 24958.74, \"name\": \"postgres-6b4c959c9-47rtr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 24889.74, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 11}"
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 3089.73, \"name\": \"api-gateway-557d8dc689-2nktk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3057.73, \"name\": \"api-gateway-557d8dc689-nxhgh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 4754.73, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 4754.73, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2825.73, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 94.73, \"name\": \"ingestion-worker-85cc48dd5b-7r6mr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 4981.73, \"name\": \"postgres-6b4c959c9-v8x2d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 4928.73, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}], \"total\": 8}"
         ],
-        "status": "refuted"
-      },
-      {
-        "id": "H3",
-        "description": "A failing liveness or startup probe is prematurely killing the api-gateway container, forcing a restart loop every 30 seconds.",
-        "confidence": 0.2,
-        "evidence": [
-          "Alert: PodCrashLoopBackOff",
-          "Annotations: crash_interval_seconds=30",
-          "Tool list_pods({\"namespace\": \"rivulet\", \"label_selector\": \"app=api-gateway\"}) status=succeeded output={\"pods\": [], \"total\": 0}",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 693.74, \"name\": \"api-gateway-76976c4568-2dhcm\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2907.74, \"name\": \"api-gateway-76976c4568-6v4vj\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 633.74, \"name\": \"api-gateway-76976c4568-96wk9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 693.74, \"name\": \"api-gateway-76976c4568-tktvs\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2907.74, \"name\": \"api-gateway-76976c4568-wgh82\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 24756.74, \"name\": \"frontend-557cbdb47c-5dzq5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 24756.74, \"name\": \"frontend-557cbdb47c-z2xpz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 773.74, \"name\": \"ingestion-worker-6645d79cbc-drl24\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 777.74, \"name\": \"ingestion-worker-6645d79cbc-mp4zw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 24958.74, \"name\": \"postgres-6b4c959c9-47rtr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 24889.74, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 11}"
-        ],
-        "status": "refuted"
+        "status": "proposed"
       }
     ],
     "proposed_actions": [
@@ -70,7 +63,7 @@
           "name": "api-gateway",
           "namespace": "rivulet"
         },
-        "tool_call_id": "call_1792835633707",
+        "tool_call_id": "call_1792901073459",
         "result": {
           "name": "api-gateway",
           "namespace": "rivulet",
@@ -80,23 +73,23 @@
           "verification_passed": null
         },
         "success": true,
-        "executed_at": "2026-10-24T09:53:53Z",
+        "executed_at": "2026-10-25T04:04:33Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 16619,
-    "prompt_tokens": 12507,
-    "completion_tokens": 4112,
-    "cost_usd": 0.012563000000000001,
-    "estimated_paid_cost_usd": 0.015568000000000002,
+    "tokens_used": 13507,
+    "prompt_tokens": 10844,
+    "completion_tokens": 2663,
+    "cost_usd": 0.0085082,
+    "estimated_paid_cost_usd": 0.0113772,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
         "calls": 6,
-        "tokens": 16958
+        "tokens": 13830
       }
     },
-    "wall_clock_seconds": 31.305,
-    "active_seconds": 31.305,
+    "wall_clock_seconds": 14.906,
+    "active_seconds": 14.906,
     "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
     "iterations": 2,

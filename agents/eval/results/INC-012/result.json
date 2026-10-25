@@ -1,37 +1,37 @@
 {
   "incident_id": "INC-012",
-  "completed_at": "2026-10-24T09:41:21Z",
+  "completed_at": "2026-10-25T03:17:57Z",
   "result": {
-    "incident_id": "c7fc6539-d5a7-4f1e-851d-3d64d8c9b54c",
+    "incident_id": "49277f81-87a2-4383-95a1-d434798f9970",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "ImagePullBackOff",
     "service": "ingestion-worker",
     "namespace": "rivulet",
     "severity": "sev2",
-    "started_at": "2026-10-24T09:41:11Z",
+    "started_at": "2026-10-25T03:17:51Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "The deployment specifies a non-existent image tag (rivulet/ingestion-worker:v999-nonexistent), resulting in a manifest unknown error from the container registry.",
+        "description": "The deployment for the ingestion-worker service was updated with a non-existent image tag (v999-nonexistent), resulting in a manifest unknown error.",
         "confidence": 0.8,
         "evidence": [
           "Alert: ImagePullBackOff",
-          "Annotations: image: rivulet/ingestion-worker:v999-nonexistent",
-          "Annotations: pull_error: manifest unknown",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 2169.05, \"name\": \"api-gateway-76976c4568-6v4vj\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 15.05, \"name\": \"api-gateway-76976c4568-77k4d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2169.05, \"name\": \"api-gateway-76976c4568-wgh82\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 24018.05, \"name\": \"frontend-557cbdb47c-5dzq5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 24018.05, \"name\": \"frontend-557cbdb47c-z2xpz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 5.05, \"name\": \"ingestion-worker-59858684d9-5fvl8\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 35.05, \"name\": \"ingestion-worker-6645d79cbc-drl24\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 39.05, \"name\": \"ingestion-worker-6645d79cbc-mp4zw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 24220.05, \"name\": \"postgres-6b4c959c9-47rtr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 24151.05, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 10}"
+          "Annotations: image=rivulet/ingestion-worker:v999-nonexistent",
+          "Annotations: pull_error=manifest unknown",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 296.04, \"name\": \"api-gateway-557d8dc689-2nktk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 264.04, \"name\": \"api-gateway-557d8dc689-nxhgh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1961.04, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1961.04, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 19.04, \"name\": \"ingestion-worker-67948d8ff4-q8fks\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 32.04, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 37.04, \"name\": \"ingestion-worker-7467694c85-zp8hn\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2188.04, \"name\": \"postgres-6b4c959c9-v8x2d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2135.04, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}], \"total\": 9}"
         ],
         "status": "proposed"
       },
       {
         "id": "H2",
-        "description": "A typo or incorrect configuration was introduced in the recent release pipeline, attempting to pull an invalid version tag for the ingestion-worker service.",
-        "confidence": 0.6,
+        "description": "A typographical error occurred in the image tag during a recent release or configuration change for the ingestion-worker service in namespace rivulet.",
+        "confidence": 0.5,
         "evidence": [
-          "Service: ingestion-worker",
-          "Category: image_pull_error",
-          "Annotations: image: rivulet/ingestion-worker:v999-nonexistent",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 2169.05, \"name\": \"api-gateway-76976c4568-6v4vj\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 15.05, \"name\": \"api-gateway-76976c4568-77k4d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2169.05, \"name\": \"api-gateway-76976c4568-wgh82\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 24018.05, \"name\": \"frontend-557cbdb47c-5dzq5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 24018.05, \"name\": \"frontend-557cbdb47c-z2xpz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 5.05, \"name\": \"ingestion-worker-59858684d9-5fvl8\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 35.05, \"name\": \"ingestion-worker-6645d79cbc-drl24\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 39.05, \"name\": \"ingestion-worker-6645d79cbc-mp4zw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 24220.05, \"name\": \"postgres-6b4c959c9-47rtr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 24151.05, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 10}"
+          "Alert: ImagePullBackOff",
+          "Annotations: image=rivulet/ingestion-worker:v999-nonexistent",
+          "Labels: category=image_pull_error",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 296.04, \"name\": \"api-gateway-557d8dc689-2nktk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 264.04, \"name\": \"api-gateway-557d8dc689-nxhgh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1961.04, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1961.04, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 19.04, \"name\": \"ingestion-worker-67948d8ff4-q8fks\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 32.04, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 37.04, \"name\": \"ingestion-worker-7467694c85-zp8hn\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2188.04, \"name\": \"postgres-6b4c959c9-v8x2d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2135.04, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}], \"total\": 9}"
         ],
         "status": "proposed"
       }
@@ -45,7 +45,7 @@
           "namespace": "rivulet"
         },
         "risk_tier": 1,
-        "rationale": "Fallback action for category 'image_pull_error' (LLM returned no action). Top hypothesis: The deployment specifies a non-existent image tag (rivulet/ingestion-worker:v999-nonexistent), resul",
+        "rationale": "Fallback action for category 'image_pull_error' (LLM returned no action). Top hypothesis: The deployment for the ingestion-worker service was updated with a non-existent image tag (v999-none",
         "requires_approval": false
       }
     ],
@@ -57,7 +57,7 @@
           "name": "ingestion-worker",
           "namespace": "rivulet"
         },
-        "tool_call_id": "call_1792834879748",
+        "tool_call_id": "call_1792898276732",
         "result": {
           "name": "ingestion-worker",
           "namespace": "rivulet",
@@ -67,23 +67,23 @@
           "verification_passed": null
         },
         "success": true,
-        "executed_at": "2026-10-24T09:41:19Z",
+        "executed_at": "2026-10-25T03:17:56Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 6654,
-    "prompt_tokens": 6207,
-    "completion_tokens": 447,
-    "cost_usd": 0.0029796,
-    "estimated_paid_cost_usd": 0.0029796,
+    "tokens_used": 6600,
+    "prompt_tokens": 6130,
+    "completion_tokens": 470,
+    "cost_usd": 0.003014,
+    "estimated_paid_cost_usd": 0.003014,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
         "calls": 3,
-        "tokens": 6654
+        "tokens": 6600
       }
     },
-    "wall_clock_seconds": 7.77,
-    "active_seconds": 7.77,
+    "wall_clock_seconds": 5.212,
+    "active_seconds": 5.212,
     "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
     "iterations": 1,

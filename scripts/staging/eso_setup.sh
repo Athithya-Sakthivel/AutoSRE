@@ -235,8 +235,8 @@ ensure_source_secret() {
   fi
 
   local obs_basic otel_headers
-  obs_basic="${OBS_ROOT_EMAIL}:${OBS_ROOT_PASSWORD}"
-  otel_headers="Authorization=Bearer ${OTEL_TOKEN}"
+  obs_basic="$(b64 "${OBS_ROOT_EMAIL}:${OBS_ROOT_PASSWORD}")"
+  otel_headers="Authorization=Basic $(b64 "${OBS_ROOT_EMAIL}:${OBS_ROOT_PASSWORD}")"
 
   local pg_uri pg_jdbc pg_pgpass gt_uri
   pg_uri="postgresql://${PG_RIVULET_USER}:${PG_RIVULET_PASS}@${PG_RIVULET_HOST}:${PG_RIVULET_PORT}/${PG_RIVULET_DB}"

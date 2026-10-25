@@ -3,6 +3,14 @@
  *
  * Endpoint contract syncs with src/autosre/api/routes.py.
  *
+ * Authentication:
+ *   In production (agent serves static UI), the agent's render_index_with_key()
+ *   injects the API key into the HTML as window.__AUTOSRE_API_KEY__. This module
+ *   reads it at load time and attaches X-API-Key to every protected request.
+ *
+ *   In dev mode (Vite proxy), the proxy injects the header server-side from
+ *   AUTOSRE_API_KEY env var. The browser header is redundant but harmless.
+ *
  * Approval flow:
  *   1. POST /api/sign-approval       -> { signature, body }
  *   2. POST /incidents/{id}/approve  -> HMAC-signed body forwarded verbatim
@@ -24,6 +32,24 @@ import type {
   MetricTimeRange,
   ReadyResponse,
 } from "./types";
+
+// ---------------------------------------------------------------------------
+// API key extraction — works in both dev and production
+// ---------------------------------------------------------------------------
+
+declare global {
+  interface Window {
+    __AUTOSRE_API_KEY__?: string;
+  }
+}
+
+const API_KEY: string = (() => {
+  try {
+    return window.__AUTOSRE_API_KEY__ || "";
+  } catch {
+    return "";
+  }
+})();
 
 // ---------------------------------------------------------------------------
 // ApiError
@@ -156,6 +182,13 @@ export async function apiFetch<T>(
     headers.set("Accept", "application/json");
   }
 
+  // Attach API key when available. In dev mode with Vite proxy, the proxy
+  // injects its own header server-side, so this is redundant but harmless.
+  // In production (agent serves static files), this is required.
+  if (API_KEY && !headers.has("X-API-Key")) {
+    headers.set("X-API-Key", API_KEY);
+  }
+
   let serializedBody: BodyInit | undefined;
   if (rawBody !== undefined) {
     serializedBody = rawBody;
@@ -265,9 +298,6 @@ export const healthApi = {
   /**
    * Bootstrap gate for the UI. Polls /readyz until the backend reports
    * "ready" or the timeout elapses.
-   *
-   * Accepts either a plain timeout number or an options object with
-   * timeoutMs and pollIntervalMs fields.
    */
   ready: async (
     timeoutOrOptions?: number | { timeoutMs?: number; pollIntervalMs?: number },
@@ -289,11 +319,17 @@ export const healthApi = {
     const deadline = Date.now() + timeoutMs;
     let lastError: unknown = null;
 
+    // Build headers for polling — include API key if available
+    const pollHeaders: Record<string, string> = {
+      Accept: "application/json",
+    };
+    if (API_KEY) {
+      pollHeaders["X-API-Key"] = API_KEY;
+    }
+
     while (Date.now() < deadline) {
       try {
-        const response = await fetch("/readyz", {
-          headers: { Accept: "application/json" },
-        });
+        const response = await fetch("/readyz", { headers: pollHeaders });
 
         if (response.ok) {
           try {
@@ -400,6 +436,8 @@ export const incidentsApi = {
       );
     }
 
+    // Forward the exact signed body with HMAC signature.
+    // The X-API-Key header is attached by apiFetch automatically.
     return apiFetch<ApprovalResponse>(
       `/incidents/${encodeURIComponent(incidentId)}/approve`,
       {

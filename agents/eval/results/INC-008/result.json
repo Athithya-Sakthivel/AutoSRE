@@ -1,44 +1,49 @@
 {
   "incident_id": "INC-008",
-  "completed_at": "2026-10-24T09:57:53Z",
+  "completed_at": "2026-10-25T03:27:46Z",
   "result": {
-    "incident_id": "f574521a-b7d9-4993-a792-84134424a4d6",
+    "incident_id": "b18dbfc6-4c7d-40f1-94a4-32522c33ee66",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "MemoryPressure",
     "service": "ingestion-worker",
     "namespace": "rivulet",
     "severity": "sev2",
-    "started_at": "2026-10-24T09:57:37Z",
+    "started_at": "2026-10-25T03:27:40Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "The ingestion-worker service in namespace rivulet is experiencing a slow memory leak growing at 25 MB per hour, leading to memory pressure approaching the 512 MB limit.",
+        "description": "A memory leak in the ingestion-worker service causing a steady growth rate of 25 MB per hour over 18 hours, bringing usage close to the 512 MB limit.",
         "confidence": 0.8,
         "evidence": [
-          "Alert: MemoryPressure",
-          "Service: ingestion-worker",
-          "Namespace: rivulet",
           "growth_rate_mb_per_hour: 25",
           "memory_limit_mb: 512",
           "memory_usage_mb: 480",
           "uptime_hours: 18",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 946.81, \"name\": \"api-gateway-76976c4568-2dhcm\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3160.81, \"name\": \"api-gateway-76976c4568-6v4vj\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 886.81, \"name\": \"api-gateway-76976c4568-96wk9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 946.81, \"name\": \"api-gateway-76976c4568-tktvs\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3160.81, \"name\": \"api-gateway-76976c4568-wgh82\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 25009.81, \"name\": \"frontend-557cbdb47c-5dzq5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 25009.81, \"name\": \"frontend-557cbdb47c-z2xpz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 1026.81, \"name\": \"ingestion-worker-6645d79cbc-drl24\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1030.81, \"name\": \"ingestion-worker-6645d79cbc-mp4zw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 25211.81, \"name\": \"postgres-6b4c959c9-47rtr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 25142.81, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 11}"
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 885.51, \"name\": \"api-gateway-557d8dc689-2nktk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 853.51, \"name\": \"api-gateway-557d8dc689-nxhgh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2550.51, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2550.51, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 57.51, \"name\": \"ingestion-worker-58bb6d6fd4-47fvv\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 621.51, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2777.51, \"name\": \"postgres-6b4c959c9-v8x2d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2724.51, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}], \"total\": 8}"
         ],
         "status": "proposed"
       },
       {
         "id": "H2",
-        "description": "An increase in data ingestion volume over the 18-hour uptime has caused memory consumption to scale proportionally, exhausting the allocated 512 MB limit.",
+        "description": "An increase in data ingestion volume or batch size over the 18-hour uptime leading to higher memory consumption by the ingestion-worker service.",
         "confidence": 0.4,
         "evidence": [
-          "Alert: MemoryPressure",
-          "Service: ingestion-worker",
-          "Namespace: rivulet",
-          "memory_limit_mb: 512",
-          "memory_usage_mb: 480",
           "uptime_hours: 18",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 946.81, \"name\": \"api-gateway-76976c4568-2dhcm\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3160.81, \"name\": \"api-gateway-76976c4568-6v4vj\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 886.81, \"name\": \"api-gateway-76976c4568-96wk9\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 946.81, \"name\": \"api-gateway-76976c4568-tktvs\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3160.81, \"name\": \"api-gateway-76976c4568-wgh82\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 25009.81, \"name\": \"frontend-557cbdb47c-5dzq5\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 25009.81, \"name\": \"frontend-557cbdb47c-z2xpz\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 1026.81, \"name\": \"ingestion-worker-6645d79cbc-drl24\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1030.81, \"name\": \"ingestion-worker-6645d79cbc-mp4zw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 25211.81, \"name\": \"postgres-6b4c959c9-47rtr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}, {\"age_seconds\": 25142.81, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 2, \"status\": \"Running\"}], \"total\": 11}"
+          "memory_usage_mb: 480",
+          "memory_limit_mb: 512",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 885.51, \"name\": \"api-gateway-557d8dc689-2nktk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 853.51, \"name\": \"api-gateway-557d8dc689-nxhgh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2550.51, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2550.51, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 57.51, \"name\": \"ingestion-worker-58bb6d6fd4-47fvv\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 621.51, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2777.51, \"name\": \"postgres-6b4c959c9-v8x2d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2724.51, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}], \"total\": 8}"
+        ],
+        "status": "proposed"
+      },
+      {
+        "id": "H3",
+        "description": "Garbage collection tuning or heap size configuration is insufficient for the workload profile of the ingestion-worker service running for 18 hours.",
+        "confidence": 0.3,
+        "evidence": [
+          "uptime_hours: 18",
+          "growth_rate_mb_per_hour: 25",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 885.51, \"name\": \"api-gateway-557d8dc689-2nktk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 853.51, \"name\": \"api-gateway-557d8dc689-nxhgh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2550.51, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2550.51, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 57.51, \"name\": \"ingestion-worker-58bb6d6fd4-47fvv\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 621.51, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2777.51, \"name\": \"postgres-6b4c959c9-v8x2d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2724.51, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}], \"total\": 8}"
         ],
         "status": "proposed"
       }
@@ -49,10 +54,10 @@
         "tool_args": {
           "namespace": "rivulet",
           "name": "ingestion-worker",
-          "reason": "Mitigating memory pressure and slow memory leak approaching the 512MB limit by performing a rolling restart."
+          "reason": "Mitigating memory leak in ingestion-worker service approaching the 512 MB memory limit"
         },
         "risk_tier": 1,
-        "rationale": "The ingestion-worker deployment is experiencing a slow memory leak reaching near its 512 MB limit. According to the decision framework, memory leaks and resource leaks should be remediated using restart_deployment (Tier 1) to reclaim memory.",
+        "rationale": "The ingestion-worker deployment is experiencing a memory leak with usage nearing the container limit (480 MB out of 512 MB). A rolling restart (restart_deployment) is a Tier 1 reversible action that will clear the leaked memory and allow the pods to start fresh.",
         "requires_approval": false
       }
     ],
@@ -62,35 +67,35 @@
         "tool_args": {
           "namespace": "rivulet",
           "name": "ingestion-worker",
-          "reason": "Mitigating memory pressure and slow memory leak approaching the 512MB limit by performing a rolling restart."
+          "reason": "Mitigating memory leak in ingestion-worker service approaching the 512 MB memory limit"
         },
-        "tool_call_id": "call_1792835872537",
+        "tool_call_id": "call_1792898865656",
         "result": {
           "name": "ingestion-worker",
           "namespace": "rivulet",
           "restarted": true,
-          "reason": "Mitigating memory pressure and slow memory leak approaching the 512MB limit by performing a rolling restart.",
+          "reason": "Mitigating memory leak in ingestion-worker service approaching the 512 MB memory limit",
           "success": true,
           "verification_passed": null
         },
         "success": true,
-        "executed_at": "2026-10-24T09:57:52Z",
+        "executed_at": "2026-10-25T03:27:45Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 7024,
-    "prompt_tokens": 6371,
-    "completion_tokens": 653,
-    "cost_usd": 0.0035438,
-    "estimated_paid_cost_usd": 0.0035438,
+    "tokens_used": 6860,
+    "prompt_tokens": 6196,
+    "completion_tokens": 664,
+    "cost_usd": 0.0035188,
+    "estimated_paid_cost_usd": 0.0035188,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
         "calls": 3,
-        "tokens": 7024
+        "tokens": 6860
       }
     },
-    "wall_clock_seconds": 15.216,
-    "active_seconds": 15.216,
+    "wall_clock_seconds": 5.208,
+    "active_seconds": 5.208,
     "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
     "iterations": 1,

@@ -17,14 +17,15 @@ helm upgrade --install autosre-cilium infra/k8s/cilium/ -n kube-system --wait --
 bash scripts/staging/postgres-deploy.sh    # Deploy Postgres StatefulSet
 bash scripts/staging/valkey-deploy.sh      # Deploy Valkey with ACL auth
 
-# rivulet - System Under Test (SUT) for the AutoSRE AI evaluation harness
-bash scripts/common/rivulet-api-gateway-deploy.sh deploy      # Java API + Flyway migration
-bash scripts/common/rivulet-frontend-deploy.sh deploy         # React SPA
-bash scripts/common/rivulet-ingestion-worker-deploy.sh deploy # Go stream consumer
-
 bash scripts/staging/openobserve.sh deploy # Deploy OpenObserve minimal
 bash scripts/common/otel-gateway-deploy.sh # Deploy OTel Collector gateway
 bash scripts/common/otel-daemonset-deploy.sh # Deploy OTel node agents
+
+# rivulet - System Under Test (SUT) for the AutoSRE AI evaluation harness
+
+bash scripts/common/rivulet-frontend-deploy.sh deploy         # React SPA
+bash scripts/common/rivulet-ingestion-worker-deploy.sh deploy # Go stream consumer
+bash scripts/common/rivulet-api-gateway-deploy.sh deploy      # Java API + Flyway migration
 
 # --- O2 alerting (owned by Terraform) --------------------------------------
 kubectl -n openobserve wait --for=condition=available deploy/openobserve --timeout=60s || { kubectl -n openobserve logs deploy/openobserve --tail=100; exit 1; }
@@ -39,10 +40,9 @@ curl -fsS http://localhost:5080 >/dev/null 2>&1 && echo "OpenObserve ready" || {
 bash infra/terraform/run.sh --apply        # Provision O2 streams, alerts, and roles
 
 
-
-# bash scripts/common/autosre-agent-deploy.sh deploy
+ bash scripts/common/autosre-agent-deploy.sh deploy
 # Not required in CI/CD
-# bash scripts/common/test-o2.sh             # Run end-to-end telemetry smoke test
+ bash scripts/common/test-o2.sh             # Run end-to-end telemetry smoke test
 
 
 # --- Verify ----------------------------------------------------------------
