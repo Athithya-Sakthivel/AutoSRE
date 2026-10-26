@@ -6,17 +6,27 @@ It combines **event-driven detection**, **evidence-based diagnosis**, **policy-c
 
 ---
 
+## Why AutoSRE
+
+**Paged engineers take tens of minutes to triage and fix routine incidents — time that burns SLO error budgets.**
+
+AutoSRE detects, diagnoses, and resolves failures in under 30 seconds the moment the observability system signals a problem.
+
+*By default, the agent auto-fixes safe Tier 1 actions immediately; higher-risk Tier 2+ operations pause for explicit human approval before execution*
+
+---
+
 ![AutoSRE agent resolving an incident end-to-end](docs/assets/agent_resolve_demo.gif)
 
 ---
 
-*End-to-end incident resolution. The demo fills Valkey to its 2 MB `maxmemory` limit, triggering evictions (INC-013). OpenObserve detects the pattern and sends an HMAC-signed webhook to `/alerts`. The agent investigates using `get_valkey_stats` and `query_openobserve`, identifies cache eviction, and proposes `flush_all` (Tier 2). The workflow pauses for human approval in the UI, then executes `FLUSHALL`, verifies memory recovery through telemetry, and resolves the incident.*
+*End-to-end incident resolution with HITL. The demo injects a Valkey memory exhaustion failure by setting `maxmemory` to 2 MB and filling it until keys are evicted, simulating a cache eviction storm (INC-013). OpenObserve evaluates telemetry, triggers an alert, and sends an HMAC-signed webhook to `/alerts`. The agent investigates using the `get_valkey_stats` and `query_openobserve` tools, identifies cache eviction, and proposes `flush_all` (Tier 2). The workflow pauses for human approval in the UI, then executes `FLUSHALL`, verifies memory recovery through telemetry, and resolves the incident.*
 
 ---
 
 ## System Overview
 
-AutoSRE evaluates against [Rivulet](rivulet/README.md), a fictional distributed order-processing platform deployed on Kubernetes with PostgreSQL, Valkey, and an ingestion pipeline **to simulate a production environment**. Controlled chaos experiments inject failures into the application, its dependencies, and the cluster.
+AutoSRE evaluates against [Rivulet](rivulet/README.md), a fictional distributed order-processing platform deployed as microservices with PostgreSQL, Valkey, and an ingestion pipeline, **to simulate a production environment**. Controlled chaos experiments inject failures into the application, its dependencies, and the cluster.
 
 **OpenObserve** evaluates telemetry and triggers the agent through an authenticated webhook. The agent diagnoses incidents using **observable evidence only** — hidden chaos-injection metadata is **never available to the agent**.
 
@@ -26,10 +36,16 @@ AutoSRE evaluates against [Rivulet](rivulet/README.md), a fictional distributed 
 
 ---
 
-## How It Works
+## End-to-End Incident Flow
+
+AutoSRE runs each incident as a closed loop: **inject → detect → investigate → remediate → verify → evaluate**.
+
+**Flow at a glance:**
+
+`Chaos injection → OpenTelemetry signals → OpenObserve alert → HMAC webhook → Agent investigation → Policy gate / HITL → Remediation → Telemetry verification → Eval and cost`
 
 1. **Inject controlled failures** — Chaos scripts simulate real failures: connection pool exhaustion, CPU saturation, cache poisoning, consumer lag, crash loops, OOM kills, quota exhaustion, and others.
-2. **Detect via signed webhook** — OpenTelemetry instrumentation emits logs, metrics, and traces. OpenObserve evaluates alert conditions and, on match, POSTs an HMAC-signed payload to AutoSRE's `/alerts` endpoint. The agent is purely reactive — no polling, no scheduled scans.
+2. **Detect via signed webhook** — OpenTelemetry instrumentation emits logs, metrics, and traces. OpenObserve evaluates alert conditions and, on match, POSTs an HMAC-signed payload to AutoSRE’s `/alerts` endpoint. The agent is purely reactive — no polling, no scheduled scans.
 3. **Investigate with domain tools** — The agent uses 17 registered tools to query telemetry and inspect Kubernetes state, correlating symptoms into a probable root cause.
 4. **Remediate under policy control** — Actions execute only if permitted by policy. Tier 2+ operations pause for Human-in-the-Loop (HITL) approval; Tier 4 operations (e.g., `delete_namespace`, `drop_table`) are refused outright.
 5. **Verify against telemetry** — Recovery is confirmed against subsequent telemetry and cluster state. A successful tool call is not treated as evidence of recovery.
@@ -37,7 +53,7 @@ AutoSRE evaluates against [Rivulet](rivulet/README.md), a fictional distributed 
 
 ---
 
-## End-to-End Observability
+## Observability
 
 Three layers, one view:
 
@@ -45,7 +61,9 @@ Three layers, one view:
 - [**OpenInference**](https://github.com/Arize-ai/openinference) — instrumentation for model calls and tool execution.
 - [**OpenObserve**](https://github.com/openobserve/openobserve) — unified storage, query, and alerting across both.
 
-Together they expose the full lifecycle: the original failure, the evidence the agent saw, every tool invocation, each remediation attempt, and the post-remediation signals that determined resolution. *Engineers can audit why an action was taken, not only whether it worked.*
+Together they expose the full lifecycle: the original failure, the evidence the agent saw, every tool invocation, each remediation attempt, and the post-remediation signals that determined resolution. 
+
+*Engineers can audit not only whether an action worked, but why it was taken.*
 
 ---
 
@@ -53,7 +71,7 @@ Together they expose the full lifecycle: the original failure, the evidence the 
 
 ---
 
-*Every LangGraph phase is an OpenTelemetry span. This clip walks one incident trace filtered by `operation_name='LangGraph'` (1.3K spans, 0 errors): expand the graph, step through triage → hypothesize → propose → approve, and watch the LLM state — hypotheses, proposed actions, per-call token cost — evolve in the right pane. The approve node appears twice because the graph interrupts for human approval and resumes on decision. FastAPI endpoints complete in μs–ms; duration outliers (5–25s) correspond to LLM calls and tool execution. Self-hosted OpenObserve (127.0.0.1:5081).*
+*Every LangGraph phase is an OpenTelemetry span. This clip shows one incident trace filtered by `operation_name='LangGraph'` (1.3K spans, 0 errors). Expand the graph and step through triage → hypothesize → propose → approve. The right pane shows the LLM state changing: hypotheses, proposed actions, and per-call token cost. The approve node appears twice because the graph pauses for human approval and resumes after a decision. FastAPI endpoints finish in μs–ms; longer outliers are LLM calls and tool execution.*
 
 ---
 
@@ -125,21 +143,19 @@ Reference 14-scenario run:
 | Total tokens | 191,393 |
 | Model | `gemini/gemini-3.5-flash-lite` |
 
-Against documented per-incident manual baselines (with an appropriate MTTR per incident), mean active resolution time fell by 98.1%. Those baselines are documented estimates for each failure class, not measured human trials — the absolute figures above are the primary result.
+---
 
-*Simulated incidents on a local Kubernetes cluster. Latency and cost depend on model provider, model selection, prompt/response size, tool latency, and cluster configuration; production numbers will differ.*
+**Reading the 100%:** the two assessed incidents are *correct outcomes*, not misses — a duplicate-webhook storm (INC-010) and a prohibited namespace deletion (INC-011) both require *no action*. The rate credits both outcomes: `(resolved + assessed) / total = (12 + 2) / 14 = 100%`. A simpler `resolved / total` would read 12/14 = 85.7% and would penalize the agent for correctly declining to act.
+
+The agent resolves incidents 98.1% faster than the *estimated time* from when a human engineer is paged to when they manually fix the same issues.
+
+*Simulated incidents on a local Kubernetes cluster. Latency and cost depend on model provider, model selection, incident complexity, tool latency, and cluster configuration; production numbers will differ.*
+
+> Every claim is verifiable against the test suite in `agents/eval/results/`.
 
 ---
 
-## Goal
-
-AutoSRE answers one question: **can an autonomous agent resolve infrastructure incidents quickly, cheaply, and within defined safety boundaries?**
-
-Its value depends on reproducible scenarios, verified control enforcement, and honest reporting of benchmark conditions. *Every claim above is checkable against the test suite in `agents/eval/results/`.*
-
----
-
-# Running Your First Evaluation
+# Getting Started: Run Your First Incident
 
 This guide walks through deploying the full AutoSRE stack on a local Kubernetes cluster and running a live incident from chaos injection to autonomous resolution.
 
@@ -147,17 +163,26 @@ This guide walks through deploying the full AutoSRE stack on a local Kubernetes 
 
 ## Prerequisites
 
-| Requirement | Why | Setup |
-| :--- | :--- | :--- |
-| **Docker** (non-root) | Required for Kind cluster and devcontainer stability | `sudo usermod -aG docker $USER && newgrp docker` |
-| **Visual Studio Code** + [Dev Containers extension](https://code.visualstudio.com/docs/devcontainers/containers) | Reproducible dev environment with all tooling pre-installed | Open the repo in VS Code → **Reopen in Container** |
-| **LLM API key** (LiteLLM-compatible) | Powers the agent's investigation and decision-making | Free key: [Google AI Studio](https://aistudio.google.com/api-key) |
-
-The devcontainer includes `kubectl`, `kind`, `helm`, `tofu`, `uv`, and `node` — no local installation required.
+1. **Docker installed and running _without_ sudo access. Non-root is required for the Kind cluster and devcontainer stability. Run `sudo usermod -aG docker $USER && newgrp docker` if not already.**
+2. **Visual Studio Code** with the [Dev Containers extension](https://code.visualstudio.com/docs/devcontainers/containers) for a reproducible dev environment.
+3. **An LLM API key** (LiteLLM-compatible) to power the agent's investigation and decision-making. 
+   **A free key is sufficient for development and testing:** [Google AI Studio](https://aistudio.google.com/apikey).
 
 ---
 
-## Phase 1: Deploy the Full Stack
+## PHASE 0: Clone the repo and build the devcontainer (Reproducible).
+
+```sh
+cd $HOME && rm -rf AutoSRE && git clone https://github.com/Athithya-Sakthivel/AutoSRE.git
+cd AutoSRE && code .
+# Ctrl + Shift + P → Paste `Dev Containers: Rebuild Container Without Cache` and Enter.
+```
+
+> First-time build takes 5–15 minutes depending on network speed. You may create a GitHub Codespace instead if network is slow.
+
+---
+
+## PHASE 1: Deploy the Full Stack
 
 The `demo_e2e.sh` script builds the entire environment from scratch: a local Kind cluster, zero-trust networking, an observability pipeline, the Rivulet microservices platform (the system under test), and the AutoSRE agent itself. It takes approximately 15 minutes on the first run.
 
@@ -178,20 +203,20 @@ export AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER="0.00030"
 export AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER="0.00250"
 
 # ── Deploy ─────────────────────────────────────────────────────────────
-bash /workspace/scripts/staging/demo_e2e.sh
+bash scripts/staging/demo_e2e.sh
 ```
 
 ---
 
 ![Typical demo_e2e.sh output](docs/assets/demo_e2e.sh.output.png)
 
-### Typical output: all pods running, OpenObserve alerts provisioned, agent healthy.*
+### Typical output: all pods running, OpenObserve alerts provisioned, agent healthy.
 
 ---
 
-## Phase 2: Run a Live Incident
+## PHASE 2: Run a Live Incident
 
-The `demo.sh` script triggers an end-to-end incident lifecycle — from chaos injection through autonomous resolution. By default, it runs **INC-013** (Valkey eviction storm), a Tier-2 incident requiring human approval.
+The `demo.sh` script triggers an end-to-end incident lifecycle — from chaos injection through autonomous resolution. By default, it runs **INC-013** (Valkey eviction storm), a Tier-2 incident that requires human approval.
 
 ```bash
 bash scripts/staging/demo.sh
@@ -201,23 +226,23 @@ bash scripts/staging/demo.sh
 
 ![demo.sh output showing chaos injection](docs/assets/demo.sh.output.1.png)
 
-### Chaos injected, waiting for OpenObserve to detect the failure pattern
+### Chaos injected. The demo sets Valkey's `maxmemory` to 2 MB and fills the cache until keys are evicted, simulating a cache-eviction storm for the agent to diagnose and resolve with an approved `flush_all`.
 
 ---
 
 ![demo.sh output showing webhook delivery and proposed action](docs/assets/demo.sh.output.2.png)
 
-### Webhook delivered, agent investigates and proposes `flush_all`
+### Webhook delivered. The agent investigates, proposes `flush_all`, and pauses for HITL approval. Open `http://localhost:18000`, review the proposed action, and click **Approve**.
 
 ---
 
 ![demo.sh output showing HITL approval pause](docs/assets/demo.sh.output.3.png)
 
-### Agent paused for HITL approval. Open `http://localhost:18000` to review the proposed action and approve. The demo script holds port-forwards open until you press Enter, giving you time to inspect both.
+### Incident resolved. The demo script holds the port-forwards open until you press Enter, leaving time to inspect the result and move on to Phase 3.
 
 ---
 
-## Phase 3: Explore the Distributed Trace
+## PHASE 3: Explore the Distributed Trace
 
 Open [OpenObserve](http://localhost:5080) and navigate to **Traces** in the left sidebar.
 
