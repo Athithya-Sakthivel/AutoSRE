@@ -1,49 +1,36 @@
 {
   "incident_id": "INC-002",
-  "completed_at": "2026-10-25T03:39:43Z",
+  "completed_at": "2026-10-26T04:43:13Z",
   "result": {
-    "incident_id": "e5a399a2-5ef7-45b6-9510-a2b9764b68e3",
+    "incident_id": "de22691c-485b-445c-9889-53c3794746cf",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "HighCPUUtilization",
     "service": "api-gateway",
     "namespace": "rivulet",
     "severity": "sev2",
-    "started_at": "2026-10-25T03:39:30Z",
+    "started_at": "2026-10-26T04:43:00Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "An increase in request rate (RPS of 8500) across the 2 replicas of the api-gateway service in namespace rivulet is causing high CPU saturation.",
-        "confidence": 0.7,
+        "description": "An increase in request rate (RPS 8500) across only 2 replicas has led to CPU saturation in the api-gateway service.",
+        "confidence": 0.5,
         "evidence": [
-          "Alert: HighCPUUtilization",
-          "Service: api-gateway",
-          "Namespace: rivulet",
-          "Annotations: cpu_utilization_pct=92, replica_count=2, rps=8500",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 1595.75, \"name\": \"api-gateway-557d8dc689-2nktk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1563.75, \"name\": \"api-gateway-557d8dc689-nxhgh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3260.75, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3260.75, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 266.75, \"name\": \"ingestion-worker-6b586cfc8c-5l6vw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 1331.75, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3487.75, \"name\": \"postgres-6b4c959c9-v8x2d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3434.75, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}], \"total\": 8}"
+          "CPU utilization is at 92%",
+          "Replica count is 2",
+          "RPS is 8500",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 423.96, \"name\": \"api-gateway-76976c4568-9tmbl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 423.96, \"name\": \"api-gateway-76976c4568-jmh9j\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 439.96, \"name\": \"api-gateway-migrate-k6d9w\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Succeeded\"}, {\"age_seconds\": 93469.96, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 93469.96, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 6172.96, \"name\": \"ingestion-worker-5c7579977c-fw4xw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 60029.96, \"name\": \"ingestion-worker-7467694c85-j6s9c\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 91540.96, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 13541.96, \"name\": \"postgres-6b4c959c9-nm8kg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 93643.96, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}], \"total\": 10}"
         ],
-        "status": "investigating"
+        "status": "proposed"
       },
       {
         "id": "H2",
-        "description": "The current replica count of 2 is insufficient to handle the incoming request load for the api-gateway service, leading to CPU throttling and high utilization.",
-        "confidence": 0.7,
-        "evidence": [
-          "Alert: HighCPUUtilization",
-          "Annotations: cpu_utilization_pct=92, replica_count=2, rps=8500",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 1595.75, \"name\": \"api-gateway-557d8dc689-2nktk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1563.75, \"name\": \"api-gateway-557d8dc689-nxhgh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3260.75, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3260.75, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 266.75, \"name\": \"ingestion-worker-6b586cfc8c-5l6vw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 1331.75, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3487.75, \"name\": \"postgres-6b4c959c9-v8x2d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3434.75, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}], \"total\": 8}"
-        ],
-        "status": "investigating"
-      },
-      {
-        "id": "H3",
-        "description": "Inefficient request processing or an unoptimized code path in the api-gateway service is leading to high CPU consumption under the observed traffic load.",
+        "description": "Inefficient request handling or resource limits configuration in the api-gateway service is causing high CPU consumption under normal operational load.",
         "confidence": 0.3,
         "evidence": [
-          "Alert: HighCPUUtilization",
-          "Category: cpu_saturation",
-          "Annotations: cpu_utilization_pct=92, rps=8500",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 1595.75, \"name\": \"api-gateway-557d8dc689-2nktk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 1563.75, \"name\": \"api-gateway-557d8dc689-nxhgh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3260.75, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3260.75, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 266.75, \"name\": \"ingestion-worker-6b586cfc8c-5l6vw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 1331.75, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3487.75, \"name\": \"postgres-6b4c959c9-v8x2d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3434.75, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}], \"total\": 8}"
+          "CPU utilization is at 92%",
+          "Replica count is 2",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 423.96, \"name\": \"api-gateway-76976c4568-9tmbl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 423.96, \"name\": \"api-gateway-76976c4568-jmh9j\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 439.96, \"name\": \"api-gateway-migrate-k6d9w\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Succeeded\"}, {\"age_seconds\": 93469.96, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 93469.96, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 6172.96, \"name\": \"ingestion-worker-5c7579977c-fw4xw\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 60029.96, \"name\": \"ingestion-worker-7467694c85-j6s9c\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 91540.96, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 13541.96, \"name\": \"postgres-6b4c959c9-nm8kg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 93643.96, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}], \"total\": 10}"
         ],
         "status": "proposed"
       }
@@ -52,13 +39,13 @@
       {
         "tool_name": "scale_deployment",
         "tool_args": {
-          "namespace": "rivulet",
-          "name": "api-gateway",
           "replicas": 4,
-          "reason": "High CPU utilization (92%) due to high RPS (8500) across only 2 replicas requires scaling out the deployment to handle the traffic load."
+          "reason": "CPU saturation due to high traffic; horizontal scaling required",
+          "name": "api-gateway",
+          "namespace": "rivulet"
         },
         "risk_tier": 2,
-        "rationale": "The API gateway is experiencing high CPU saturation due to insufficient capacity under high request volume (8500 RPS). According to the decision framework, insufficient capacity requires scaling the deployment rather than restarting it.",
+        "rationale": "Fallback action for category 'cpu_saturation' (LLM unavailable or low confidence). Top hypothesis: An increase in request rate (RPS 8500) across only 2 replicas has led to CPU saturation in the api-g",
         "requires_approval": false
       }
     ],
@@ -66,40 +53,40 @@
       {
         "tool_name": "scale_deployment",
         "tool_args": {
-          "namespace": "rivulet",
-          "name": "api-gateway",
           "replicas": 4,
-          "reason": "High CPU utilization (92%) due to high RPS (8500) across only 2 replicas requires scaling out the deployment to handle the traffic load."
+          "reason": "CPU saturation due to high traffic; horizontal scaling required",
+          "name": "api-gateway",
+          "namespace": "rivulet"
         },
-        "tool_call_id": "call_1792899580384",
+        "tool_call_id": "call_1792989790098",
         "result": {
           "name": "api-gateway",
           "namespace": "rivulet",
           "previous_replicas": 2,
           "new_replicas": 4,
           "scaled": true,
-          "reason": "High CPU utilization (92%) due to high RPS (8500) across only 2 replicas requires scaling out the deployment to handle the traffic load.",
+          "reason": "CPU saturation due to high traffic; horizontal scaling required",
           "success": true,
           "verification_passed": null
         },
         "success": true,
-        "executed_at": "2026-10-25T03:39:40Z",
+        "executed_at": "2026-10-26T04:43:10Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 11144,
-    "prompt_tokens": 8394,
-    "completion_tokens": 2750,
-    "cost_usd": 0.0093932,
-    "estimated_paid_cost_usd": 0.0093932,
+    "tokens_used": 9539,
+    "prompt_tokens": 7398,
+    "completion_tokens": 2141,
+    "cost_usd": 0.0061676000000000005,
+    "estimated_paid_cost_usd": 0.009040600000000001,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
         "calls": 4,
-        "tokens": 11144
+        "tokens": 9942
       }
     },
-    "wall_clock_seconds": 9.485,
-    "active_seconds": 9.485,
+    "wall_clock_seconds": 9.383,
+    "active_seconds": 9.383,
     "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
     "iterations": 1,

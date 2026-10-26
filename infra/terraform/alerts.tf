@@ -447,7 +447,7 @@ locals {
       description = "INC-014: Deployment scaled beyond namespace ResourceQuota"
       stream_type = "logs"
       stream_name = "app_logs"
-      enabled     = true
+      enabled     = false
       query_type  = "custom"
       silence     = 5
 

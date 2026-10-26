@@ -18,6 +18,11 @@
  * The signature covers the exact bytes returned in `body`; the client must
  * forward those bytes without re-serializing, otherwise HMAC verification
  * on the server fails.
+ *
+ * Retry policy:
+ *   - GET requests retry up to 3 times on 5xx errors (exponential backoff)
+ *   - ALL methods retry up to 3 times on 502/503/504 (transient gateway errors)
+ *     These occur when the checkpointer connection is busy during graph resume
  */
 
 import type {
@@ -86,6 +91,9 @@ export class ApiError extends Error {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const RETRY_BACKOFF_MS = 500;
 const SIGN_APPROVAL_PATH = "/api/sign-approval";
+
+/** HTTP status codes that indicate transient server/gateway errors. */
+const TRANSIENT_STATUS_CODES = new Set([502, 503, 504]);
 
 // ---------------------------------------------------------------------------
 // Core fetch wrapper
@@ -201,7 +209,8 @@ export async function apiFetch<T>(
 
   const method = (requestInit.method ?? "GET").toUpperCase();
   const retryableMethod = method === "GET";
-  const maxAttempts = retryableMethod ? 2 : 1;
+  // 3 attempts for GET (handles checkpointer contention), 1 for POST/PUT/DELETE
+  const maxAttempts = retryableMethod ? 3 : 1;
   const normalizedTimeoutMs = normalizeTimeout(timeoutMs);
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -244,6 +253,18 @@ export async function apiFetch<T>(
           url,
         );
 
+        // Retry on transient gateway errors (502, 503, 504) for ALL methods.
+        // These occur when the checkpointer connection is busy during graph
+        // resume after approval. Linear backoff: 1s, 2s, 3s.
+        if (
+          TRANSIENT_STATUS_CODES.has(response.status) &&
+          attempt < maxAttempts - 1
+        ) {
+          await sleep(1000 * (attempt + 1), callerSignal);
+          continue;
+        }
+
+        // Retry on 500+ for GET requests only (exponential backoff).
         if (
           retryableMethod &&
           response.status >= 500 &&

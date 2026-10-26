@@ -1,37 +1,37 @@
 {
   "incident_id": "INC-014",
-  "completed_at": "2026-10-25T03:21:16Z",
+  "completed_at": "2026-10-26T00:34:16Z",
   "result": {
-    "incident_id": "3e54da98-45ae-4c7c-9bf5-88f23e0055bd",
+    "incident_id": "1786bdc8-09de-4915-b689-31609eddeb2f",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "ResourceQuotaExceeded",
     "service": "ingestion-worker",
     "namespace": "rivulet",
     "severity": "sev2",
-    "started_at": "2026-10-25T03:21:04Z",
+    "started_at": "2026-10-26T00:34:07Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "The ingestion-worker deployment in namespace rivulet attempted to scale up to 8 pods, which exceeds the remaining limit of 6 pods defined in the eval-quota ResourceQuota.",
-        "confidence": 0.95,
+        "description": "The ingestion-worker deployment in namespace rivulet attempted to scale up to 8 pods, exceeding the remaining limit of 6 pods under the eval-quota ResourceQuota.",
+        "confidence": 0.9,
         "evidence": [
           "Alert: ResourceQuotaExceeded",
           "Service: ingestion-worker in namespace rivulet",
-          "Annotations: limited_pods: 6, quota_name: eval-quota, requested_pods: 8, used_pods: 6",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 489.06, \"name\": \"api-gateway-557d8dc689-2nktk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 457.06, \"name\": \"api-gateway-557d8dc689-nxhgh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2154.06, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2154.06, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 225.06, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 230.06, \"name\": \"ingestion-worker-7467694c85-zp8hn\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 75.06, \"name\": \"ingestion-worker-ccf569c4c-lh4ts\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 2381.06, \"name\": \"postgres-6b4c959c9-v8x2d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2328.06, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}], \"total\": 9}"
+          "Annotations: limited_pods=6, quota_name=eval-quota, requested_pods=8, used_pods=6",
+          "Tool list_pods({\"namespace\": \"rivulet\", \"label_selector\": \"app=ingestion-worker\"}) status=succeeded output={\"pods\": [], \"total\": 0}"
         ],
-        "status": "confirmed"
+        "status": "proposed"
       },
       {
         "id": "H2",
-        "description": "An automated scaling event or deployment update requested more pod replicas than permitted by the cluster administrator within the rivulet namespace.",
-        "confidence": 0.8,
+        "description": "An erroneous horizontal pod autoscaler configuration or a manual rollout requested a replica count for ingestion-worker that breaches the defined eval-quota limits.",
+        "confidence": 0.6,
         "evidence": [
           "Alert: ResourceQuotaExceeded",
-          "Labels: category: resource_quota",
-          "Annotations: requested_pods: 8, used_pods: 6",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 489.06, \"name\": \"api-gateway-557d8dc689-2nktk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 457.06, \"name\": \"api-gateway-557d8dc689-nxhgh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2154.06, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2154.06, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 225.06, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 230.06, \"name\": \"ingestion-worker-7467694c85-zp8hn\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 75.06, \"name\": \"ingestion-worker-ccf569c4c-lh4ts\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 2381.06, \"name\": \"postgres-6b4c959c9-v8x2d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2328.06, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}], \"total\": 9}"
+          "Service: ingestion-worker in namespace rivulet",
+          "Requested pods (8) exceed used pods (6) and limited quota context",
+          "Tool list_pods({\"namespace\": \"rivulet\", \"label_selector\": \"app=ingestion-worker\"}) status=succeeded output={\"pods\": [], \"total\": 0}"
         ],
         "status": "proposed"
       }
@@ -42,11 +42,11 @@
         "tool_args": {
           "namespace": "rivulet",
           "name": "ingestion-worker",
-          "replicas": 4,
-          "reason": "Reduce ingestion-worker replica count to comply with the eval-quota ResourceQuota pod limit."
+          "replicas": 6,
+          "reason": "Reduce replica count to fit within the eval-quota ResourceQuota limit of 6 pods"
         },
         "risk_tier": 2,
-        "rationale": "The ingestion-worker deployment exceeded the eval-quota ResourceQuota limit because it was scaled too high (requesting 8 pods against a quota limit of 6). Scaling down the deployment replicas to 4 resolves the resource quota violation.",
+        "rationale": "The ingestion-worker deployment attempted to scale up to 8 pods, exceeding the ResourceQuota limit of 6 pods. Scaling down the desired replicas to match the quota limit will resolve the ResourceQuotaExceeded error.",
         "requires_approval": false
       }
     ],
@@ -56,38 +56,38 @@
         "tool_args": {
           "namespace": "rivulet",
           "name": "ingestion-worker",
-          "replicas": 4,
-          "reason": "Reduce ingestion-worker replica count to comply with the eval-quota ResourceQuota pod limit."
+          "replicas": 6,
+          "reason": "Reduce replica count to fit within the eval-quota ResourceQuota limit of 6 pods"
         },
-        "tool_call_id": "call_1792898473833",
+        "tool_call_id": "call_1792974853401",
         "result": {
           "name": "ingestion-worker",
           "namespace": "rivulet",
-          "previous_replicas": 8,
-          "new_replicas": 4,
+          "previous_replicas": 7,
+          "new_replicas": 6,
           "scaled": true,
-          "reason": "Reduce ingestion-worker replica count to comply with the eval-quota ResourceQuota pod limit.",
+          "reason": "Reduce replica count to fit within the eval-quota ResourceQuota limit of 6 pods",
           "success": true,
           "verification_passed": null
         },
         "success": true,
-        "executed_at": "2026-10-25T03:21:13Z",
+        "executed_at": "2026-10-26T00:34:13Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 9774,
-    "prompt_tokens": 7795,
-    "completion_tokens": 1979,
-    "cost_usd": 0.007286000000000001,
-    "estimated_paid_cost_usd": 0.007286000000000001,
+    "tokens_used": 6078,
+    "prompt_tokens": 5566,
+    "completion_tokens": 512,
+    "cost_usd": 0.0029498,
+    "estimated_paid_cost_usd": 0.0029498,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
-        "calls": 4,
-        "tokens": 9774
+        "calls": 3,
+        "tokens": 6078
       }
     },
-    "wall_clock_seconds": 9.63,
-    "active_seconds": 9.63,
+    "wall_clock_seconds": 6.305,
+    "active_seconds": 6.305,
     "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
     "iterations": 1,

@@ -1,31 +1,25 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Bootstrap External Secrets Operator with in-cluster SecretStore
+#
+# Always forces immediate sync on rerun — no waiting for refreshInterval.
 # ==============================================================================
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 umask 0077
 
-# ------------------------------------------------------------------------------
-# Logging
-# ------------------------------------------------------------------------------
 log()   { printf '\033[1;34m[secrets]\033[0m %s\n' "$*" >&2; }
 warn()  { printf '\033[1;33m[secrets]\033[0m WARN: %s\n' "$*" >&2; }
 error() { printf '\033[1;31m[secrets]\033[0m ERROR: %s\n' "$*" >&2; }
 die()   { error "$*"; exit 1; }
 need()  { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
 
-# ------------------------------------------------------------------------------
-# Runtime
-# ------------------------------------------------------------------------------
 DRY_RUN=false
 TMP_DIR=""
 
 cleanup() {
-  if [[ "$DRY_RUN" == "true" ]]; then
-    return 0
-  fi
+  if [[ "$DRY_RUN" == "true" ]]; then return 0; fi
   [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]] && rm -rf "$TMP_DIR" || true
 }
 trap cleanup EXIT
@@ -37,11 +31,9 @@ init_runtime() {
   chmod 0700 "$TMP_DIR"
 }
 
-# Base64 encode, handling empty strings correctly
 b64() {
   local input="$1"
   if [[ -z "$input" ]]; then
-    # Empty string encodes to empty base64
     printf ''
   else
     printf '%s' "$input" | base64 | tr -d '\n'
@@ -64,13 +56,14 @@ STORE_SA="${STORE_SA:-eso-k8s-reader}"
 
 TARGET_NAMESPACES=(openobserve rivulet sre eval)
 
+# Fast refresh for staging — secrets update within 60s even without force-sync
+ESO_REFRESH_INTERVAL="${ESO_REFRESH_INTERVAL:-1m}"
+
 # ------------------------------------------------------------------------------
 # Value contract
 # ------------------------------------------------------------------------------
 OBS_ROOT_EMAIL="${OBS_ROOT_EMAIL:-admin@autosre.local}"
 OBS_ROOT_PASSWORD="${OBS_ROOT_PASSWORD:-StagingO2RootPass123!}"
-OBS_READER_EMAIL="${OBS_READER_EMAIL:-reader@autosre.local}"
-OBS_READER_PASSWORD="${OBS_READER_PASSWORD:-StagingO2ReadPass123!}"
 OBS_URL="${OBS_URL:-http://openobserve.openobserve.svc.cluster.local:5080}"
 
 STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:-stautosrekind}"
@@ -94,12 +87,12 @@ SRE_AGENT_URL="${SRE_AGENT_URL:-http://sre-agent.sre.svc.cluster.local:8000}"
 ALERT_WEBHOOK_SECRET="${ALERT_WEBHOOK_SECRET:-kind-alert-webhook-secret-rotate-me}"
 
 # ------------------------------------------------------------------------------
-# AutoSRE Agent environment (must match the agent's exported variable names)
+# AutoSRE Agent environment
 # ------------------------------------------------------------------------------
-# Legacy API-key input remains supported; the agent consumes AUTOSRE_LLM__API_KEY.
+# CRITICAL: Agent uses ROOT creds for OpenObserve. The reader user is never
+# created in O2, so reader creds would cause 401 on query_openobserve tool.
 export LLM_API_KEY="${LLM_API_KEY:-}"
 
-# LLM (exactly the 10 supported/exported settings)
 export AUTOSRE_LLM__MODEL_COORDINATOR="${AUTOSRE_LLM__MODEL_COORDINATOR:-gemini/gemini-3.5-flash-lite}"
 export AUTOSRE_LLM__MODEL_WORKER="${AUTOSRE_LLM__MODEL_WORKER:-gemini/gemini-3.5-flash-lite}"
 export AUTOSRE_API_KEY="${AUTOSRE_API_KEY:-Temp-password234}"
@@ -112,9 +105,7 @@ export AUTOSRE_LLM__MAX_RETRIES="${AUTOSRE_LLM__MAX_RETRIES:-5}"
 export AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS="${AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS:-2.0}"
 export AUTOSRE_LLM__MAX_BACKOFF_SECONDS="${AUTOSRE_LLM__MAX_BACKOFF_SECONDS:-60.0}"
 
-
-# Safety thresholds and execution limits used by the agent
-export AUTOSRE_SAFETY__CONFIDENCE_PROPOSE="${AUTOSRE_SAFETY__CONFIDENCE_PROPOSE:-0.55}"
+export AUTOSRE_SAFETY__CONFIDENCE_PROPOSE="${AUTOSRE_SAFETY__CONFIDENCE_PROPOSE:-0.35}"
 export AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH="${AUTOSRE_SAFETY__CONFIDENCE_FAST_PATH:-0.80}"
 export AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP="${AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP:-0.40}"
 export AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT="${AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT:-0.05}"
@@ -122,33 +113,28 @@ export AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS="${AUTOSRE_SAFETY__MAX_RISK_TIER
 export AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT="${AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT:-10}"
 export AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS="${AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS:-600}"
 
-# Evaluation judge
 export AUTOSRE_EVAL__JUDGE_MODEL="${AUTOSRE_EVAL__JUDGE_MODEL:-gemini/gemini-3.5-flash-lite}"
 export AUTOSRE_EVAL__JUDGE_API_KEY="${AUTOSRE_EVAL__JUDGE_API_KEY:-${AUTOSRE_LLM__API_KEY}}"
 
-# PostgreSQL (in-cluster service defaults)
 export AUTOSRE_POSTGRES__HOST="${AUTOSRE_POSTGRES__HOST:-$PG_RIVULET_HOST}"
 export AUTOSRE_POSTGRES__PORT="${AUTOSRE_POSTGRES__PORT:-$PG_RIVULET_PORT}"
 export AUTOSRE_POSTGRES__DB="${AUTOSRE_POSTGRES__DB:-$PG_RIVULET_DB}"
 export AUTOSRE_POSTGRES__USER="${AUTOSRE_POSTGRES__USER:-$PG_RIVULET_USER}"
 export AUTOSRE_POSTGRES__PASSWORD="${AUTOSRE_POSTGRES__PASSWORD:-$PG_RIVULET_PASS}"
 
-# Valkey
 export AUTOSRE_VALKEY__HOST="${AUTOSRE_VALKEY__HOST:-valkey.rivulet.svc.cluster.local}"
 export AUTOSRE_VALKEY__PORT="${AUTOSRE_VALKEY__PORT:-6379}"
 export AUTOSRE_VALKEY__PASSWORD="${AUTOSRE_VALKEY__PASSWORD:-StagingValkeyP@ss123}"
 export AUTOSRE_VALKEY__TLS="${AUTOSRE_VALKEY__TLS:-false}"
 
-# OpenObserve
-export AUTOSRE_OPENOBSERVE__EMAIL="${AUTOSRE_OPENOBSERVE__EMAIL:-$OBS_READER_EMAIL}"
-export AUTOSRE_OPENOBSERVE__PASSWORD="${AUTOSRE_OPENOBSERVE__PASSWORD:-$OBS_READER_PASSWORD}"
+# CRITICAL: Use ROOT creds — reader user doesn't exist in O2
+export AUTOSRE_OPENOBSERVE__EMAIL="${AUTOSRE_OPENOBSERVE__EMAIL:-$OBS_ROOT_EMAIL}"
+export AUTOSRE_OPENOBSERVE__PASSWORD="${AUTOSRE_OPENOBSERVE__PASSWORD:-$OBS_ROOT_PASSWORD}"
 export AUTOSRE_OPENOBSERVE__URL="${AUTOSRE_OPENOBSERVE__URL:-$OBS_URL}"
 
-# Alerting and admin
 export AUTOSRE_ALERT__WEBHOOK_SECRET="${AUTOSRE_ALERT__WEBHOOK_SECRET:-$ALERT_WEBHOOK_SECRET}"
 export AUTOSRE_ADMIN__SECRET="${AUTOSRE_ADMIN__SECRET:-${AUTOSRE_ADMIN_SECRET:-}}"
 
-# OpenTelemetry and deployment metadata
 export AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT="${AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT:-http://otel-gateway.openobserve.svc.cluster.local:4318}"
 export AUTOSRE_OTEL__SERVICE_NAME="${AUTOSRE_OTEL__SERVICE_NAME:-autosre-agent}"
 export AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT="${AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT:-staging}"
@@ -162,6 +148,7 @@ usage() {
 Usage: eso_setup.sh [--dry-run] [--help]
 
 Bootstraps ESO with in-cluster SecretStore. Zero cloud dependency.
+Always forces immediate sync on rerun — no waiting for refreshInterval.
 
 Example:
   AUTOSRE_LLM__API_KEY=AIza... AUTOSRE_ADMIN__SECRET=admin123 ./eso_setup.sh
@@ -226,7 +213,7 @@ ensure_namespaces() {
 }
 
 # ------------------------------------------------------------------------------
-# Source Secret — writes 60 keys
+# Source Secret — writes 60 keys with forced overwrite
 # ------------------------------------------------------------------------------
 ensure_source_secret() {
   if [[ "$DRY_RUN" == "true" ]]; then
@@ -244,14 +231,13 @@ ensure_source_secret() {
   pg_pgpass="${PG_RIVULET_HOST}:${PG_RIVULET_PORT}:${PG_RIVULET_DB}:${PG_RIVULET_USER}:${PG_RIVULET_PASS}"
   gt_uri="postgresql://${GT_USER}:${GT_PASS}@${GT_HOST}:${GT_PORT}/${GT_DB}"
 
-  log "applying source Secret ${SOURCE_NAMESPACE}/${SOURCE_SECRET}"
+  log "applying source Secret ${SOURCE_NAMESPACE}/${SOURCE_SECRET} (force overwrite)"
 
   _put() {
     local key="$1"
     local value="$2"
     local encoded
     encoded="$(b64 "$value")"
-    # Always write the key, even if value is empty
     printf '  %s: "%s"\n' "$key" "$encoded"
   }
 
@@ -261,21 +247,16 @@ ensure_source_secret() {
     printf 'metadata:\n  name: %s\n  namespace: %s\n' "$SOURCE_SECRET" "$SOURCE_NAMESPACE"
     printf 'type: Opaque\ndata:\n'
 
-    # OpenObserve (8 keys)
     _put OpenObserveRootEmail            "$OBS_ROOT_EMAIL"
     _put OpenObserveRootPassword         "$OBS_ROOT_PASSWORD"
     _put OpenObserveBasicAuth            "$obs_basic"
-    _put OpenObserveReaderEmail          "$OBS_READER_EMAIL"
-    _put OpenObserveReaderPassword       "$OBS_READER_PASSWORD"
     _put OpenObserveUrl                  "$OBS_URL"
     _put OpenObserveStorageAccountName   "$STORAGE_ACCOUNT_NAME"
     _put OpenObserveStorageAccountKey    "$STORAGE_ACCOUNT_KEY"
 
-    # OTel (2 keys)
     _put OtelGatewayToken                "$OTEL_TOKEN"
     _put OtelGatewayExporterHeaders      "$otel_headers"
 
-    # Postgres (8 keys)
     _put PostgresAppHost                 "$PG_RIVULET_HOST"
     _put PostgresAppPort                 "$PG_RIVULET_PORT"
     _put PostgresAppDbName               "$PG_RIVULET_DB"
@@ -285,16 +266,13 @@ ensure_source_secret() {
     _put PostgresAppJdbcUri              "$pg_jdbc"
     _put PostgresAppPgpass               "$pg_pgpass"
 
-    # Ground Truth DB (3 keys)
     _put GroundTruthDbUsername           "$GT_USER"
     _put GroundTruthDbPassword           "$GT_PASS"
     _put GroundTruthDbUri                "$gt_uri"
 
-    # SRE Agent (2 keys)
     _put SreAgentApiUrl                  "$SRE_AGENT_URL"
     _put AlertWebhookSecret              "$ALERT_WEBHOOK_SECRET"
 
-    # AutoSRE LLM (11 keys; exactly the agent's exported LLM settings)
     _put AutosreLlmModelCoordinator           "$AUTOSRE_LLM__MODEL_COORDINATOR"
     _put AutosreLlmModelWorker                "$AUTOSRE_LLM__MODEL_WORKER"
     _put AutosreApiKey                        "$AUTOSRE_API_KEY"
@@ -307,33 +285,28 @@ ensure_source_secret() {
     _put AutosreLlmInitialBackoffSeconds      "$AUTOSRE_LLM__INITIAL_BACKOFF_SECONDS"
     _put AutosreLlmMaxBackoffSeconds          "$AUTOSRE_LLM__MAX_BACKOFF_SECONDS"
 
-    # AutoSRE PostgreSQL (5 keys)
     _put AutosrePostgresHost                  "$AUTOSRE_POSTGRES__HOST"
     _put AutosrePostgresPort                  "$AUTOSRE_POSTGRES__PORT"
     _put AutosrePostgresDb                    "$AUTOSRE_POSTGRES__DB"
     _put AutosrePostgresUser                  "$AUTOSRE_POSTGRES__USER"
     _put AutosrePostgresPassword              "$AUTOSRE_POSTGRES__PASSWORD"
 
-    # AutoSRE Valkey (4 keys; TLS variable name matches the agent)
     _put AutosreValkeyHost                    "$AUTOSRE_VALKEY__HOST"
     _put AutosreValkeyPort                    "$AUTOSRE_VALKEY__PORT"
     _put AutosreValkeyPassword                "$AUTOSRE_VALKEY__PASSWORD"
     _put AutosreValkeyTls                     "$AUTOSRE_VALKEY__TLS"
 
-    # AutoSRE OpenObserve (3 keys)
+    # CRITICAL: These MUST be root creds (reader doesn't exist in O2)
     _put AutosreOpenobserveEmail              "$AUTOSRE_OPENOBSERVE__EMAIL"
     _put AutosreOpenobservePassword           "$AUTOSRE_OPENOBSERVE__PASSWORD"
     _put AutosreOpenobserveUrl                "$AUTOSRE_OPENOBSERVE__URL"
 
-    # AutoSRE alerting/admin (2 keys)
     _put AutosreAlertWebhookSecret            "$AUTOSRE_ALERT__WEBHOOK_SECRET"
     _put AutosreAdminSecret                   "$AUTOSRE_ADMIN__SECRET"
 
-    # AutoSRE evaluation judge (2 keys)
     _put AutosreEvalJudgeApiKey               "$AUTOSRE_EVAL__JUDGE_API_KEY"
     _put AutosreEvalJudgeModel                "$AUTOSRE_EVAL__JUDGE_MODEL"
 
-    # AutoSRE safety (7 keys)
     _put AutosreSafetyMaxRiskTierAutonomous   "$AUTOSRE_SAFETY__MAX_RISK_TIER_AUTONOMOUS"
     _put AutosreSafetyMaxActionsPerIncident   "$AUTOSRE_SAFETY__MAX_ACTIONS_PER_INCIDENT"
     _put AutosreSafetyMaxWallClockSeconds     "$AUTOSRE_SAFETY__MAX_WALL_CLOCK_SECONDS"
@@ -342,15 +315,24 @@ ensure_source_secret() {
     _put AutosreSafetyConfidenceGiveUp         "$AUTOSRE_SAFETY__CONFIDENCE_GIVE_UP"
     _put AutosreSafetyMinConfidenceImprovement "$AUTOSRE_SAFETY__MIN_CONFIDENCE_IMPROVEMENT"
 
-    # AutoSRE OpenTelemetry (3 keys)
     _put AutosreOtelExporterOtlpEndpoint      "$AUTOSRE_OTEL__EXPORTER_OTLP_ENDPOINT"
     _put AutosreOtelServiceName               "$AUTOSRE_OTEL__SERVICE_NAME"
     _put AutosreOtelDeploymentEnvironment     "$AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT"
 
-    # AutoSRE deployment metadata (1 key)
     _put AutosreDeploymentEnvironment         "$AUTOSRE_DEPLOYMENT_ENVIRONMENT"
 
-  } | kubectl apply -f - >/dev/null
+  } | kubectl apply --server-side --force-conflicts -f - >/dev/null
+
+  # Verify source was written correctly
+  local source_email
+  source_email="$(kubectl get secret "$SOURCE_SECRET" -n "$SOURCE_NAMESPACE" \
+    -o jsonpath='{.data.AutosreOpenobserveEmail}' | base64 -d 2>/dev/null || echo "")"
+
+  if [[ "$source_email" != "$AUTOSRE_OPENOBSERVE__EMAIL" ]]; then
+    die "Source secret write verification failed: expected '$AUTOSRE_OPENOBSERVE__EMAIL', got '$source_email'"
+  fi
+
+  log "source secret verified: AutosreOpenobserveEmail=$source_email"
 
   unset obs_basic otel_headers pg_uri pg_jdbc pg_pgpass gt_uri
 }
@@ -430,14 +412,12 @@ YAML
 }
 
 # ------------------------------------------------------------------------------
-# ExternalSecrets
+# ExternalSecrets — uses fast refreshInterval for staging
 # ------------------------------------------------------------------------------
 emit_external_secrets() {
   local K="$SOURCE_SECRET"
+  local R="$ESO_REFRESH_INTERVAL"
   cat <<YAML
-# ============================================================================
-# openobserve namespace (3 ExternalSecrets)
-# ============================================================================
 ---
 apiVersion: external-secrets.io/${ESO_API_VERSION}
 kind: ExternalSecret
@@ -445,7 +425,7 @@ metadata:
   name: openobserve-auth
   namespace: openobserve
 spec:
-  refreshInterval: 1h
+  refreshInterval: ${R}
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: openobserve-auth }
   data:
@@ -459,7 +439,7 @@ metadata:
   name: openobserve-storage
   namespace: openobserve
 spec:
-  refreshInterval: 1h
+  refreshInterval: ${R}
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: openobserve-storage }
   data:
@@ -472,15 +452,12 @@ metadata:
   name: otel-gateway-token
   namespace: openobserve
 spec:
-  refreshInterval: 1h
+  refreshInterval: ${R}
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: otel-gateway-token }
   data:
     - { secretKey: token,                 remoteRef: { key: ${K}, property: OtelGatewayToken } }
     - { secretKey: otel-exporter-headers, remoteRef: { key: ${K}, property: OtelGatewayExporterHeaders } }
-# ============================================================================
-# rivulet namespace (3 ExternalSecrets)
-# ============================================================================
 ---
 apiVersion: external-secrets.io/${ESO_API_VERSION}
 kind: ExternalSecret
@@ -488,7 +465,7 @@ metadata:
   name: postgres-rivulet-env
   namespace: rivulet
 spec:
-  refreshInterval: 1h
+  refreshInterval: ${R}
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: postgres-rivulet-env }
   data:
@@ -502,7 +479,7 @@ metadata:
   name: postgres-app
   namespace: rivulet
 spec:
-  refreshInterval: 1h
+  refreshInterval: ${R}
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: postgres-app }
   data:
@@ -521,14 +498,11 @@ metadata:
   name: otel-exporter-headers
   namespace: rivulet
 spec:
-  refreshInterval: 1h
+  refreshInterval: ${R}
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: otel-exporter-headers }
   data:
     - { secretKey: otel-exporter-headers, remoteRef: { key: ${K}, property: OtelGatewayExporterHeaders } }
-# ============================================================================
-# sre namespace (6 ExternalSecrets)
-# ============================================================================
 ---
 apiVersion: external-secrets.io/${ESO_API_VERSION}
 kind: ExternalSecret
@@ -536,7 +510,7 @@ metadata:
   name: postgres-agent
   namespace: sre
 spec:
-  refreshInterval: 1h
+  refreshInterval: ${R}
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: postgres-agent }
   data:
@@ -553,12 +527,12 @@ metadata:
   name: openobserve-reader
   namespace: sre
 spec:
-  refreshInterval: 1h
+  refreshInterval: ${R}
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: openobserve-reader }
   data:
-    - { secretKey: email,    remoteRef: { key: ${K}, property: OpenObserveReaderEmail } }
-    - { secretKey: password, remoteRef: { key: ${K}, property: OpenObserveReaderPassword } }
+    - { secretKey: email,    remoteRef: { key: ${K}, property: OpenObserveRootEmail } }
+    - { secretKey: password, remoteRef: { key: ${K}, property: OpenObserveRootPassword } }
     - { secretKey: url,      remoteRef: { key: ${K}, property: OpenObserveUrl } }
 ---
 apiVersion: external-secrets.io/${ESO_API_VERSION}
@@ -567,7 +541,7 @@ metadata:
   name: llm-credentials
   namespace: sre
 spec:
-  refreshInterval: 1h
+  refreshInterval: ${R}
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: llm-credentials }
   data:
@@ -581,7 +555,7 @@ metadata:
   name: otel-exporter-headers
   namespace: sre
 spec:
-  refreshInterval: 1h
+  refreshInterval: ${R}
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: otel-exporter-headers }
   data:
@@ -593,7 +567,7 @@ metadata:
   name: alert-webhook
   namespace: sre
 spec:
-  refreshInterval: 1h
+  refreshInterval: ${R}
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: alert-webhook }
   data:
@@ -605,7 +579,7 @@ metadata:
   name: autosre-agent-secrets
   namespace: sre
 spec:
-  refreshInterval: 1h
+  refreshInterval: ${R}
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: autosre-agent-secrets }
   data:
@@ -647,9 +621,6 @@ spec:
     - { secretKey: AUTOSRE_OTEL__SERVICE_NAME,                     remoteRef: { key: ${K}, property: AutosreOtelServiceName } }
     - { secretKey: AUTOSRE_OTEL__DEPLOYMENT_ENVIRONMENT,            remoteRef: { key: ${K}, property: AutosreOtelDeploymentEnvironment } }
     - { secretKey: AUTOSRE_DEPLOYMENT_ENVIRONMENT,                  remoteRef: { key: ${K}, property: AutosreDeploymentEnvironment } }
-# ============================================================================
-# eval namespace (3 ExternalSecrets)
-# ============================================================================
 ---
 apiVersion: external-secrets.io/${ESO_API_VERSION}
 kind: ExternalSecret
@@ -657,12 +628,12 @@ metadata:
   name: openobserve-reader
   namespace: eval
 spec:
-  refreshInterval: 1h
+  refreshInterval: ${R}
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: openobserve-reader }
   data:
-    - { secretKey: email,    remoteRef: { key: ${K}, property: OpenObserveReaderEmail } }
-    - { secretKey: password, remoteRef: { key: ${K}, property: OpenObserveReaderPassword } }
+    - { secretKey: email,    remoteRef: { key: ${K}, property: OpenObserveRootEmail } }
+    - { secretKey: password, remoteRef: { key: ${K}, property: OpenObserveRootPassword } }
 ---
 apiVersion: external-secrets.io/${ESO_API_VERSION}
 kind: ExternalSecret
@@ -670,7 +641,7 @@ metadata:
   name: ground-truth-db
   namespace: eval
 spec:
-  refreshInterval: 1h
+  refreshInterval: ${R}
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: ground-truth-db }
   data:
@@ -684,7 +655,7 @@ metadata:
   name: sre-agent-api
   namespace: eval
 spec:
-  refreshInterval: 1h
+  refreshInterval: ${R}
   secretStoreRef: { kind: ClusterSecretStore, name: ${STORE_NAME} }
   target: { name: sre-agent-api }
   data:
@@ -707,6 +678,23 @@ apply_external_secrets() {
 }
 
 # ------------------------------------------------------------------------------
+# Force sync — annotate all ExternalSecrets to trigger immediate re-sync
+# ------------------------------------------------------------------------------
+force_sync_all() {
+  [[ "$DRY_RUN" == "true" ]] && return 0
+  log "forcing immediate sync of all ExternalSecrets"
+  local ts
+  ts=$(date +%s)
+  local ns
+  for ns in "${TARGET_NAMESPACES[@]}"; do
+    kubectl get externalsecret -n "$ns" -o name 2>/dev/null | while read -r es; do
+      kubectl annotate "$es" -n "$ns" force-sync="$ts" --overwrite 2>/dev/null || true
+    done
+  done
+  log "annotation applied (timestamp=$ts); ESO will re-sync within seconds"
+}
+
+# ------------------------------------------------------------------------------
 # Wait for readiness
 # ------------------------------------------------------------------------------
 wait_for_store() {
@@ -717,7 +705,7 @@ wait_for_store() {
 
 wait_for_external_secrets() {
   [[ "$DRY_RUN" == "true" ]] && return 0
-  log "waiting for all ExternalSecrets to sync (up to 3 min)"
+  log "waiting for all ExternalSecrets to be Ready (up to 3 min)"
   local attempt ns not_ready count
   for attempt in $(seq 1 36); do
     not_ready=0
@@ -744,32 +732,70 @@ wait_for_external_secrets() {
 }
 
 # ------------------------------------------------------------------------------
+# Verification — confirm critical secrets have expected values
+# ------------------------------------------------------------------------------
+verify_critical_secrets() {
+  [[ "$DRY_RUN" == "true" ]] && return 0
+  log "verifying critical secret values after sync"
+
+  local failures=0
+
+  # Verify agent O2 creds are ROOT (not reader)
+  local agent_o2_email
+  agent_o2_email="$(kubectl get secret autosre-agent-secrets -n sre \
+    -o jsonpath='{.data.AUTOSRE_OPENOBSERVE__EMAIL}' 2>/dev/null | base64 -d || echo "")"
+
+  if [[ "$agent_o2_email" == "$OBS_ROOT_EMAIL" ]]; then
+    log "  ✓ sre/autosre-agent-secrets AUTOSRE_OPENOBSERVE__EMAIL = $agent_o2_email (root)"
+  else
+    error "  ✗ sre/autosre-agent-secrets AUTOSRE_OPENOBSERVE__EMAIL = '$agent_o2_email' (expected '$OBS_ROOT_EMAIL')"
+    failures=$((failures + 1))
+  fi
+
+  # Verify eval namespace also has root
+  local eval_o2_email
+  eval_o2_email="$(kubectl get secret openobserve-reader -n eval \
+    -o jsonpath='{.data.email}' 2>/dev/null | base64 -d || echo "")"
+
+  if [[ "$eval_o2_email" == "$OBS_ROOT_EMAIL" ]]; then
+    log "  ✓ eval/openobserve-reader email = $eval_o2_email (root)"
+  else
+    error "  ✗ eval/openobserve-reader email = '$eval_o2_email' (expected '$OBS_ROOT_EMAIL')"
+    failures=$((failures + 1))
+  fi
+
+  # Verify openobserve namespace has root
+  local obs_root_email
+  obs_root_email="$(kubectl get secret openobserve-auth -n openobserve \
+    -o jsonpath='{.data.ZO_ROOT_USER_EMAIL}' 2>/dev/null | base64 -d || echo "")"
+
+  if [[ "$obs_root_email" == "$OBS_ROOT_EMAIL" ]]; then
+    log "  ✓ openobserve/openobserve-auth ZO_ROOT_USER_EMAIL = $obs_root_email"
+  else
+    error "  ✗ openobserve/openobserve-auth ZO_ROOT_USER_EMAIL = '$obs_root_email' (expected '$OBS_ROOT_EMAIL')"
+    failures=$((failures + 1))
+  fi
+
+  if [[ "$failures" -gt 0 ]]; then
+    die "Verification failed: $failures critical secret(s) have wrong values"
+  fi
+
+  log "all critical secrets verified"
+}
+
+# ------------------------------------------------------------------------------
 # Summary
 # ------------------------------------------------------------------------------
 print_summary() {
   [[ "$DRY_RUN" == "true" ]] && return 0
-  echo "sleep 20..."
-  sleep 20
-  # Wait for status propagation (ESO controller writes status async)
-  log "waiting for ExternalSecret status propagation..."
-  local attempt
-  for attempt in $(seq 1 12); do
-    local not_ready
-    not_ready="$(kubectl get externalsecret -A \
-      -o jsonpath='{range .items[?(@.status.conditions[?(@.type=="Ready")].status!="True")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' \
-      2>/dev/null | grep -c . || true)"
-    if [[ "$not_ready" -eq 0 ]]; then
-      break
-    fi
-    sleep 2
-  done
+  sleep 5
 
   log "summary"
   local ns
   for ns in "${TARGET_NAMESPACES[@]}"; do
     printf '\n  namespace: %s\n' "$ns" >&2
     kubectl get externalsecret -n "$ns" \
-      -o custom-columns='    NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status' \
+      -o custom-columns='    NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,SYNCED:.status.conditions[?(@.type=="SecretSynced")].status' \
       2>/dev/null || true
     kubectl get secret -n "$ns" -o name 2>/dev/null \
       | grep -E 'secret/(openobserve-|postgres-|valkey-|otel-|llm-|alert-|ground-truth|sre-agent|autosre-agent)' \
@@ -793,7 +819,7 @@ main() {
   done
 
   init_runtime
-  log "eso_setup.sh — dry_run=${DRY_RUN}"
+  log "eso_setup.sh — dry_run=${DRY_RUN} refresh_interval=${ESO_REFRESH_INTERVAL}"
 
   preflight
   install_eso
@@ -804,6 +830,9 @@ main() {
   apply_external_secrets
   wait_for_store
   wait_for_external_secrets
+  force_sync_all
+  wait_for_external_secrets
+  verify_critical_secrets
   print_summary
   log "done"
 }

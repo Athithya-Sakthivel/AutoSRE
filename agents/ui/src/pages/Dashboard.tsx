@@ -13,33 +13,34 @@ const STATUS_FILTERS: ReadonlyArray<{
   value: IncidentStatus | "all";
   label: string;
 }> = [
-  { value: "all", label: "All" },
   { value: "running", label: "Active" },
   { value: "awaiting_approval", label: "Awaiting Approval" },
   { value: "resolved", label: "Resolved" },
   { value: "no_action", label: "Assessed" },
   { value: "failed", label: "Failed" },
+  { value: "all", label: "All" },
 ];
 
 export function DashboardPage(): ReactElement {
   const [statusFilter, setStatusFilter] = useState<IncidentStatus | "all">(
-    "all",
+    "running",
   );
 
   const incidentsQuery = useIncidents();
   const metricsQuery = useMetricsSummary();
 
-  const incidents = incidentsQuery.data?.items ?? [];
+  const rawIncidents = incidentsQuery.data?.items;
+  const safeIncidents = Array.isArray(rawIncidents) ? rawIncidents : [];
   const metrics = metricsQuery.data;
 
   // Sort all incidents strictly by recency (started_at descending)
   const sortedIncidents = useMemo(() => {
-    return [...incidents].sort((a, b) => {
+    return [...safeIncidents].sort((a, b) => {
       const dateA = new Date(a.started_at).getTime();
       const dateB = new Date(b.started_at).getTime();
       return dateB - dateA; // newest first
     });
-  }, [incidents]);
+  }, [safeIncidents]);
 
   // Apply status filter
   const filteredIncidents = useMemo(() => {
@@ -56,7 +57,7 @@ export function DashboardPage(): ReactElement {
       no_action: 0,
       failed: 0,
     };
-    for (const i of incidents) {
+    for (const i of safeIncidents) {
       if (i.status === "running") c.running++;
       else if (i.status === "awaiting_approval") c.awaiting_approval++;
       else if (i.status === "resolved") c.resolved++;
@@ -64,7 +65,7 @@ export function DashboardPage(): ReactElement {
       else if (i.status === "failed") c.failed++;
     }
     return c;
-  }, [incidents]);
+  }, [safeIncidents]);
 
   return (
     <div className="space-y-6">
@@ -74,7 +75,7 @@ export function DashboardPage(): ReactElement {
           Dashboard
         </h1>
         <p className="text-sm text-slate-400">
-          All incidents sorted by recency
+          Live incidents, sorted by recency
         </p>
       </div>
 
@@ -120,7 +121,7 @@ export function DashboardPage(): ReactElement {
         </div>
       )}
 
-      {/* Status Filter Tabs */}
+      {/* Status Filter Tabs — Active first, All last */}
       <div
         className="flex flex-wrap gap-1 rounded-lg border border-surface-border bg-surface-1 p-1"
         role="tablist"
@@ -129,7 +130,7 @@ export function DashboardPage(): ReactElement {
         {STATUS_FILTERS.map((filter) => {
           const count =
             filter.value === "all"
-              ? incidents.length
+              ? safeIncidents.length
               : (counts[filter.value as keyof typeof counts] ?? 0);
 
           return (
@@ -154,7 +155,7 @@ export function DashboardPage(): ReactElement {
       </div>
 
       {/* Loading State */}
-      {incidentsQuery.isPending && incidents.length === 0 && (
+      {incidentsQuery.isPending && safeIncidents.length === 0 && (
         <SkeletonCardList count={6} />
       )}
 
@@ -174,7 +175,9 @@ export function DashboardPage(): ReactElement {
           <p className="text-sm text-slate-500">
             {statusFilter === "all"
               ? "No incidents yet. Trigger an alert to see them here."
-              : `No ${statusFilter.replace("_", " ")} incidents.`}
+              : statusFilter === "running"
+                ? "No active incidents. The system is idle."
+                : `No ${statusFilter.replace("_", " ")} incidents.`}
           </p>
         </div>
       )}

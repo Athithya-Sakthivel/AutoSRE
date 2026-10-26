@@ -11,6 +11,7 @@ export function ApprovalPanel({
   const [comment, setComment] = useState("");
   const [showComment, setShowComment] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [isApproving, setIsApproving] = useState(false);
   const mutation = useApproveIncident();
 
   // Only show panel when awaiting approval
@@ -18,17 +19,20 @@ export function ApprovalPanel({
     return null;
   }
 
-  const latestProposal =
-    incident.proposed_actions[incident.proposed_actions.length - 1];
+  const proposals = Array.isArray(incident.proposed_actions)
+    ? incident.proposed_actions
+    : [];
+  const latestProposal = proposals[proposals.length - 1];
 
   if (!latestProposal) {
     return null;
   }
 
-  const isPending = mutation.isPending;
+  const isPending = mutation.isPending || isApproving;
 
   const handleAction = async (approved: boolean): Promise<void> => {
     setLocalError(null);
+    setIsApproving(true);
 
     const approvalComment =
       comment.trim() || (approved ? "" : "Rejected by operator");
@@ -41,12 +45,9 @@ export function ApprovalPanel({
           comment: approvalComment,
         },
       });
-
-      // Force reload after short delay to ensure backend state is updated
-      setTimeout(() => {
-        window.location.reload();
-      }, 2000);
+      // Success - the component will unmount when status changes
     } catch (error) {
+      setIsApproving(false);
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error("[ApprovalPanel] Approval failed:", errorMsg, error);
       setLocalError(errorMsg);
@@ -61,7 +62,7 @@ export function ApprovalPanel({
           aria-hidden="true"
         />
         <h3 className="text-sm font-semibold text-status-awaiting">
-          Approval Required
+          {isApproving ? "Processing..." : "Approval Required"}
         </h3>
         <span className="ml-auto rounded bg-status-awaiting/15 px-2 py-0.5 text-[10px] font-semibold text-status-awaiting">
           Tier {latestProposal.risk_tier}
@@ -75,7 +76,7 @@ export function ApprovalPanel({
 
         <div className="mt-1.5 overflow-x-auto rounded bg-surface-2/50 px-2 py-1">
           <code className="whitespace-pre text-[11px] text-slate-400">
-            {JSON.stringify(latestProposal.tool_args, null, 2) ?? "{}"}
+            {JSON.stringify(latestProposal.tool_args ?? {}, null, 2)}
           </code>
         </div>
 
@@ -112,7 +113,7 @@ export function ApprovalPanel({
           disabled={isPending}
           className="flex-1 rounded-md bg-status-resolved px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-status-resolved/80 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {isPending ? "Approving..." : "✓ Approve"}
+          {isApproving ? "Approving..." : "✓ Approve"}
         </button>
 
         <button
@@ -121,7 +122,7 @@ export function ApprovalPanel({
           disabled={isPending}
           className="flex-1 rounded-md border border-status-failed/40 bg-status-failed/10 px-4 py-2.5 text-sm font-semibold text-status-failed transition-colors hover:bg-status-failed/20 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {isPending ? "Rejecting..." : "✗ Reject"}
+          {isApproving ? "Rejecting..." : "✗ Reject"}
         </button>
       </div>
 

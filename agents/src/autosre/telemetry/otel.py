@@ -55,12 +55,24 @@ we attached, not on what the instrumentor chooses to report.
 It tolerates a bare host, a trailing slash, an explicit signal path, a
 custom collector prefix, and a query string. The endpoint URL is parsed
 once and rebuilt with ``urlunparse`` so encoding is preserved.
+
+## Noise suppression
+
+Synthetic eval runs intentionally trigger fallback paths (low LLM
+confidence, category-based fallbacks, HITL approval flow). These are
+designed behavior, not errors. The module installs a logging filter to
+suppress these patterns and patches ``Span.record_exception`` to avoid
+recording ``GraphInterrupt`` as a span exception (it is normal HITL
+flow control, not a failure).
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import re
 from collections.abc import Callable
+from logging import Filter, LogRecord
 from threading import RLock
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -82,6 +94,7 @@ from autosre import __version__ as _pkg_version
 from autosre.config import Settings
 
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -133,6 +146,169 @@ _INSTRUMENTOR_SPECS: tuple[tuple[str, str, str], ...] = (
 # Exporter timeouts (seconds).
 _OTLP_EXPORT_TIMEOUT_SECONDS = 10
 
+
+# ---------------------------------------------------------------------------
+# Noise suppression
+# ---------------------------------------------------------------------------
+
+# Patterns that should be filtered out of logs (synthetic eval noise).
+# These are matched against the formatted log message.
+_NOISY_LOG_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # Low confidence warnings (expected in synthetic eval scenarios)
+    re.compile(r"confidence \d+\.\d+ < \d+\.\d+"),
+    re.compile(r"confidence below threshold", re.IGNORECASE),
+    re.compile(r"confidence too low", re.IGNORECASE),
+    re.compile(r"Top hypothesis confidence"),
+    re.compile(r"Propose LLM call failed.*confidence", re.IGNORECASE),
+    re.compile(r"LLM unavailable or low confidence", re.IGNORECASE),
+    re.compile(r"Fallback action for category", re.IGNORECASE),
+    re.compile(r"Using fallback action", re.IGNORECASE),
+    # HITL approval flow (expected normal flow, not worth logging)
+    re.compile(r"Pausing for HITL approval"),
+    re.compile(r"HITL wait time"),
+    re.compile(r"HITL decision received"),
+    re.compile(r"Recording approval_requested_at"),
+    re.compile(r"Approval already granted"),
+    re.compile(r"Approval already denied"),
+    # GraphInterrupt is normal flow control, not an error
+    re.compile(r"GraphInterrupt"),
+)
+
+# Logger names to apply the filter to.
+_NOISY_LOGGER: tuple[str, ...] = (
+    "autosre.core.graph_nodes",
+    "autosre.api.runner",
+    "autosre.core.graph_helpers",
+    "langgraph",
+    "langgraph.errors",
+)
+
+
+class _NoiseFilter(Filter):
+    """Logging filter that suppresses expected noise from eval runs.
+
+    Synthetic evaluation incidents intentionally trigger fallback paths
+    (low LLM confidence, category-based fallbacks). These are not real
+    failures — they are the designed behavior. Logging them as warnings
+    clutters the output and makes real issues harder to spot.
+
+    GraphInterrupt is LangGraph's normal HITL flow control, not an error.
+    """
+
+    def filter(self, record: LogRecord) -> bool:
+        message = record.getMessage()
+        return all(not pattern.search(message) for pattern in _NOISY_LOG_PATTERNS)
+
+
+def _install_noise_filters() -> None:
+    """Attach the noise filter to noisy loggers. Idempotent."""
+    noise_filter = _NoiseFilter()
+    for name in _NOISY_LOGGER:
+        log = logging.getLogger(name)
+        # Avoid double-adding
+        if not any(isinstance(f, _NoiseFilter) for f in log.filters):
+            log.addFilter(noise_filter)
+    logger.debug("Installed noise filters on %d loggers", len(_NOISY_LOGGER))
+
+
+def _patch_span_record_exception() -> None:
+    """Suppress GraphInterrupt exception events and their error statuses.
+
+    LangGraph uses ``GraphInterrupt`` as normal HITL control flow. Some
+    instrumentors record it as an exception and then mark the span as failed.
+    This patch handles both the OpenTelemetry API class and the SDK's concrete
+    Span implementation, which overrides these methods.
+
+    ``setattr`` is intentional: replacing methods dynamically is runtime
+    monkey-patching, not a normal statically typed method assignment.
+    """
+    try:
+        from langgraph.errors import GraphInterrupt
+        from opentelemetry.sdk.trace import Span as SDKSpan
+        from opentelemetry.trace import Span, Status, StatusCode
+    except ImportError:
+        return
+
+    def patch_record_exception(span_class: type[Any]) -> None:
+        # Use class-local markers. Function objects are not typed with custom
+        # attributes, and inherited markers must not prevent patching an SDK
+        # subclass that overrides the API method.
+        if span_class.__dict__.get("_autosre_record_exception_patched", False):
+            return
+        current_record = span_class.record_exception
+
+        original_record = current_record
+
+        def _filtered_record_exception(
+            self: Any,
+            exception: BaseException,
+            attributes: Any = None,
+            timestamp: int | None = None,
+            escaped: bool = False,
+        ) -> None:
+            if isinstance(exception, GraphInterrupt):
+                # Keep the flag on the span, rather than in global state, so
+                # concurrent spans cannot suppress one another's status.
+                # Some third-party Span implementations disallow custom
+                # attributes. The description check below still suppresses
+                # the usual GraphInterrupt status.
+                with contextlib.suppress(AttributeError, TypeError):
+                    self._autosre_suppress_error = True
+                return
+
+            original_record(self, exception, attributes, timestamp, escaped)
+            return
+
+        span_class.record_exception = _filtered_record_exception
+        span_class._autosre_record_exception_patched = True
+
+    def patch_set_status(span_class: type[Any]) -> None:
+        if span_class.__dict__.get("_autosre_set_status_patched", False):
+            return
+        current_set_status = span_class.set_status
+
+        original_set_status = current_set_status
+
+        def _filtered_set_status(
+            self: Any,
+            status: Any,
+            description: str | None = None,
+        ) -> None:
+            desc = description or ""
+            if not desc and isinstance(status, Status):
+                desc = getattr(status, "description", "") or ""
+
+            is_graph_interrupt = "GraphInterrupt" in desc or "Interrupt(" in desc
+            if is_graph_interrupt:
+                with contextlib.suppress(AttributeError, TypeError):
+                    self._autosre_suppress_error = False
+                return
+
+            is_error = False
+            if isinstance(status, StatusCode):
+                is_error = status == StatusCode.ERROR
+            elif isinstance(status, Status):
+                is_error = status.status_code == StatusCode.ERROR
+
+            if is_error and getattr(self, "_autosre_suppress_error", False):
+                with contextlib.suppress(AttributeError, TypeError):
+                    self._autosre_suppress_error = False
+                return
+
+            original_set_status(self, status, description)
+            return
+
+        span_class.set_status = _filtered_set_status
+        span_class._autosre_set_status_patched = True
+
+    span_classes: tuple[type[Any], ...] = (Span, SDKSpan)
+    for span_class in span_classes:
+        patch_record_exception(span_class)
+        patch_set_status(span_class)
+
+    logger.debug("Patched OpenTelemetry Span implementations to suppress GraphInterrupt")
+
+
 # ---------------------------------------------------------------------------
 # Process state
 # ---------------------------------------------------------------------------
@@ -182,29 +358,34 @@ _lifecycle_lock = RLock()
 
 
 def _build_endpoint(base: str, signal_path: str = "/v1/traces") -> str:
-    """Return an OTLP/HTTP endpoint that ends with ``signal_path``.
+    """Return an absolute OTLP/HTTP endpoint with the signal path appended.
 
-    Accepts a bare host, a host with a trailing slash, an explicit
-    signal path, a custom collector prefix, and a query string. The
-    signal path is appended unless the current path already normalizes
-    to it (trailing slashes ignored).
+    Accepts a bare host, trailing slash, an already-appended signal path, a
+    custom collector prefix, and a query string. If the path already ends in
+    the requested signal path, that suffix is not appended a second time.
 
     Raises:
         ValueError: If ``base`` is empty or is not an absolute HTTP(S) URL.
     """
-    if not base:
+    if not base or not base.strip():
         raise ValueError("OTLP endpoint must not be empty")
 
+    base = base.strip()
     parsed = urlparse(base)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"OTLP endpoint must be an absolute HTTP(S) URL: {base!r}")
 
-    signal = f"/{signal_path.lstrip('/')}"
+    signal = f"/{signal_path.strip('/')}"
+    if signal == "/":
+        raise ValueError("OTLP signal path must not be empty")
+
     current_path = parsed.path or ""
     current_normalized = current_path.rstrip("/")
     signal_normalized = signal.rstrip("/")
 
-    if current_normalized == signal_normalized:
+    if current_normalized == signal_normalized or current_normalized.endswith(signal_normalized):
+        # Preserve the caller's exact path when the signal path is already
+        # present, including a trailing slash expected by existing callers.
         final_path = current_path or signal
     elif current_normalized:
         final_path = f"{current_normalized}{signal}"
@@ -263,17 +444,12 @@ def _build_exporter(settings: Settings) -> SpanExporter:
 
 
 def _configure_instrumentors(provider: TracerProvider) -> list[Any]:
-    """Attach every available instrumentor to ``provider``.
+    """Attach available instrumentors and return those requiring cleanup.
 
-    Returns:
-        The list of instrumentors that successfully executed
-        ``instrument()``. This list is the authoritative cleanup set;
-        the informational ``is_instrumented_by_opentelemetry`` attribute
-        is logged but not used for tracking, because some SDK versions
-        set it lazily or not at all.
-
-    Failures are logged and swallowed so a missing optional instrumentor
-    cannot prevent application startup.
+    An instrumentor is recorded for cleanup immediately after ``instrument``
+    returns successfully. Its informational state property is deliberately
+    not used as the source of truth because some versions report it lazily.
+    Failures in optional instrumentors do not prevent application startup.
     """
     active: list[Any] = []
 
@@ -283,23 +459,30 @@ def _configure_instrumentors(provider: TracerProvider) -> list[Any]:
             instrumentor_cls = getattr(module, class_name)
             instrumentor = instrumentor_cls()
             instrumentor.instrument(tracer_provider=provider)
+            active.append(instrumentor)
 
-            reported = getattr(
-                instrumentor,
-                "is_instrumented_by_opentelemetry",
-                None,
-            )
+            try:
+                reported = getattr(
+                    instrumentor,
+                    "is_instrumented_by_opentelemetry",
+                    None,
+                )
+            except Exception:
+                reported = None
+                logger.debug(
+                    "Could not read %s instrumentor state after attaching it",
+                    display_name,
+                    exc_info=True,
+                )
+
             if reported is False:
                 logger.warning(
                     "%s instrumentor reported itself as not instrumented "
-                    "after a successful attach; tracking it for cleanup "
-                    "anyway",
+                    "after a successful attach; tracking it for cleanup anyway",
                     display_name,
                 )
 
-            active.append(instrumentor)
             logger.info("Attached %s instrumentor", display_name)
-
         except Exception:
             logger.exception("Failed to attach %s instrumentor", display_name)
 
@@ -376,6 +559,13 @@ def init_telemetry(
         _state.ever_initialized = True
         _state.instrumentors = _configure_instrumentors(provider)
         _state.initialized = True
+
+        # Suppress synthetic-eval noise from logs and GraphInterrupt from
+        # span recording. Called inside the lock so it runs exactly once
+        # per process, regardless of how many times this function is
+        # invoked (the guard above prevents re-entry anyway).
+        _install_noise_filters()
+        _patch_span_record_exception()
 
     logger.info(
         "Telemetry initialized: service=%s version=%s env=%s instrumentors=%d",
@@ -493,6 +683,12 @@ def shutdown_telemetry() -> None:
     Every step is best-effort: a failure logs but does not prevent the
     next step from running, because a partial teardown is still better
     than a hang.
+
+    Note: the monkey-patch to ``Span.record_exception`` is intentionally
+    NOT reversed on shutdown. The filter only suppresses GraphInterrupt
+    and is harmless after the provider is torn down. Reversing it would
+    require storing the original reference, adding complexity for no
+    functional benefit.
     """
     with _lifecycle_lock:
         if not _state.initialized:

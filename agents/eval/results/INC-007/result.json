@@ -1,44 +1,26 @@
 {
   "incident_id": "INC-007",
-  "completed_at": "2026-10-25T04:04:34Z",
+  "completed_at": "2026-10-26T05:03:57Z",
   "result": {
-    "incident_id": "304e6850-9385-425d-bdae-c0ed071fe82b",
+    "incident_id": "c450561e-914a-4523-9b17-9c1dcc9237aa",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "PodCrashLoopBackOff",
     "service": "api-gateway",
     "namespace": "rivulet",
     "severity": "sev2",
-    "started_at": "2026-10-25T04:04:18Z",
+    "started_at": "2026-10-26T05:03:44Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "The api-gateway service in namespace rivulet is experiencing a crash loop due to an application-level failure upon startup, indicated by a non-zero exit code of 1 and a short crash interval of 30 seconds.",
+        "description": "The api-gateway service in namespace rivulet is experiencing a crash loop due to an application-level failure upon startup, resulting in exit code 1 and repeated restarts every 30 seconds.",
         "confidence": 0.2,
-        "evidence": [
-          "Alert: PodCrashLoopBackOff",
-          "Namespace: rivulet",
-          "Service: api-gateway",
-          "Last exit code: 1",
-          "Crash interval seconds: 30",
-          "Restart count: 8",
-          "Tool list_pods({\"namespace\": \"rivulet\", \"label_selector\": \"app=api-gateway\"}) status=succeeded output={\"pods\": [], \"total\": 0}",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 3089.73, \"name\": \"api-gateway-557d8dc689-2nktk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3057.73, \"name\": \"api-gateway-557d8dc689-nxhgh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 4754.73, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 4754.73, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2825.73, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 94.73, \"name\": \"ingestion-worker-85cc48dd5b-7r6mr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 4981.73, \"name\": \"postgres-6b4c959c9-v8x2d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 4928.73, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}], \"total\": 8}"
-        ],
         "status": "proposed"
       },
       {
         "id": "H2",
-        "description": "A misconfigured startup or liveness probe is causing the kubelet to repeatedly kill the api-gateway container in the rivulet namespace after it starts, resulting in the observed CrashLoopBackOff state.",
+        "description": "A misconfigured environment variable, secret, or missing dependent service connection is causing the api-gateway startup sequence to fail immediately with exit code 1.",
         "confidence": 0.2,
-        "evidence": [
-          "Alert: PodCrashLoopBackOff",
-          "Namespace: rivulet",
-          "Service: api-gateway",
-          "Restart count: 8",
-          "Tool list_pods({\"namespace\": \"rivulet\", \"label_selector\": \"app=api-gateway\"}) status=succeeded output={\"pods\": [], \"total\": 0}",
-          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 3089.73, \"name\": \"api-gateway-557d8dc689-2nktk\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 3057.73, \"name\": \"api-gateway-557d8dc689-nxhgh\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 4754.73, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 4754.73, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 2825.73, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 94.73, \"name\": \"ingestion-worker-85cc48dd5b-7r6mr\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 4981.73, \"name\": \"postgres-6b4c959c9-v8x2d\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 4928.73, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}], \"total\": 8}"
-        ],
         "status": "proposed"
       }
     ],
@@ -63,7 +45,7 @@
           "name": "api-gateway",
           "namespace": "rivulet"
         },
-        "tool_call_id": "call_1792901073459",
+        "tool_call_id": "call_1792991034414",
         "result": {
           "name": "api-gateway",
           "namespace": "rivulet",
@@ -73,23 +55,23 @@
           "verification_passed": null
         },
         "success": true,
-        "executed_at": "2026-10-25T04:04:33Z",
+        "executed_at": "2026-10-26T05:03:54Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 13507,
-    "prompt_tokens": 10844,
-    "completion_tokens": 2663,
-    "cost_usd": 0.0085082,
-    "estimated_paid_cost_usd": 0.0113772,
+    "tokens_used": 11845,
+    "prompt_tokens": 10582,
+    "completion_tokens": 1263,
+    "cost_usd": 0.005175900000000001,
+    "estimated_paid_cost_usd": 0.0075409000000000006,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
         "calls": 6,
-        "tokens": 13830
+        "tokens": 12006
       }
     },
-    "wall_clock_seconds": 14.906,
-    "active_seconds": 14.906,
+    "wall_clock_seconds": 9.464,
+    "active_seconds": 9.464,
     "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
     "iterations": 2,

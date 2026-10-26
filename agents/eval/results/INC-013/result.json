@@ -1,40 +1,40 @@
 {
   "incident_id": "INC-013",
-  "completed_at": "2026-10-25T00:29:27Z",
+  "completed_at": "2026-10-26T03:42:13Z",
   "result": {
-    "incident_id": "2288da5f-b903-4a90-af9c-51eebd1fd902",
+    "incident_id": "8d83ea67-568c-46c2-a77b-a7920a2388d9",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "ValkeyEvictionUnderPressure",
     "service": "api-gateway",
     "namespace": "rivulet",
     "severity": "sev2",
-    "started_at": "2026-10-25T00:29:18Z",
+    "started_at": "2026-10-26T03:41:37Z",
     "hypotheses": [
       {
         "id": "H1",
-        "description": "The Valkey cache instance for api-gateway in namespace rivulet is experiencing high memory pressure because the maxmemory limit of 2 MB is too small for the current workload, leading to heavy key evictions and a degraded hit rate of 45.2 percent.",
+        "description": "The Valkey cache instance for api-gateway in namespace rivulet is experiencing memory pressure and evicting keys because the maxmemory limit of 2MB is insufficient for the current workload.",
         "confidence": 0.8,
         "evidence": [
           "Alert: ValkeyEvictionUnderPressure",
-          "evicted_keys: 3241",
-          "hit_rate_pct: 45.2",
+          "Service: api-gateway in namespace rivulet",
           "maxmemory_mb: 2",
           "memory_usage_pct: 100",
-          "Tool get_valkey_stats({}) status=succeeded output={\"stats\": {\"connected_clients\": 10, \"evicted_keys\": 630, \"hit_rate_pct\": 81.46, \"maxmemory_mb\": 2.0, \"memory_usage_pct\": 63.52, \"total_keys\": 0, \"used_memory_mb\": 1.27}}"
+          "evicted_keys: 3241",
+          "Tool get_valkey_stats({}) status=succeeded output={\"stats\": {\"connected_clients\": 6, \"evicted_keys\": 1860, \"hit_rate_pct\": 1.76, \"maxmemory_mb\": 2.0, \"memory_usage_pct\": 64.32, \"total_keys\": 0, \"used_memory_mb\": 1.29}}"
         ],
-        "status": "proposed"
+        "status": "investigating"
       },
       {
         "id": "H2",
-        "description": "A sudden influx of new data or a missing TTL on cached items in the api-gateway service has caused the 2 MB Valkey maxmemory threshold to be exhausted quickly, resulting in 3241 evicted keys.",
-        "confidence": 0.7,
+        "description": "A sudden surge in traffic or an inefficient caching strategy has driven the hit rate down to 45.2% while completely exhausting the 2MB memory limit, leading to high key eviction rates.",
+        "confidence": 0.3,
         "evidence": [
           "Alert: ValkeyEvictionUnderPressure",
-          "evicted_keys: 3241",
-          "maxmemory_mb: 2",
+          "hit_rate_pct: 45.2",
           "memory_usage_pct: 100",
-          "Tool get_valkey_stats({}) status=succeeded output={\"stats\": {\"connected_clients\": 10, \"evicted_keys\": 630, \"hit_rate_pct\": 81.46, \"maxmemory_mb\": 2.0, \"memory_usage_pct\": 63.52, \"total_keys\": 0, \"used_memory_mb\": 1.27}}"
+          "evicted_keys: 3241",
+          "Tool get_valkey_stats({}) status=succeeded output={\"stats\": {\"connected_clients\": 6, \"evicted_keys\": 1860, \"hit_rate_pct\": 1.76, \"maxmemory_mb\": 2.0, \"memory_usage_pct\": 64.32, \"total_keys\": 0, \"used_memory_mb\": 1.29}}"
         ],
         "status": "proposed"
       }
@@ -43,10 +43,10 @@
       {
         "tool_name": "flush_all",
         "tool_args": {
-          "reason": "Valkey is experiencing a cache eviction storm with 100% memory usage and heavy evictions due to an undersized maxmemory limit, requiring a flush to clear memory pressure."
+          "reason": "Valkey is experiencing an eviction storm and memory pressure due to a low 2MB limit with high key evictions and low hit rates."
         },
         "risk_tier": 2,
-        "rationale": "The top hypothesis indicates that the Valkey instance is under severe memory pressure with 100% memory usage and high evictions. Per the decision framework, cache eviction storms must be resolved using flush_all.",
+        "rationale": "The hypothesis and evidence indicate a severe cache eviction storm with high key evictions and 100% memory pressure. According to the decision framework, cache eviction storms require the flush_all tool to clear out evicted/stuck keys and reclaim memory.",
         "requires_approval": false
       }
     ],
@@ -54,35 +54,35 @@
       {
         "tool_name": "flush_all",
         "tool_args": {
-          "reason": "Valkey is experiencing a cache eviction storm with 100% memory usage and heavy evictions due to an undersized maxmemory limit, requiring a flush to clear memory pressure."
+          "reason": "Valkey is experiencing an eviction storm and memory pressure due to a low 2MB limit with high key evictions and low hit rates."
         },
-        "tool_call_id": "call_1792888164827",
+        "tool_call_id": "call_1792986132209",
         "result": {
           "flushed": true,
-          "reason": "Valkey is experiencing a cache eviction storm with 100% memory usage and heavy evictions due to an undersized maxmemory limit, requiring a flush to clear memory pressure.",
+          "reason": "Valkey is experiencing an eviction storm and memory pressure due to a low 2MB limit with high key evictions and low hit rates.",
           "keys_before": 0,
           "keys_after": 0,
           "success": true,
           "verification_passed": true
         },
         "success": true,
-        "executed_at": "2026-10-25T00:29:24Z",
+        "executed_at": "2026-10-26T03:42:12Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 6292,
-    "prompt_tokens": 5730,
-    "completion_tokens": 562,
-    "cost_usd": 0.003124,
-    "estimated_paid_cost_usd": 0.003124,
+    "tokens_used": 7390,
+    "prompt_tokens": 6379,
+    "completion_tokens": 1011,
+    "cost_usd": 0.0044412,
+    "estimated_paid_cost_usd": 0.0044412,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
-        "calls": 3,
-        "tokens": 6292
+        "calls": 4,
+        "tokens": 7390
       }
     },
-    "wall_clock_seconds": 6.339,
-    "active_seconds": 6.339,
+    "wall_clock_seconds": 35.063,
+    "active_seconds": 35.063,
     "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
     "iterations": 1,

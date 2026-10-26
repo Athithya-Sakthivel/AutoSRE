@@ -11,7 +11,15 @@ export function useIncidentList(
 ) {
   return useQuery<IncidentListResponse, Error>({
     queryKey: ["incidents", params.status, params.limit],
-    queryFn: () => incidentsApi.list(params),
+    queryFn: async () => {
+      const response = await incidentsApi.list(params);
+      // Ensure items is always an array
+      return {
+        ...response,
+        items: Array.isArray(response?.items) ? response.items : [],
+        total: typeof response?.total === "number" ? response.total : 0,
+      };
+    },
     staleTime: 5_000,
     refetchInterval: 5_000,
     retry: 1,
@@ -25,7 +33,8 @@ export function useActiveIncidents() {
     queryKey: ["incidents", "active"],
     queryFn: async () => {
       const response = await incidentsApi.list({ limit: 100 });
-      return response.items.filter(
+      const items = Array.isArray(response?.items) ? response.items : [];
+      return items.filter(
         (item) =>
           item.status === "running" ||
           item.status === "investigating" ||
@@ -43,7 +52,8 @@ export function useResolvedIncidents() {
     queryKey: ["incidents", "resolved"],
     queryFn: async () => {
       const response = await incidentsApi.list({ limit: 100 });
-      return response.items.filter(
+      const items = Array.isArray(response?.items) ? response.items : [];
+      return items.filter(
         (item) => item.status === "resolved" || item.status === "complete",
       );
     },
@@ -58,7 +68,8 @@ export function useAwaitingApprovalIncidents() {
     queryKey: ["incidents", "awaiting_approval"],
     queryFn: async () => {
       const response = await incidentsApi.list({ limit: 100 });
-      return response.items.filter(
+      const items = Array.isArray(response?.items) ? response.items : [];
+      return items.filter(
         (item) =>
           item.requires_human_approval && item.approval_granted === null,
       );

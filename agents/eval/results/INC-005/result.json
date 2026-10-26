@@ -1,29 +1,34 @@
 {
   "incident_id": "INC-005",
-  "completed_at": "2026-10-24T09:28:18Z",
+  "completed_at": "2026-10-26T04:49:23Z",
   "result": {
-    "incident_id": "01ec3c63-2f0c-4854-a9df-9ba15fd1d5c8",
+    "incident_id": "6f2b02f8-a5fd-42f4-a654-064b95192c8f",
     "status": "resolved",
     "phase": "complete",
     "alert_name": "ConsumerLagSpike",
     "service": "ingestion-worker",
     "namespace": "rivulet",
     "severity": "sev2",
-    "started_at": "2026-10-24T09:28:05Z",
+    "started_at": "2026-10-26T04:49:11Z",
     "hypotheses": [
       {
         "id": "H1",
-        "confidence": 0.1,
-        "status": "refuted"
+        "description": "The ingestion-worker service experienced a sudden increase in consumer lag due to a temporary slowdown in message processing capacity for the consumer group 'ingestion-workers' reading from the 'rivulet.orders.in' stream.",
+        "confidence": 0.3,
+        "evidence": [
+          "Tool get_valkey_stream_info({\"stream_key\": \"rivulet.orders.in\"}) status=succeeded output={\"groups\": [], \"stream_key\": \"rivulet.orders.in\", \"stream_length\": 500}",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 797.75, \"name\": \"api-gateway-76976c4568-9tmbl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 797.75, \"name\": \"api-gateway-76976c4568-jmh9j\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 93843.75, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 93843.75, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 60403.75, \"name\": \"ingestion-worker-7467694c85-j6s9c\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 91914.75, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 231.75, \"name\": \"ingestion-worker-86d777c7cd-mxxcj\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 13915.75, \"name\": \"postgres-6b4c959c9-nm8kg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 94017.75, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}], \"total\": 9}"
+        ],
+        "status": "proposed"
       },
       {
         "id": "H2",
-        "confidence": 0.1,
-        "status": "refuted"
-      },
-      {
-        "id": "H3",
-        "confidence": 0.2,
+        "description": "A sudden burst of incoming messages on the 'rivulet.orders.in' stream exceeded the current throughput limits of the ingestion-worker service, resulting in 500 pending messages and a 120-second lag spike.",
+        "confidence": 0.3,
+        "evidence": [
+          "Tool get_valkey_stream_info({\"stream_key\": \"rivulet.orders.in\"}) status=succeeded output={\"groups\": [], \"stream_key\": \"rivulet.orders.in\", \"stream_length\": 500}",
+          "Tool list_pods({\"namespace\": \"rivulet\"}) status=succeeded output={\"pods\": [{\"age_seconds\": 797.75, \"name\": \"api-gateway-76976c4568-9tmbl\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 797.75, \"name\": \"api-gateway-76976c4568-jmh9j\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 93843.75, \"name\": \"frontend-557cbdb47c-5wwgq\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 93843.75, \"name\": \"frontend-557cbdb47c-6gj76\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 60403.75, \"name\": \"ingestion-worker-7467694c85-j6s9c\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}, {\"age_seconds\": 91914.75, \"name\": \"ingestion-worker-7467694c85-m5fb6\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Terminating\"}, {\"age_seconds\": 231.75, \"name\": \"ingestion-worker-86d777c7cd-mxxcj\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Pending\"}, {\"age_seconds\": 13915.75, \"name\": \"postgres-6b4c959c9-nm8kg\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 0, \"status\": \"Running\"}, {\"age_seconds\": 94017.75, \"name\": \"valkey-0\", \"namespace\": \"rivulet\", \"node\": \"kind-worker\", \"restarts\": 1, \"status\": \"Running\"}], \"total\": 9}"
+        ],
         "status": "proposed"
       }
     ],
@@ -36,7 +41,7 @@
           "namespace": "rivulet"
         },
         "risk_tier": 1,
-        "rationale": "Fallback action for category 'consumer_lag' (LLM unavailable or low confidence). Top hypothesis: ",
+        "rationale": "Fallback action for category 'consumer_lag' (LLM unavailable or low confidence). Top hypothesis: The ingestion-worker service experienced a sudden increase in consumer lag due to a temporary slowdo",
         "requires_approval": false
       }
     ],
@@ -48,7 +53,7 @@
           "name": "ingestion-worker",
           "namespace": "rivulet"
         },
-        "tool_call_id": "call_1792834095470",
+        "tool_call_id": "call_1792990162631",
         "result": {
           "name": "ingestion-worker",
           "namespace": "rivulet",
@@ -58,23 +63,23 @@
           "verification_passed": null
         },
         "success": true,
-        "executed_at": "2026-10-24T09:28:15Z",
+        "executed_at": "2026-10-26T04:49:22Z",
         "verification_passed": null
       }
     ],
-    "tokens_used": 12387,
-    "prompt_tokens": 11171,
-    "completion_tokens": 1216,
-    "cost_usd": 0.0052632,
-    "estimated_paid_cost_usd": 0.0075712,
+    "tokens_used": 13372,
+    "prompt_tokens": 10775,
+    "completion_tokens": 2597,
+    "cost_usd": 0.0083152,
+    "estimated_paid_cost_usd": 0.0111992,
     "model_usage": {
       "gemini/gemini-3.5-flash-lite": {
         "calls": 6,
-        "tokens": 12525
+        "tokens": 13763
       }
     },
-    "wall_clock_seconds": 9.574,
-    "active_seconds": 9.574,
+    "wall_clock_seconds": 11.2,
+    "active_seconds": 11.2,
     "backoff_seconds": 0.0,
     "approval_wait_seconds": 0.0,
     "iterations": 2,

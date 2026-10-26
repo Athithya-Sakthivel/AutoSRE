@@ -185,8 +185,10 @@ class LangGraphRunner:
         Raises:
             asyncio.TimeoutError: The wall-clock budget expired.
             LLMBudgetExhaustedError: The provider outage budget expired.
-            Exception: Any unhandled graph exception.
+            Exception: Any unhandled graph exception (excluding GraphInterrupt).
         """
+        from langgraph.errors import GraphInterrupt
+
         timeout = max(
             1.0,
             float(self.max_wall_clock_seconds) - _TIMEOUT_SAFETY_MARGIN_SECONDS,
@@ -196,6 +198,16 @@ class LangGraphRunner:
             await asyncio.wait_for(
                 self._stream_to_completion(initial_state, config),
                 timeout=timeout,
+            )
+
+        except GraphInterrupt as interrupt_exc:
+            # GraphInterrupt is NORMAL — the graph paused for HITL approval.
+            # Log as info, don't re-raise. The graph will resume when
+            # approve_incident() is called with Command(resume=...).
+            logger.info(
+                "Incident %s paused for HITL approval: %s",
+                incident_id,
+                interrupt_exc,
             )
 
         except TimeoutError:
@@ -530,6 +542,9 @@ class LangGraphRunner:
         Uses ONLY Command(resume=...) to resume the graph. The resume value
         becomes the return value of interrupt() in approve_node, which then
         sets approval_granted in the state. No aupdate_state needed.
+
+        The graph resume runs in a background task with a wall-clock timeout
+        to prevent indefinite blocking of the checkpointer connection.
         """
         from langgraph.types import Command
 
@@ -575,15 +590,32 @@ class LangGraphRunner:
                 # DO NOT call aupdate_state — Command(resume=...) is sufficient.
                 # The resume value becomes the return value of interrupt() in approve_node.
                 # approve_node then sets approval_granted based on the resume value.
-                async for update in self.graph.astream(
-                    Command(resume=resume_value),
-                    config=config,
-                    stream_mode="updates",
-                ):
-                    logger.info("approve_incident: Graph update: %s", list(update.keys()))
+                #
+                # Wrap in wait_for to prevent indefinite blocking of the
+                # checkpointer connection. Tools like flush_all or
+                # scale_deployment can take several seconds.
+                async def _stream() -> None:
+                    async for update in self.graph.astream(
+                        Command(resume=resume_value),
+                        config=config,
+                        stream_mode="updates",
+                    ):
+                        logger.info("approve_incident: Graph update: %s", list(update.keys()))
+
+                await asyncio.wait_for(_stream(), timeout=self.max_wall_clock_seconds)
                 logger.info("approve_incident: Graph completed for %s", incident_id)
+            except TimeoutError:
+                logger.error(
+                    "approve_incident: Graph resume timed out after %ds for %s",
+                    self.max_wall_clock_seconds,
+                    incident_id,
+                )
             except Exception as exc:
-                logger.error("approve_incident: Graph resume failed: %s", exc, exc_info=True)
+                logger.error(
+                    "approve_incident: Graph resume failed: %s",
+                    exc,
+                    exc_info=True,
+                )
 
         task = asyncio.create_task(
             _resume_graph(),

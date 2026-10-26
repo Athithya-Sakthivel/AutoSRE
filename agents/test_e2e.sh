@@ -82,6 +82,13 @@ if [[ -n "$INCIDENT_ID" && "$MODE" == "ci" ]]; then
     exit 2
 fi
 
+# Export INCIDENT_ID so Python snippets can read it from the environment.
+# Without this, os.environ.get("INCIDENT_ID", "INC-002") always returns the
+# fallback and every manual-HITL run silently targets INC-002.
+if [[ -n "$INCIDENT_ID" ]]; then
+    export INCIDENT_ID
+fi
+
 find . -path "*/node_modules" -prune -o -type d -name "__pycache__" -exec rm -rf {} +
 
 # -----------------------------------------------------------------------------
@@ -99,7 +106,7 @@ AGENT_PORT="8000"
 UI_HOST="127.0.0.1"
 UI_PORT="5173"
 
-EVAL_AUTO_APPROVE=1
+export EVAL_AUTO_APPROVE=${EVAL_AUTO_APPROVE:-1}
 
 export PY_COLORS=1
 
@@ -785,6 +792,24 @@ PY
             else
                 warn "Manual approval demo finished, but agent took no action or failed (Status: $FINAL_STATUS)"
             fi
+
+            # Keep agent + UI alive so the operator can inspect the result.
+            # Nothing is torn down until the user presses Enter here.
+            echo ""
+            echo "============================================================"
+            echo "  AutoSRE is still running."
+            echo ""
+            echo "  Agent UI:    http://$UI_HOST:$UI_PORT"
+            echo "  Agent API:   http://$AGENT_HOST:$AGENT_PORT/docs"
+            echo "  OpenObserve: http://$AGENT_HOST:15080"
+            echo ""
+            echo "  Inspect the incident at your leisure."
+            echo "  Press ENTER to shut down (or Ctrl+C)."
+            echo "============================================================"
+            echo ""
+            read -r || true
+            echo ""
+            log "Shutting down agent and UI…"
         else
             error "Manual approval verification failed or timed out."
             fail "Manual approval verification failed" 7

@@ -454,10 +454,30 @@ def create_app_factory() -> FastAPI:
 
 
 def _is_reserved_path(full_path: str) -> bool:
-    """Return True when the path is an API route, not an SPA route."""
+    """Return True when the path is an API route, not an SPA route.
+
+    Special case: /incidents/{uuid} is a SPA client route (must serve
+    index.html). Only /incidents (list) and /incidents/{id}/{action}
+    (report, approve) are actual API routes.
+    """
     if not full_path:
         return False
+
+    # Special-case /incidents: the SPA uses /incidents/{uuid} as a client
+    # route (must serve index.html), while /incidents (list) and
+    # /incidents/{id}/report|approve are API routes.
+    if full_path == "incidents":
+        return True
+    if full_path.startswith("incidents/"):
+        remainder = full_path[len("incidents/") :]
+        parts = remainder.split("/")
+        # Single segment after /incidents/ = SPA detail route → serve index.html
+        # Two+ segments (id/report, id/approve) = API route
+        return len(parts) != 1
+
     for prefix in _RESERVED_PREFIXES:
+        if prefix == "incidents":
+            continue  # handled above
         if full_path == prefix or full_path.startswith(prefix + "/"):
             return True
         if prefix.endswith("/") and full_path.startswith(prefix):
@@ -496,6 +516,7 @@ def _mount_spa_if_available(app: FastAPI) -> None:
     from fastapi.responses import FileResponse, HTMLResponse
     from fastapi.staticfiles import StaticFiles
 
+    # Mount /assets for hashed JS/CSS bundles
     assets_dir = ui_dist / "assets"
     if assets_dir.is_dir():
         app.mount(
@@ -504,6 +525,21 @@ def _mount_spa_if_available(app: FastAPI) -> None:
             name="static-assets",
         )
 
+    # Explicit route for favicon (must come before catch-all)
+    # This ensures /autosre-favicon.png returns the PNG file, not index.html
+    favicon_path = ui_dist / "autosre-favicon.png"
+    if favicon_path.is_file():
+
+        @app.get("/autosre-favicon.png", include_in_schema=False)
+        async def serve_favicon() -> FileResponse:
+            """Serve the favicon with correct MIME type and caching."""
+            return FileResponse(
+                str(favicon_path),
+                media_type="image/png",
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
+
+    # Catch-all for SPA client-side routing
     @app.get("/{full_path:path}")
     async def spa_fallback(full_path: str) -> HTMLResponse | FileResponse:
         """Serve the SPA index for any non-API path.

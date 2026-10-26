@@ -2,7 +2,7 @@
 # test_e2e.sh — End-to-end validation for AutoSRE.
 #
 # Three modes:
-#   cd /workspace/agents/ui
+#   cd agents/ui
 #   bash test_e2e.sh                 # --fast:  API contract checks only (~5s)
 #   bash test_e2e.sh --playwright    # API + Playwright E2E tests (~30s)
 #   bash test_e2e.sh --diagnose      # API + Playwright DOM diagnostic (~40s)
@@ -16,7 +16,7 @@
 #                       Set to empty string to disable auth.
 #
 # Prerequisites:
-#   cd /workspace/agents && bash test_e2e.sh --run
+#   cd agents && bash test_e2e.sh --run
 
 set -Eeuo pipefail
 

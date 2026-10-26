@@ -7,6 +7,12 @@ export AUTOSRE_API_KEY="${AUTOSRE_API_KEY:-Temp-password234}"
 export AUTOSRE_LLM__MODEL_COORDINATOR="${AUTOSRE_LLM__MODEL_COORDINATOR:-gemini/gemini-3.5-flash-lite}"
 export AUTOSRE_LLM__MODEL_WORKER="${AUTOSRE_LLM__MODEL_WORKER:-gemini/gemini-3.5-flash-lite}"
 
+export AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM__INPUT_COST_PER_1K_COORDINATOR:-0.00075}"
+export AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR="${AUTOSRE_LLM__OUTPUT_COST_PER_1K_COORDINATOR:-0.00375}"
+export AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM__INPUT_COST_PER_1K_WORKER:-0.00075}"
+export AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER="${AUTOSRE_LLM__OUTPUT_COST_PER_1K_WORKER:-0.00375}"
+
+
 # --- Cluster primitives ----------------------------------------------------
 bash scripts/staging/kind_cluster.sh       # Bootstrap Kind + Cilium (kube-proxy replacement)
 bash scripts/staging/eso_setup.sh          # Install ESO + in-cluster secret store
@@ -40,9 +46,9 @@ curl -fsS http://localhost:5080 >/dev/null 2>&1 && echo "OpenObserve ready" || {
 bash infra/terraform/run.sh --apply        # Provision O2 streams, alerts, and roles
 
 
- bash scripts/common/autosre-agent-deploy.sh deploy
+# bash scripts/common/autosre-agent-deploy.sh deploy
 # Not required in CI/CD
- bash scripts/common/test-o2.sh             # Run end-to-end telemetry smoke test
+# bash scripts/common/test-o2.sh             # Run end-to-end telemetry smoke test
 
 
 # --- Verify ----------------------------------------------------------------

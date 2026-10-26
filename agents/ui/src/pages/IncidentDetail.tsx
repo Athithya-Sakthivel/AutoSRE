@@ -62,6 +62,17 @@ export function IncidentDetailPage(): ReactElement {
 
   const incident = query.data;
 
+  // Defensive defaults for array fields
+  const hypotheses = Array.isArray(incident.hypotheses)
+    ? incident.hypotheses
+    : [];
+  const proposed_actions = Array.isArray(incident.proposed_actions)
+    ? incident.proposed_actions
+    : [];
+  const executed_actions = Array.isArray(incident.executed_actions)
+    ? incident.executed_actions
+    : [];
+
   return (
     <div className="space-y-6">
       <BackLink />
@@ -90,10 +101,10 @@ export function IncidentDetailPage(): ReactElement {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Left column: hypotheses + action history */}
         <div className="space-y-6 lg:col-span-7">
-          <HypothesisList hypotheses={incident.hypotheses} />
+          <HypothesisList hypotheses={hypotheses} />
           <ActionHistory
-            proposed={incident.proposed_actions}
-            executed={incident.executed_actions}
+            proposed={proposed_actions}
+            executed={executed_actions}
           />
         </div>
 
