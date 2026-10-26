@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+
 export AUTOSRE_LLM__API_KEY="${AUTOSRE_LLM__API_KEY:?AUTOSRE_LLM__API_KEY is required}"
 export AUTOSRE_API_KEY="${AUTOSRE_API_KEY:-Temp-password234}"
 
