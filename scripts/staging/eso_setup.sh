@@ -738,50 +738,65 @@ verify_critical_secrets() {
   [[ "$DRY_RUN" == "true" ]] && return 0
   log "verifying critical secret values after sync"
 
+  local max_attempts=10
+  local attempt=1
   local failures=0
 
-  # Verify agent O2 creds are ROOT (not reader)
-  local agent_o2_email
-  agent_o2_email="$(kubectl get secret autosre-agent-secrets -n sre \
-    -o jsonpath='{.data.AUTOSRE_OPENOBSERVE__EMAIL}' 2>/dev/null | base64 -d || echo "")"
+  while (( attempt <= max_attempts )); do
+    failures=0
 
-  if [[ "$agent_o2_email" == "$OBS_ROOT_EMAIL" ]]; then
-    log "  ✓ sre/autosre-agent-secrets AUTOSRE_OPENOBSERVE__EMAIL = $agent_o2_email (root)"
-  else
-    error "  ✗ sre/autosre-agent-secrets AUTOSRE_OPENOBSERVE__EMAIL = '$agent_o2_email' (expected '$OBS_ROOT_EMAIL')"
-    failures=$((failures + 1))
-  fi
+    # Verify agent O2 creds are ROOT (not reader)
+    local agent_o2_email
+    agent_o2_email="$(kubectl get secret autosre-agent-secrets -n sre \
+      -o jsonpath='{.data.AUTOSRE_OPENOBSERVE__EMAIL}' 2>/dev/null | base64 -d || echo "")"
 
-  # Verify eval namespace also has root
-  local eval_o2_email
-  eval_o2_email="$(kubectl get secret openobserve-reader -n eval \
-    -o jsonpath='{.data.email}' 2>/dev/null | base64 -d || echo "")"
+    if [[ "$agent_o2_email" == "$OBS_ROOT_EMAIL" ]]; then
+      log "  ✓ sre/autosre-agent-secrets AUTOSRE_OPENOBSERVE__EMAIL = $agent_o2_email (root)"
+    else
+      warn "  ✗ sre/autosre-agent-secrets AUTOSRE_OPENOBSERVE__EMAIL = '$agent_o2_email' (expected '$OBS_ROOT_EMAIL')"
+      failures=$((failures + 1))
+    fi
 
-  if [[ "$eval_o2_email" == "$OBS_ROOT_EMAIL" ]]; then
-    log "  ✓ eval/openobserve-reader email = $eval_o2_email (root)"
-  else
-    error "  ✗ eval/openobserve-reader email = '$eval_o2_email' (expected '$OBS_ROOT_EMAIL')"
-    failures=$((failures + 1))
-  fi
+    # Verify eval namespace also has root
+    local eval_o2_email
+    eval_o2_email="$(kubectl get secret openobserve-reader -n eval \
+      -o jsonpath='{.data.email}' 2>/dev/null | base64 -d || echo "")"
 
-  # Verify openobserve namespace has root
-  local obs_root_email
-  obs_root_email="$(kubectl get secret openobserve-auth -n openobserve \
-    -o jsonpath='{.data.ZO_ROOT_USER_EMAIL}' 2>/dev/null | base64 -d || echo "")"
+    if [[ "$eval_o2_email" == "$OBS_ROOT_EMAIL" ]]; then
+      log "  ✓ eval/openobserve-reader email = $eval_o2_email (root)"
+    else
+      warn "  ✗ eval/openobserve-reader email = '$eval_o2_email' (expected '$OBS_ROOT_EMAIL')"
+      failures=$((failures + 1))
+    fi
 
-  if [[ "$obs_root_email" == "$OBS_ROOT_EMAIL" ]]; then
-    log "  ✓ openobserve/openobserve-auth ZO_ROOT_USER_EMAIL = $obs_root_email"
-  else
-    error "  ✗ openobserve/openobserve-auth ZO_ROOT_USER_EMAIL = '$obs_root_email' (expected '$OBS_ROOT_EMAIL')"
-    failures=$((failures + 1))
-  fi
+    # Verify openobserve namespace has root
+    local obs_root_email
+    obs_root_email="$(kubectl get secret openobserve-auth -n openobserve \
+      -o jsonpath='{.data.ZO_ROOT_USER_EMAIL}' 2>/dev/null | base64 -d || echo "")"
 
-  if [[ "$failures" -gt 0 ]]; then
-    die "Verification failed: $failures critical secret(s) have wrong values"
-  fi
+    if [[ "$obs_root_email" == "$OBS_ROOT_EMAIL" ]]; then
+      log "  ✓ openobserve/openobserve-auth ZO_ROOT_USER_EMAIL = $obs_root_email"
+    else
+      warn "  ✗ openobserve/openobserve-auth ZO_ROOT_USER_EMAIL = '$obs_root_email' (expected '$OBS_ROOT_EMAIL')"
+      failures=$((failures + 1))
+    fi
 
-  log "all critical secrets verified"
+    if [[ "$failures" -eq 0 ]]; then
+      log "all critical secrets verified (attempt $attempt/$max_attempts)"
+      return 0
+    fi
+
+    if (( attempt < max_attempts )); then
+      warn "verification failed ($failures issues), retrying in 3s... (attempt $attempt/$max_attempts)"
+      sleep 3
+    fi
+
+    attempt=$((attempt + 1))
+  done
+
+  die "Verification failed after $max_attempts attempts: $failures critical secret(s) have wrong values"
 }
+
 
 # ------------------------------------------------------------------------------
 # Summary

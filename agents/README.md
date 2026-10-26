@@ -203,5 +203,3 @@ In local Kind staging, OpenObserve is configured with `ZO_SKIP_SSRF_CHECKS=true`
 3. Deploy AutoSRE agent (with PostgreSQL persistence).
 4. Apply Terraform alerting configuration.
 5. Trigger chaos incident to verify end-to-end flow.
-
----
