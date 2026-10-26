@@ -114,7 +114,7 @@ Reference 15-scenario run:
 | Actual cost | $0.13 |
 | Projected paid-tier | $0.16 |
 | Total tokens | 191,393 |
-| Model | gemini-2.5-flash-lite (69 calls) |
+| Model | gemini/gemini-3.5-flash-lite (69 calls) |
 
 Against documented per-incident manual baselines (≈16 min average across resolvable scenarios), mean active resolution time fell by 98.1%. Those baselines are documented estimates for each failure class, not measured human trials — the absolute figures above are the primary result.
 
